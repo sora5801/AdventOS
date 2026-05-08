@@ -1,0 +1,24 @@
+# Build artifacts
+*.o
+*.elf
+*.bin
+*.img
+
+# mkfs.py temp extracts
+_tmp_*.bin
+
+# Test / debug output
+*.log
+qemu.log
+
+# Session-1 toolchain probe scratch dir
+_probe/
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code per-user state
+.claude/
