@@ -102,4 +102,5 @@ cat fs.img >> os.img
 echo "        os.img = $(stat -c%s os.img) bytes  (boot + kernel + FS @ LBA $fs_lba)"
 
 echo "OK. Run with:"
-echo "    qemu-system-i386 -drive format=raw,file=os.img -serial stdio -m 32"
+echo "    qemu-system-i386 -drive format=raw,file=os.img -serial stdio -m 32 \\"
+echo "        -netdev user,id=net0 -device rtl8139,netdev=net0,mac=52:54:00:12:34:56"

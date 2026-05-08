@@ -23,6 +23,7 @@
 #include "ata.h"
 #include "rtc.h"
 #include "fs.h"
+#include "net.h"
 #include "shell.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
@@ -80,6 +81,9 @@ void kmain(uint32_t boot_drive) {
     /* Mask everything except IRQ0 (PIT) and IRQ1 (keyboard) which their
      * drivers will unmask when ready. */
     for (int i = 0; i < 16; i++) pic_set_mask((uint8_t)i);
+    /* IRQ 2 is the master-side cascade for slave-PIC lines (8..15).
+     * Without it unmasked, the master never sees IRQ11 (RTL8139) etc. */
+    pic_clear_mask(2);
     kputs("ok\n");
 
     kputs("[boot] starting PIT @ 100Hz... ");
@@ -152,6 +156,11 @@ void kmain(uint32_t boot_drive) {
 
     kputs("[boot] enabling interrupts\n");
     __asm__ volatile ("sti");
+
+    /* NIC IRQs need to be live before init can succeed (the link-up
+     * pre-fills the MAC via PIO, but later RX is IRQ-driven). */
+    kputs("[boot] starting network stack\n");
+    net_init();
 
     /* Sanity beep: short delay, prove the timer is ticking */
     pit_sleep(50);

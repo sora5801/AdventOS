@@ -15,6 +15,10 @@
 #include "elf.h"
 #include "mutex.h"
 #include "serial.h"
+#include "net.h"
+#include "arp.h"
+#include "ip.h"
+#include "icmp.h"
 #include "../include/io.h"
 
 extern uint8_t up1_start[];
@@ -58,6 +62,9 @@ static void cmd_help(void) {
     kputs("  ls            - list files on AdventFS\n");
     kputs("  cat NAME      - dump first 128 bytes of a file\n");
     kputs("  exec NAME     - load + run an ELF program from the filesystem\n");
+    kputs("  ifconfig      - show NIC + IP configuration\n");
+    kputs("  arp           - show ARP cache  (arp WHO sends a request)\n");
+    kputs("  ping IP       - send ICMP echo request, wait for reply\n");
     kputs("  kfree A       - free heap block at address A\n");
     kputs("  kmtest        - alloc + free demo (shows coalescing)\n");
     kputs("  ata read N    - read sector N of primary disk\n");
@@ -531,6 +538,121 @@ static void spawn_user_task(const uint8_t *src, size_t len, const char *name) {
             (unsigned)(uintptr_t)code_page);
 }
 
+static int parse_ipv4(const char *s, struct ip_addr *out) {
+    int idx = 0;
+    int v   = 0;
+    int saw_digit = 0;
+    while (*s && idx < 4) {
+        if (*s >= '0' && *s <= '9') {
+            v = v * 10 + (*s - '0');
+            if (v > 255) return -1;
+            saw_digit = 1;
+        } else if (*s == '.') {
+            if (!saw_digit) return -1;
+            out->b[idx++] = (uint8_t)v;
+            v = 0;
+            saw_digit = 0;
+        } else {
+            return -1;
+        }
+        s++;
+    }
+    if (!saw_digit || idx != 3) return -1;
+    out->b[3] = (uint8_t)v;
+    return 0;
+}
+
+static void cmd_ifconfig(void) {
+    if (!g_net_up) {
+        kputs("ifconfig: NIC not initialized (no RTL8139?)\n");
+        return;
+    }
+    kputs("eth0:\n");
+    kputs("    HWaddr  ");  net_print_mac(&g_my_mac);       kputc('\n');
+    kputs("    inet    ");  net_print_ip (&g_my_ip);        kputc('\n');
+    kputs("    netmask ");  net_print_ip (&g_subnet_mask);  kputc('\n');
+    kputs("    gateway ");  net_print_ip (&g_gateway_ip);   kputc('\n');
+}
+
+static void cmd_arp(const char *arg) {
+    if (!g_net_up) { kputs("arp: NIC not initialized\n"); return; }
+
+    if (!*arg) { arp_print_cache(); return; }
+
+    struct ip_addr target;
+    if (parse_ipv4(arg, &target) != 0) {
+        kprintf("arp: bad address '%s'\n", arg);
+        return;
+    }
+    arp_send_request(&target);
+    /* Wait up to ~1s for the reply to come in. */
+    struct mac_addr mac;
+    for (int i = 0; i < 100; i++) {
+        if (arp_lookup(&target, &mac) == 0) {
+            kputs("arp: ");  net_print_ip(&target);
+            kputs("  ->  "); net_print_mac(&mac);
+            kputc('\n');
+            return;
+        }
+        pit_sleep(10);
+    }
+    kputs("arp: timeout\n");
+}
+
+static void cmd_ping(const char *arg) {
+    if (!g_net_up) { kputs("ping: NIC not initialized\n"); return; }
+    if (!*arg)     { kputs("ping: usage: ping <ip>\n"); return; }
+
+    struct ip_addr target;
+    if (parse_ipv4(arg, &target) != 0) {
+        kprintf("ping: bad address '%s'\n", arg);
+        return;
+    }
+
+    /* If the target's MAC isn't cached, run an ARP first. ip_send
+     * will probe ARP itself (returning -2) but we want a clear
+     * "ARP timeout" diagnostic distinct from "ICMP timeout". */
+    struct ip_addr  nexthop = net_is_local(&target) ? target : g_gateway_ip;
+    struct mac_addr mac;
+    if (arp_lookup(&nexthop, &mac) != 0) {
+        arp_send_request(&nexthop);
+        for (int i = 0; i < 50; i++) {
+            if (arp_lookup(&nexthop, &mac) == 0) break;
+            pit_sleep(10);
+        }
+        if (arp_lookup(&nexthop, &mac) != 0) {
+            kputs("ping: ARP resolution failed\n");
+            return;
+        }
+    }
+
+    static uint16_t seq = 0;
+    seq++;
+    g_ping_received = 0;
+
+    uint32_t t_send = pit_ticks();
+    if (icmp_send_echo(&target, 0xBEEF, seq) < 0) {
+        kputs("ping: send failed\n");
+        return;
+    }
+
+    /* 1-second timeout, polled at the same 10 ms granularity. */
+    for (int i = 0; i < 100; i++) {
+        if (g_ping_received && g_ping_last_seq == seq) break;
+        pit_sleep(10);
+    }
+
+    if (g_ping_received && g_ping_last_seq == seq) {
+        uint32_t dt = g_ping_last_tick - t_send;
+        kputs("PONG from ");
+        net_print_ip(&target);
+        kprintf("  seq=%u  time=%u ms\n",
+                (unsigned)seq, (unsigned)(dt * 10));   /* ticks → ms at 100 Hz */
+    } else {
+        kputs("ping: timeout\n");
+    }
+}
+
 static void cmd_ls(void) {
     int n = fs_count();
     if (n <= 0) {
@@ -684,6 +806,9 @@ static void run_command(char *line) {
     else if (strcmp(line, "ls")        == 0) cmd_ls();
     else if (strcmp(line, "cat")       == 0) cmd_cat(arg);
     else if (strcmp(line, "exec")      == 0) cmd_exec(arg);
+    else if (strcmp(line, "ifconfig")  == 0) cmd_ifconfig();
+    else if (strcmp(line, "arp")       == 0) cmd_arp(arg);
+    else if (strcmp(line, "ping")      == 0) cmd_ping(arg);
     else if (strcmp(line, "kmalloc") == 0) cmd_kmalloc(arg);
     else if (strcmp(line, "kfree")   == 0) cmd_kfree(arg);
     else if (strcmp(line, "kmtest")  == 0) cmd_kmtest();
