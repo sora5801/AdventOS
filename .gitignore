@@ -7,6 +7,9 @@
 # mkfs.py temp extracts
 _tmp_*.bin
 
+# User-program build artifacts
+user/_obj/
+
 # Test / debug output
 *.log
 qemu.log

@@ -7,7 +7,6 @@
 
 #define USER_STACK_VA   0x40100000u
 #define USER_MIN_VA     0x40000000u   /* refuse to map kernel-area VAs */
-#define PAGE_SIZE       4096u
 
 static int validate_ehdr(const struct elf32_ehdr *h) {
     if (h->ident[0] != 0x7F || h->ident[1] != 'E' ||

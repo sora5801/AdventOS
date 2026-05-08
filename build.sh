@@ -22,9 +22,26 @@ CFLAGS=(
 )
 ASFLAGS=(-m32 -nostdlib -nostartfiles)
 
-mkdir -p boot kernel
+# User programs share the kernel's freestanding constraints, plus
+# -fno-zero-initialized-in-bss so uninitialized globals end up in .data
+# rather than .bss. That keeps filesz == memsz, so the kernel's ELF
+# loader doesn't have to zero-fill anything beyond the file content.
+USER_CFLAGS=(
+    -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector
+    -fno-asynchronous-unwind-tables -fno-unwind-tables
+    -fno-builtin -fno-common -fno-zero-initialized-in-bss
+    -fno-omit-frame-pointer
+    -mno-mmx -mno-sse -mno-sse2 -mno-sse3 -mno-3dnow -mno-avx
+    -mgeneral-regs-only
+    -nostdlib -nostartfiles
+    -O2 -std=gnu11
+    -Wall -Wextra -Wno-unused-parameter
+    -Iuser
+)
 
-echo "[1/5] compile C sources"
+mkdir -p boot kernel user/_obj
+
+echo "[1/7] compile kernel C sources"
 KERNEL_OBJS=()
 for src in kernel/*.c; do
     obj="${src%.c}.o"
@@ -32,7 +49,7 @@ for src in kernel/*.c; do
     KERNEL_OBJS+=("$obj")
 done
 
-echo "[2/5] assemble"
+echo "[2/7] assemble kernel"
 for src in kernel/*.S; do
     obj="${src%.S}.o"
     "$CC" "${ASFLAGS[@]}" -c -o "$obj" "$src"
@@ -40,7 +57,7 @@ for src in kernel/*.S; do
 done
 "$CC" "${ASFLAGS[@]}" -c -o boot/boot.o boot/boot.S
 
-echo "[3/5] link bootloader"
+echo "[3/7] link bootloader"
 "$LD" -m i386pe -T linker_boot.ld -o boot/boot.elf boot/boot.o
 "$OBJCOPY" -O binary -j .text boot/boot.elf boot/boot.bin
 boot_size=$(stat -c%s boot/boot.bin)
@@ -50,15 +67,29 @@ if [ "$boot_size" -ne 512 ]; then
 fi
 echo "        boot.bin = $boot_size bytes"
 
-echo "[4/5] link kernel"
+echo "[4/7] link kernel"
 "$LD" -m i386pe -T linker_kernel.ld -o kernel/kernel.elf "${KERNEL_OBJS[@]}"
 "$OBJCOPY" -O binary -j .text -j .rdata -j .data -j .up1 -j .up2 kernel/kernel.elf kernel/kernel.bin
 echo "        kernel.bin = $(stat -c%s kernel/kernel.bin) bytes"
 
-echo "[5/6] build disk image (boot + kernel)"
+echo "[5/7] build user programs"
+"$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
+"$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
+
+USER_PROGS=(hello count)
+for name in "${USER_PROGS[@]}"; do
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
 
-echo "[6/6] mkfs + append AdventFS at LBA 200"
+echo "[7/7] mkfs + append AdventFS at LBA 200"
 python mkfs.py
 fs_lba=200
 fs_offset=$(( fs_lba * 512 ))
