@@ -3,6 +3,8 @@
 #include "task.h"
 #include "pit.h"
 #include "rtc.h"
+#include "shell.h"
+#include "string.h"
 
 #define USER_STR_MAX 256
 
@@ -71,6 +73,27 @@ void syscall_dispatch(struct registers *r) {
             struct rtc_time t;
             rtc_read(&t);
             ret = (int32_t)rtc_to_epoch(&t);
+            break;
+        }
+        case SYS_READ_LINE: {
+            /* User pointer is dereferenceable directly because we're
+             * still on the user task's CR3 in this syscall handler. */
+            char *user_buf = (char *)(uintptr_t)a;
+            int   cap      = (int)b;
+            if (cap > 1024) cap = 1024;
+            ret = kshell_read_line(user_buf, cap);
+            break;
+        }
+        case SYS_KCMD: {
+            /* Snapshot the user string into kernel memory because
+             * kshell_run_line modifies it (NUL-terminates the verb). */
+            const char *p = (const char *)(uintptr_t)a;
+            char buf[256];
+            int  i;
+            for (i = 0; i < (int)sizeof(buf) - 1 && p[i]; i++) buf[i] = p[i];
+            buf[i] = 0;
+            kshell_run_line(buf);
+            ret = 0;
             break;
         }
         default:

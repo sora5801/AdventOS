@@ -24,6 +24,9 @@
 #include "rtc.h"
 #include "fs.h"
 #include "net.h"
+#include "tcp.h"
+#include "http.h"
+#include "elf.h"
 #include "shell.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
@@ -170,8 +173,35 @@ void kmain(uint32_t boot_drive) {
     task_create(demo_task_a, "demo_a");
     task_create(demo_task_b, "demo_b");
 
+    /* TCP must be ready before the listener registers anything; HTTP
+     * server takes the LISTEN slot on port 80. */
+    tcp_init();
+    kputs("[boot] starting HTTP server on port 80\n");
+    http_init();
+
     kputs("\n");
     banner();
+
+    /* Try to launch the userspace shell as our primary input loop. If
+     * sh.elf isn't on disk for any reason, fall back to the in-kernel
+     * shell so we don't end up with a dead system. */
+    int fd = fs_open("sh.elf");
+    if (fd >= 0) {
+        struct elf_load_result r;
+        if (elf_load(fd, &r) == 0) {
+            struct task *t = task_create_user(r.entry, r.user_esp,
+                                              r.cr3, "sh");
+            if (t) {
+                kputs("[boot] launched userspace shell (sh.elf) as pid ");
+                kprintf("%u\n\n", (unsigned)t->id);
+                /* kmain becomes the idle task — sit forever waking on IRQs. */
+                for (;;) __asm__ volatile ("sti; hlt");
+            }
+        }
+        kputs("[boot] sh.elf load failed; falling back to kernel shell\n");
+    } else {
+        kputs("[boot] sh.elf not found; using kernel shell\n");
+    }
 
     shell_run();
 }

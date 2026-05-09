@@ -1,6 +1,7 @@
 #include "ip.h"
 #include "arp.h"
 #include "icmp.h"
+#include "tcp.h"
 #include "string.h"
 #include "kprintf.h"
 
@@ -68,6 +69,7 @@ void ip_rx(const struct eth_hdr *eth, const void *payload, uint32_t len) {
 
     switch (iph->proto) {
         case IP_PROTO_ICMP: icmp_rx(eth, iph, body, blen); break;
+        case IP_PROTO_TCP:  tcp_rx (iph, body, (int)blen); break;
         default:                                            break;
     }
 }

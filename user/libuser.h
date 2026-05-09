@@ -34,6 +34,8 @@ typedef unsigned int  size_t;
 #define SYS_WRITE_STR  5
 #define SYS_SLEEP_MS   6
 #define SYS_TIME       7
+#define SYS_READ_LINE  8
+#define SYS_KCMD       9
 
 int      sys_write(char c);
 int      sys_getpid(void);
@@ -42,12 +44,16 @@ void     sys_yield(void);
 int      sys_write_str(const char *s);
 void     sys_sleep_ms(uint32_t ms);
 uint32_t sys_time(void);
+int      sys_read_line(char *buf, int cap);
+int      sys_kcmd(const char *line);
 
 void     putchar(char c);
 void     puts(const char *s);
 void     printf(const char *fmt, ...);
 
 size_t   strlen(const char *s);
+int      strcmp(const char *a, const char *b);
+int      strncmp(const char *a, const char *b, size_t n);
 void    *memset(void *p, int c, size_t n);
 void    *memcpy(void *d, const void *s, size_t n);
 

@@ -12,6 +12,8 @@
 #define SYS_WRITE_STR  5   /* (eax=5, ebx=ptr)        -> writes a NUL-term str  */
 #define SYS_SLEEP_MS   6   /* (eax=6, ebx=ms)         -> sleeps + reschedules   */
 #define SYS_TIME       7   /* (eax=7)                 -> UNIX epoch in eax      */
+#define SYS_READ_LINE  8   /* (eax=8, ebx=buf, ecx=n) -> read a line, len in eax*/
+#define SYS_KCMD       9   /* (eax=9, ebx=ptr)        -> run kernel command     */
 
 void syscall_dispatch(struct registers *r);
 

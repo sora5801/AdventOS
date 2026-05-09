@@ -71,6 +71,24 @@ uint32_t sys_time(void) {
     return ret;
 }
 
+int sys_read_line(char *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_READ_LINE), "b"(buf), "c"(cap)
+                      : "memory");
+    return ret;
+}
+
+int sys_kcmd(const char *line) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_KCMD), "b"(line)
+                      : "memory");
+    return ret;
+}
+
 /* ---------- Output --------------------------------------------------- */
 
 void putchar(char c) { sys_write(c); }
@@ -135,6 +153,17 @@ size_t strlen(const char *s) {
     size_t n = 0;
     while (s[n]) n++;
     return n;
+}
+
+int strcmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, size_t n) {
+    while (n && *a && *a == *b) { a++; b++; n--; }
+    if (!n) return 0;
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 void *memset(void *p, int c, size_t n) {

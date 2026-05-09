@@ -749,14 +749,18 @@ static void cmd_panic(void) {
     );
 }
 
-static void read_line(char *buf, size_t cap) {
-    size_t i = 0;
+/* Public version: callable from SYS_READ_LINE. Returns the length
+ * (excluding the NUL). The buffer is filled and the line ends with
+ * \0; the trailing newline is consumed but not stored. */
+int kshell_read_line(char *buf, int cap) {
+    if (cap <= 0) return 0;
+    int i = 0;
     for (;;) {
         char c = keyboard_wait_char();
         if (c == '\n') {
             kputc('\n');
             buf[i] = 0;
-            return;
+            return i;
         }
         if (c == '\b') {
             if (i > 0) { i--; kputc('\b'); }
@@ -769,12 +773,19 @@ static void read_line(char *buf, size_t cap) {
     }
 }
 
+static void read_line(char *buf, size_t cap) {
+    kshell_read_line(buf, (int)cap);
+}
+
 static const char *skip_spaces(const char *s) {
     while (*s == ' ') s++;
     return s;
 }
 
-static void run_command(char *line) {
+/* Public version: callable from SYS_KCMD. Modifies `line` (replaces
+ * the first space with NUL). Caller is responsible for owning the
+ * memory; we don't return anything. */
+void kshell_run_line(char *line) {
     /* Trim leading spaces */
     while (*line == ' ') line++;
     if (*line == 0) return;
@@ -832,6 +843,6 @@ void shell_run(void) {
     for (;;) {
         kputs("advent> ");
         read_line(line, sizeof(line));
-        run_command(line);
+        kshell_run_line(line);
     }
 }

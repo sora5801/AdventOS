@@ -31,6 +31,7 @@ OUT_IMG       = 'fs.img'
 USER_PROGRAMS = [
     ('hello.elf', 'user/_obj/hello.bin'),
     ('count.elf', 'user/_obj/count.bin'),
+    ('sh.elf',    'user/_obj/sh.bin'),
 ]
 
 def make_elf(code, entry_va):
