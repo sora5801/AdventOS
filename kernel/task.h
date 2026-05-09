@@ -95,6 +95,12 @@ struct task {
      * when the user-side malloc calls sys_brk. */
     uint32_t      heap_brk;
 
+    /* Working directory (session 25). Index of the directory entry
+     * in the global FS table that this task's relative paths resolve
+     * against; FS_DIR_ROOT (= 0xFF, defined in fs.h) means the root.
+     * Inherited verbatim by fork; preserved across exec — POSIX. */
+    uint8_t       cwd_dir;
+
     /* mmap regions (session 24). Each entry covers a contiguous,
      * page-aligned range [va_start, va_end) backed by a file at
      * file_offset for file_length bytes (any tail past file_length

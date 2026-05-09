@@ -223,7 +223,7 @@ void kmain(uint32_t boot_drive) {
     } while (0)
 
     /* Boot policy lives in userspace from session 22 onward: kmain
-     * only spawns init.elf, which reads /inittab and forks the
+     * only spawns init.elf, which reads /etc/inittab and forks the
      * actual services (httpd, sh, ...). Tell the task layer init's
      * pid so future orphan reparenting goes there. */
     {

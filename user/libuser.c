@@ -354,6 +354,42 @@ int sys_munmap(void *addr, uint32_t length) {
     return ret;
 }
 
+int sys_mkdir(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MKDIR), "b"(path)
+                      : "memory");
+    return ret;
+}
+
+int sys_chdir(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CHDIR), "b"(path)
+                      : "memory");
+    return ret;
+}
+
+int sys_getcwd(char *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETCWD), "b"(buf), "c"(cap)
+                      : "memory");
+    return ret;
+}
+
+int sys_readdir(const char *dir_path, int *iter, char *name_buf) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_READDIR), "b"(dir_path), "c"(iter), "d"(name_buf)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

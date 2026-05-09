@@ -160,13 +160,13 @@ static int find_service_by_pid(int pid) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    printf("init: pid=%d, reading /inittab\n", sys_getpid());
+    printf("init: pid=%d, reading /etc/inittab\n", sys_getpid());
 
     /* Slurp inittab. */
     static char tab[2048];
-    int n = read_whole_file("inittab", tab, sizeof(tab));
+    int n = read_whole_file("/etc/inittab", tab, sizeof(tab));
     if (n <= 0) {
-        puts("init: cannot open /inittab; nothing to do\n");
+        puts("init: cannot open /etc/inittab; nothing to do\n");
         /* Don't exit — that would cascade kpanic-style "init died".
          * Sit in a wait loop so any orphans can still be reaped. */
     }

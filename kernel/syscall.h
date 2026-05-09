@@ -47,6 +47,10 @@
 #define SYS_FS_FREE_SECTORS 40 /* (eax=40)                  -> count of unallocated FS sectors */
 #define SYS_MMAP         41 /* (eax=41, ebx=fd, ecx=offset, edx=length) -> user VA or 0  */
 #define SYS_MUNMAP       42 /* (eax=42, ebx=addr, ecx=length)            -> 0 or -1     */
+#define SYS_MKDIR        43 /* (eax=43, ebx=path)                        -> 0 or -1     */
+#define SYS_CHDIR        44 /* (eax=44, ebx=path)                        -> 0 or -1     */
+#define SYS_GETCWD       45 /* (eax=45, ebx=buf, ecx=cap)                -> bytes or -1 */
+#define SYS_READDIR      46 /* (eax=46, ebx=dir_path, ecx=&iter, edx=name_buf16) -> idx or -1 */
 
 void syscall_dispatch(struct registers *r);
 

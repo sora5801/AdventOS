@@ -323,6 +323,9 @@ static void cmd_help(void) {
     puts("  forktest          fork() and have child + parent print their pids\n");
     puts("  keys              raw-mode keyboard test (each keystroke = one read)\n");
     puts("  jobs              list background jobs spawned with `&`\n");
+    puts("  pwd               print the current working directory\n");
+    puts("  cd [PATH]         change cwd (defaults to /)\n");
+    puts("  ls [PATH]         list directory entries\n");
     puts("  exit [CODE]       exit the shell\n");
     puts("\n");
     puts("Pipelines and redirection:\n");
@@ -340,6 +343,50 @@ static void cmd_sleep(const char *arg) {
     while (*arg >= '0' && *arg <= '9') { ms = ms * 10 + (*arg - '0'); arg++; }
     if (ms == 0) { puts("sleep: usage: sleep <ms>\n"); return; }
     sys_sleep_ms(ms);
+}
+
+/* `pwd` builtin — print the current working directory. */
+static void cmd_pwd(void) {
+    char buf[128];
+    int n = sys_getcwd(buf, sizeof(buf));
+    if (n < 0) puts("pwd: error\n");
+    else       { puts(buf); puts("\n"); }
+}
+
+/* `cd <path>` builtin. Path is relative to cwd unless it starts with /. */
+static void cmd_cd(const char *arg) {
+    if (!arg || !*arg) arg = "/";
+    if (sys_chdir(arg) < 0) {
+        puts("cd: ");
+        puts(arg);
+        puts(": no such directory\n");
+    }
+}
+
+/* `ls [path]` builtin — list directory contents. */
+static void cmd_ls(const char *arg) {
+    const char *path = (arg && *arg) ? arg : ".";
+
+    /* `.` and `` mean cwd; sys_readdir takes a path. Translate. */
+    char cwd_buf[128];
+    if (path[0] == '.' && path[1] == 0) {
+        sys_getcwd(cwd_buf, sizeof(cwd_buf));
+        path = cwd_buf;
+    }
+
+    int  iter = 0;
+    char name[17];
+    int  shown = 0;
+    for (;;) {
+        int idx = sys_readdir(path, &iter, name);
+        if (idx < 0) break;
+        name[16] = 0;
+        puts("  ");
+        puts(name);
+        puts("\n");
+        shown++;
+    }
+    if (shown == 0) puts("  (empty)\n");
 }
 
 /* `jobs` builtin — list anything we forked with `&`. Entries don't
@@ -804,6 +851,73 @@ static void selftest(void) {
         }
     }
 
+    puts("[t16] hierarchical fs: paths, mkdir, cd, pwd, ls\n");
+    {
+        /* The shell starts at /, inherited from kmain via fork. Prove
+         * the path machinery before we mutate the tree. */
+        char cwd[64];
+        sys_getcwd(cwd, sizeof(cwd));
+        printf("  initial cwd: '%s'\n", cwd);
+
+        /* List the pre-baked /etc directory installed by mkfs.py. */
+        puts("  ls /etc:\n");
+        cmd_ls("/etc");
+
+        /* Read /etc/inittab via absolute path — proves fs_open walks
+         * directory components, not just root entries. */
+        int fd = sys_open("/etc/inittab");
+        if (fd < 0) puts("  open /etc/inittab failed\n");
+        else {
+            char buf[128];
+            int n = sys_read(fd, buf, sizeof(buf) - 1);
+            sys_close(fd);
+            if (n < 0) n = 0;
+            buf[n] = 0;
+            printf("  /etc/inittab (%d bytes):\n%s", n, buf);
+        }
+
+        /* mkdir /tmp, cd into it, write a file, read it back via both
+         * relative and absolute paths. */
+        if (sys_mkdir("/tmp") < 0) puts("  mkdir /tmp failed (already exists?)\n");
+        else                       puts("  mkdir /tmp ok\n");
+
+        if (sys_chdir("/tmp") < 0) puts("  cd /tmp failed\n");
+        else {
+            sys_getcwd(cwd, sizeof(cwd));
+            printf("  cwd after cd /tmp: '%s'\n", cwd);
+        }
+
+        /* fs_write_all takes a path now — pass a bare basename so the
+         * cwd-relative rule fires and the file lands in /tmp. */
+        const char *body = "hi from /tmp\n";
+        if (sys_fs_write("note.txt", body, (uint32_t)strlen(body)) < 0)
+            puts("  fs_write note.txt failed\n");
+        else
+            puts("  wrote note.txt (relative -> /tmp/note.txt)\n");
+
+        /* Read via the absolute path to confirm it really is in /tmp. */
+        fd = sys_open("/tmp/note.txt");
+        if (fd >= 0) {
+            char rb[64];
+            int n = sys_read(fd, rb, sizeof(rb) - 1);
+            sys_close(fd);
+            if (n < 0) n = 0;
+            rb[n] = 0;
+            printf("  read /tmp/note.txt (%d bytes): %s", n, rb);
+        }
+
+        puts("  ls /tmp:\n");
+        cmd_ls("/tmp");
+
+        puts("  ls /:\n");
+        cmd_ls("/");
+
+        /* Walk back to root for the post-selftest prompt loop. */
+        sys_chdir("/");
+        sys_getcwd(cwd, sizeof(cwd));
+        printf("  cwd after cd /: '%s'\n", cwd);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
@@ -857,6 +971,15 @@ int main(int argc, char **argv) {
         if (strcmp(toks[0], "forktest") == 0) { cmd_forktest(); continue; }
         if (strcmp(toks[0], "keys")     == 0) { cmd_keys();     continue; }
         if (strcmp(toks[0], "jobs")     == 0) { cmd_jobs();     continue; }
+        if (strcmp(toks[0], "pwd")      == 0) { cmd_pwd();      continue; }
+        if (strcmp(toks[0], "cd")       == 0) {
+            cmd_cd(ntok > 1 ? toks[1] : "/");
+            continue;
+        }
+        if (strcmp(toks[0], "ls")       == 0) {
+            cmd_ls(ntok > 1 ? toks[1] : "");
+            continue;
+        }
         if (strcmp(toks[0], "sleep")    == 0) {
             cmd_sleep(ntok > 1 ? toks[1] : "");
             continue;

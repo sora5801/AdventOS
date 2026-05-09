@@ -70,6 +70,10 @@ typedef unsigned int   size_t;
 #define SYS_FS_FREE_SECTORS 40
 #define SYS_MMAP         41
 #define SYS_MUNMAP       42
+#define SYS_MKDIR        43
+#define SYS_CHDIR        44
+#define SYS_GETCWD       45
+#define SYS_READDIR      46
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -226,6 +230,17 @@ uint32_t sys_fs_free_sectors(void);
  * MAP_PRIVATE, fd, offset) — writes don't propagate back to disk. */
 void    *sys_mmap   (int fd, uint32_t offset, uint32_t length);
 int      sys_munmap (void *addr, uint32_t length);
+
+/* Hierarchical-FS plumbing (session 25). Path semantics match POSIX
+ * conventions: leading `/` = absolute, otherwise relative to the
+ * task's cwd. mkdir requires the parent path to already exist.
+ * sys_readdir takes a directory path and an opaque iterator (start
+ * with *iter = 0); each call returns the next entry's index and
+ * writes its name (NUL-padded to 16 bytes) into name_buf. -1 ends. */
+int      sys_mkdir   (const char *path);
+int      sys_chdir   (const char *path);
+int      sys_getcwd  (char *buf, int cap);
+int      sys_readdir (const char *dir_path, int *iter, char *name_buf);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

@@ -14,6 +14,10 @@
 #include "signal.h"
 #include "../include/io.h"
 
+/* fs.h has FS_DIR_ROOT but `task.h` can't include `fs.h` cleanly
+ * (would be circular). The literal 0xFF is the same constant. */
+#define TASK_CWD_ROOT  0xFFu
+
 extern void task_switch(uint32_t *old_esp, uint32_t new_esp);
 extern void fork_child_return(void);     /* asm trampoline in task_switch.S */
 
@@ -49,6 +53,7 @@ void task_init(void) {
     g_tasks[0].next        = &g_tasks[0];
     g_tasks[0].switches_in = 1;
     g_tasks[0].cr3         = g_kernel_cr3;
+    g_tasks[0].cwd_dir     = TASK_CWD_ROOT;
     strncpy(g_tasks[0].name, "kmain", TASK_NAME_MAX - 1);
 
     g_current = &g_tasks[0];
@@ -129,6 +134,9 @@ struct task *task_create(task_fn entry, const char *name) {
      * loaded by the page fault handler. */
     for (int i = 0; i < TASK_MMAP_MAX; i++) t->mmaps[i].in_use = 0;
     t->mmap_brk = USER_MMAP_START;
+
+    /* cwd defaults to / (session 25). */
+    t->cwd_dir = TASK_CWD_ROOT;
 
     /* Splice into the round-robin list right after current. */
     __asm__ volatile ("cli");
@@ -474,6 +482,9 @@ struct task *task_fork(struct registers *parent_regs) {
      *     populated independently in each task. */
     for (int i = 0; i < TASK_MMAP_MAX; i++) child->mmaps[i] = parent->mmaps[i];
     child->mmap_brk = parent->mmap_brk;
+
+    /* 5f. Inherit cwd (session 25). POSIX. */
+    child->cwd_dir = parent->cwd_dir;
 
     /* 5d. Inherit job-control state (session 20). POSIX: fork
      *     preserves both pgid and sid. setpgid is used by the

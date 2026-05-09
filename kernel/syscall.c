@@ -569,6 +569,116 @@ void syscall_dispatch(struct registers *r) {
             ret = mmap_unregister(addr, len);
             break;
         }
+        case SYS_MKDIR: {
+            const char *upath = (const char *)(uintptr_t)a;
+            char path[128];
+            int  i;
+            for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) path[i] = upath[i];
+            path[i] = 0;
+            int rc = fs_mkdir(path);
+            ret = (rc < 0) ? -1 : 0;
+            break;
+        }
+        case SYS_CHDIR: {
+            const char *upath = (const char *)(uintptr_t)a;
+            char path[128];
+            int  i;
+            for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) path[i] = upath[i];
+            path[i] = 0;
+
+            /* "/" means root; anything else has to resolve to an
+             * existing directory entry. */
+            int target;
+            if (path[0] == '/' && path[1] == 0) {
+                target = -1;     /* sentinel for ROOT */
+            } else {
+                target = fs_open(path);
+                if (target < 0) { ret = -1; break; }
+                if (fs_entry_type(target) != FS_TYPE_DIR) {
+                    ret = -1; break;
+                }
+            }
+            task_current()->cwd_dir = (target < 0) ? FS_DIR_ROOT
+                                                   : (uint8_t)target;
+            ret = 0;
+            break;
+        }
+        case SYS_GETCWD: {
+            char *ubuf = (char *)(uintptr_t)a;
+            int   cap  = (int)b;
+            if (cap <= 0) { ret = -1; break; }
+
+            /* Walk parent pointers from cwd to root, collecting
+             * names; then emit them in reverse order with leading
+             * slashes. */
+            uint8_t cur = task_current()->cwd_dir;
+            if (cur == FS_DIR_ROOT) {
+                if (cap < 2) { ret = -1; break; }
+                ubuf[0] = '/'; ubuf[1] = 0;
+                ret = 1;
+                break;
+            }
+            int idxs[16];
+            int n = 0;
+            while (cur != FS_DIR_ROOT && n < 16) {
+                idxs[n++] = cur;
+                int p = fs_entry_parent(cur);
+                if (p < 0) { n = -1; break; }
+                cur = (uint8_t)p;
+            }
+            if (n < 0) { ret = -1; break; }
+
+            int off = 0;
+            for (int j = n - 1; j >= 0; j--) {
+                if (off + 1 >= cap) { ret = -1; goto getcwd_done; }
+                ubuf[off++] = '/';
+                const char *nm = fs_name(idxs[j]);
+                for (int k = 0; k < FS_NAME_MAX && nm[k]; k++) {
+                    if (off + 1 >= cap) { ret = -1; goto getcwd_done; }
+                    ubuf[off++] = nm[k];
+                }
+            }
+            ubuf[off] = 0;
+            ret = off;
+        getcwd_done:
+            break;
+        }
+        case SYS_READDIR: {
+            const char *udir = (const char *)(uintptr_t)a;
+            int        *uiter = (int *)(uintptr_t)b;
+            char       *uname = (char *)(uintptr_t)c;
+
+            char path[64];
+            int  i;
+            for (i = 0; i < (int)sizeof(path) - 1 && udir[i]; i++) path[i] = udir[i];
+            path[i] = 0;
+
+            /* Resolve path to a directory index (or ROOT). */
+            int dir_idx;
+            if (path[0] == '/' && path[1] == 0) {
+                dir_idx = -1;       /* ROOT sentinel for fs_dir_iter */
+            } else {
+                dir_idx = fs_open(path);
+                if (dir_idx < 0)                       { ret = -1; break; }
+                if (fs_entry_type(dir_idx) != FS_TYPE_DIR) { ret = -1; break; }
+            }
+
+            int it = uiter ? *uiter : 0;
+            int next = fs_dir_iter(dir_idx, &it);
+            if (uiter) *uiter = it;
+            if (next < 0) { ret = -1; break; }
+
+            /* Copy the matched entry's name back to user — exactly
+             * 16 bytes, NUL-padded to match the on-disk layout. */
+            const char *nm = fs_name(next);
+            if (uname) {
+                int k;
+                for (k = 0; k < FS_NAME_MAX && nm[k]; k++) uname[k] = nm[k];
+                if (k < FS_NAME_MAX) uname[k] = 0;
+            }
+            ret = next;
+            break;
+        }
         case SYS_DNS_RESOLVE: {
             const char *uname = (const char *)(uintptr_t)a;
             uint8_t    *uout  = (uint8_t *)(uintptr_t)b;
