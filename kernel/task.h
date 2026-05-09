@@ -28,6 +28,7 @@ enum {
     FD_PIPE_R,
     FD_PIPE_W,
     FD_TMPFS,
+    FD_PROCFS,        /* synthesized /proc files; obj_idx = (kind<<16)|pid */
 };
 
 struct task_fd {

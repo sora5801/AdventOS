@@ -24,6 +24,8 @@
 #include "rtc.h"
 #include "fs.h"
 #include "bcache.h"
+#include "vfs.h"
+#include "procfs.h"
 #include "net.h"
 #include "udp.h"
 #include "dhcp.h"
@@ -158,6 +160,16 @@ void kmain(uint32_t boot_drive) {
 
     kputs("[boot] mounting AdventFS... ");
     fs_init();
+
+    /* Bring the VFS layer up: register the rootfs (the on-disk
+     * AdventFS) at "/" and the synthetic procfs at "/proc". From
+     * here on the syscall layer goes through vfs_open / vfs_read
+     * etc. instead of calling fs.c directly. */
+    kputs("[boot] mounting VFS... ");
+    vfs_init();
+    vfs_mount("/",     "rootfs", fs_rootfs_ops());
+    vfs_mount("/proc", "procfs", procfs_ops());
+    kputs("ok\n");
 
     {
         struct rtc_time now;

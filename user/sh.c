@@ -1096,6 +1096,88 @@ static void selftest(void) {
         }
     }
 
+    puts("[t19] VFS + /proc: synthesized files, mounts, per-pid dirs\n");
+    {
+        /* Each cat below drives sys_open on the absolute /proc path,
+         * which routes through vfs_open into procfs_open. The fd
+         * comes back with kind=FD_PROCFS; sys_read calls
+         * procfs_read_by_id which regenerates the content fresh. */
+
+        #define CAT_LINE(label, path) do {                                 \
+            puts(label);                                                   \
+            char _line[64];                                                \
+            int  _li = 0;                                                  \
+            const char *_pre = "cat ";                                     \
+            for (int _i = 0; _pre[_i]; _i++) _line[_li++] = _pre[_i];      \
+            for (const char *_p = (path); *_p && _li < 63; _p++)           \
+                _line[_li++] = *_p;                                        \
+            _line[_li] = 0;                                                \
+            char  *_toks[ARG_MAX];                                         \
+            struct pipeline _pl;                                           \
+            int _n = tokenize(_line, _toks, ARG_MAX);                      \
+            if (parse_pipeline(_toks, _n, &_pl) == 0) run_pipeline(&_pl);  \
+        } while (0)
+
+        CAT_LINE("  cat /proc/version:\n",  "/proc/version");
+        CAT_LINE("  cat /proc/uptime:\n",   "/proc/uptime");
+        CAT_LINE("  cat /proc/meminfo:\n",  "/proc/meminfo");
+        CAT_LINE("  cat /proc/cpuinfo:\n",  "/proc/cpuinfo");
+        CAT_LINE("  cat /proc/mounts:\n",   "/proc/mounts");
+        CAT_LINE("  cat /proc/bcache:\n",   "/proc/bcache");
+
+        /* Direct read of /proc/version via sys_open + sys_read. */
+        puts("  direct read of /proc/version:\n");
+        int fd = sys_open("/proc/version");
+        if (fd < 0) puts("    open failed\n");
+        else {
+            char buf[256];
+            int  n = sys_read(fd, buf, sizeof(buf) - 1);
+            sys_close(fd);
+            if (n < 0) n = 0;
+            buf[n] = 0;
+            puts("    "); puts(buf);
+        }
+
+        /* ls /proc — should show the static files plus each live pid. */
+        puts("  ls /proc:\n");
+        cmd_ls("/proc");
+
+        /* Per-pid directory: read our own pid's status. */
+        char pid_status[32];
+        int  o = 0;
+        const char *pre = "/proc/";
+        for (int i = 0; pre[i]; i++) pid_status[o++] = pre[i];
+        int v = sys_getpid();
+        char tmp[8]; int ti = 0;
+        if (v == 0) tmp[ti++] = '0';
+        while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+        while (ti--) pid_status[o++] = tmp[ti];
+        const char *suf = "/status";
+        for (int i = 0; suf[i]; i++) pid_status[o++] = suf[i];
+        pid_status[o] = 0;
+
+        puts("  cat ");
+        puts(pid_status);
+        puts(":\n");
+        fd = sys_open(pid_status);
+        if (fd < 0) puts("    open failed\n");
+        else {
+            char buf[256];
+            int n = sys_read(fd, buf, sizeof(buf) - 1);
+            sys_close(fd);
+            if (n < 0) n = 0;
+            buf[n] = 0;
+            puts(buf);
+        }
+
+        /* ls /  — should now show /proc as a synthetic directory
+         * entry alongside the on-disk rootfs entries. */
+        puts("  ls /  (rootfs entries + mount-point names):\n");
+        cmd_ls("/");
+
+        #undef CAT_LINE
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

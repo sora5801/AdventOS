@@ -17,6 +17,8 @@
 #include "dns.h"
 #include "mmap.h"
 #include "bcache.h"
+#include "vfs.h"
+#include "procfs.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -138,25 +140,27 @@ void syscall_dispatch(struct registers *r) {
          * default handler and gets -1 + an "unknown syscall" log. */
         case SYS_OPEN: {
             const char *uname = (const char *)(uintptr_t)a;
-            char name[FS_NAME_MAX + 1];
+            char name[128];
             int  i;
-            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
+            for (i = 0; i < (int)sizeof(name) - 1 && uname[i]; i++) name[i] = uname[i];
             name[i] = 0;
 
             struct task *t = task_current();
             int fd = alloc_fd(t);
             if (fd < 0) { ret = -1; break; }
 
-            /* Try the on-disk read-only fs first; fall back to tmpfs
-             * if the name was created earlier via SYS_OPEN_W. */
-            int fs_idx = fs_open(name);
-            if (fs_idx >= 0) {
-                t->fds[fd].kind    = FD_FS;
-                t->fds[fd].obj_idx = fs_idx;
+            /* VFS dispatch: rootfs catches absolute and cwd-relative
+             * paths into /; procfs catches /proc/...; the result's
+             * .kind tells us which fd flavor to install. */
+            struct vfs_inode ino;
+            if (vfs_open(name, &ino) >= 0) {
+                t->fds[fd].kind    = ino.kind;
+                t->fds[fd].obj_idx = ino.obj_idx;
                 t->fds[fd].offset  = 0;
                 ret = fd;
                 break;
             }
+            /* Fall back to tmpfs (the in-RAM scratchpad backing `>`). */
             int tmp_idx = tmpfs_open(name);
             if (tmp_idx >= 0) {
                 t->fds[fd].kind    = FD_TMPFS;
@@ -212,6 +216,15 @@ void syscall_dispatch(struct registers *r) {
                 case FD_TMPFS: {
                     int rd = tmpfs_read(e->obj_idx, e->offset,
                                         buf, (uint32_t)n);
+                    if (rd > 0) e->offset += (uint32_t)rd;
+                    ret = rd;
+                    break;
+                }
+                case FD_PROCFS: {
+                    /* /proc files are synthesized fresh on every
+                     * read. obj_idx packs (kind, pid). */
+                    int rd = procfs_read_by_id(e->obj_idx, e->offset,
+                                               buf, (uint32_t)n);
                     if (rd > 0) e->offset += (uint32_t)rd;
                     ret = rd;
                     break;
@@ -576,7 +589,7 @@ void syscall_dispatch(struct registers *r) {
             int  i;
             for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) path[i] = upath[i];
             path[i] = 0;
-            int rc = fs_mkdir(path);
+            int rc = vfs_mkdir(path);
             ret = (rc < 0) ? -1 : 0;
             break;
         }
@@ -649,34 +662,16 @@ void syscall_dispatch(struct registers *r) {
             int        *uiter = (int *)(uintptr_t)b;
             char       *uname = (char *)(uintptr_t)c;
 
-            char path[64];
+            char path[128];
             int  i;
             for (i = 0; i < (int)sizeof(path) - 1 && udir[i]; i++) path[i] = udir[i];
             path[i] = 0;
 
-            /* Resolve path to a directory index (or ROOT). */
-            int dir_idx;
-            if (path[0] == '/' && path[1] == 0) {
-                dir_idx = -1;       /* ROOT sentinel for fs_dir_iter */
-            } else {
-                dir_idx = fs_open(path);
-                if (dir_idx < 0)                       { ret = -1; break; }
-                if (fs_entry_type(dir_idx) != FS_TYPE_DIR) { ret = -1; break; }
-            }
-
+            /* VFS dispatch handles rootfs entries, /proc files, and
+             * synthesizes mount-point names when listing /. */
             int it = uiter ? *uiter : 0;
-            int next = fs_dir_iter(dir_idx, &it);
+            int next = vfs_readdir(path, &it, uname);
             if (uiter) *uiter = it;
-            if (next < 0) { ret = -1; break; }
-
-            /* Copy the matched entry's name back to user — exactly
-             * 16 bytes, NUL-padded to match the on-disk layout. */
-            const char *nm = fs_name(next);
-            if (uname) {
-                int k;
-                for (k = 0; k < FS_NAME_MAX && nm[k]; k++) uname[k] = nm[k];
-                if (k < FS_NAME_MAX) uname[k] = 0;
-            }
             ret = next;
             break;
         }
@@ -712,19 +707,19 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_FS_WRITE: {
-            /* Snapshot the name into kernel space so a long-ish
+            /* Snapshot the path into kernel space so a long-ish
              * write that needs many ata_write_sector calls can't be
              * tripped up by user-side state changes mid-call. The
              * data buffer stays user-side: we read it sector-by-
-             * sector via fs_write_all, all on the user task's CR3. */
+             * sector via vfs_write_all, all on the user task's CR3. */
             const char *uname = (const char *)(uintptr_t)a;
             const void *udata = (const void *)(uintptr_t)b;
             uint32_t    n     = c;
-            char name[FS_NAME_MAX + 1];
+            char path[128];
             int  i;
-            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
-            name[i] = 0;
-            ret = fs_write_all(name, udata, n);
+            for (i = 0; i < (int)sizeof(path) - 1 && uname[i]; i++) path[i] = uname[i];
+            path[i] = 0;
+            ret = vfs_write_all(path, udata, n);
             break;
         }
         case SYS_BRK: {

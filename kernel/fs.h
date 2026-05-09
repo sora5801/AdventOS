@@ -95,4 +95,9 @@ int         fs_dir_iter(int dir_idx, int *iter);
 
 uint32_t    fs_free_sectors(void);
 
+/* The rootfs adapter exposed to the VFS layer (session 28). Pass to
+ * vfs_mount to register the on-disk AdventFS as the system root. */
+struct vfs_fs_ops;
+struct vfs_fs_ops *fs_rootfs_ops(void);
+
 #endif

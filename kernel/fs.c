@@ -4,6 +4,7 @@
 #include "task.h"
 #include "kprintf.h"
 #include "string.h"
+#include "vfs.h"
 
 static struct fs_super g_super;        /* 1024 bytes — fits 2 sectors */
 static int             g_initialized;
@@ -394,3 +395,77 @@ int fs_write_all(const char *path, const void *data, uint32_t size) {
     if (fs_write_super() != 0) return -1;
     return 0;
 }
+
+/* ---- VFS adapter (session 28) -------------------------------------- */
+
+/* The rootfs side of the VFS dispatch table. Each entry takes a
+ * RELATIVE-to-mount path; for rootfs the mount is "/", so the rel
+ * path is what comes after the leading slash (or empty for "/"). */
+
+static int rootfs_open(const char *rel, struct vfs_inode *out) {
+    if (rel[0] == 0) {
+        /* "/" — root of rootfs is a directory but has no entry index. */
+        out->kind    = FD_FS;
+        out->obj_idx = (int)FS_DIR_ROOT;     /* sentinel */
+        out->size    = 0;
+        out->is_dir  = 1;
+        return 0;
+    }
+    int idx = fs_open(rel);
+    if (idx < 0) return -1;
+    out->kind    = FD_FS;
+    out->obj_idx = idx;
+    out->size    = fs_size(idx);
+    out->is_dir  = (fs_entry_type(idx) == FS_TYPE_DIR);
+    return 0;
+}
+
+static int rootfs_read(struct vfs_inode *ino, uint32_t offset,
+                       void *buf, uint32_t n) {
+    return fs_read(ino->obj_idx, offset, buf, n);
+}
+
+static int rootfs_readdir(const char *rel, int *iter, char *name_buf) {
+    /* fs_dir_iter wants the dir's entry index. "" or "/" mean root. */
+    int dir_idx;
+    if (rel[0] == 0 || (rel[0] == '/' && rel[1] == 0)) {
+        dir_idx = -1;
+    } else {
+        dir_idx = fs_open(rel);
+        if (dir_idx < 0)                            return -1;
+        if (fs_entry_type(dir_idx) != FS_TYPE_DIR)  return -1;
+    }
+    int it = *iter;
+    int next = fs_dir_iter(dir_idx, &it);
+    *iter = it;
+    if (next < 0) return -1;
+    const char *nm = fs_name(next);
+    if (name_buf) {
+        int k;
+        for (k = 0; k < FS_NAME_MAX && nm[k]; k++) name_buf[k] = nm[k];
+        if (k < FS_NAME_MAX) name_buf[k] = 0;
+    }
+    return next;
+}
+
+static int rootfs_mkdir(const char *rel) {
+    /* fs_mkdir wants an absolute-feeling path (the FS internally
+     * splits on /). Easiest: prepend a slash for paths that need to
+     * land at root, otherwise let fs_mkdir resolve via cwd. The
+     * test set passes either form; we just forward. */
+    return fs_mkdir(rel);
+}
+
+static int rootfs_write_all(const char *rel, const void *data, uint32_t n) {
+    return fs_write_all(rel, data, n);
+}
+
+static struct vfs_fs_ops g_rootfs_ops = {
+    .open      = rootfs_open,
+    .read      = rootfs_read,
+    .readdir   = rootfs_readdir,
+    .mkdir     = rootfs_mkdir,
+    .write_all = rootfs_write_all,
+};
+
+struct vfs_fs_ops *fs_rootfs_ops(void) { return &g_rootfs_ops; }
