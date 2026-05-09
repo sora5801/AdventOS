@@ -125,6 +125,42 @@ int sys_close(int fd) {
     return ret;
 }
 
+int sys_socket(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SOCKET)
+                      : "memory");
+    return ret;
+}
+
+int sys_bind(int fd, int port) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BIND), "b"(fd), "c"(port)
+                      : "memory");
+    return ret;
+}
+
+int sys_listen(int fd, int backlog) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_LISTEN), "b"(fd), "c"(backlog)
+                      : "memory");
+    return ret;
+}
+
+int sys_accept(int fd) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_ACCEPT), "b"(fd)
+                      : "memory");
+    return ret;
+}
+
 /* ---------- Output --------------------------------------------------- */
 
 void putchar(char c) { sys_putchar(c); }

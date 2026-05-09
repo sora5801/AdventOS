@@ -46,8 +46,9 @@ struct tcp_hdr {
 } __attribute__((packed));
 
 struct tcb;
-typedef void (*tcp_recv_cb)(struct tcb *t, const char *data, int len);
-typedef void (*tcp_close_cb)(struct tcb *t);
+typedef void (*tcp_connect_cb)(struct tcb *t);                          /* fires when SYN_RCVD -> ESTABLISHED */
+typedef void (*tcp_recv_cb)   (struct tcb *t, const char *data, int len);
+typedef void (*tcp_close_cb)  (struct tcb *t);
 
 struct tcb {
     int            state;
@@ -63,6 +64,7 @@ struct tcb {
     uint32_t       rcv_isn, rcv_nxt;
 
     /* Application callbacks. */
+    tcp_connect_cb on_connect;
     tcp_recv_cb    on_recv;
     tcp_close_cb   on_close;
 
@@ -74,16 +76,25 @@ struct tcb {
 
 void tcp_init(void);
 
-/* Bind a single listener at `port`. Future SYNs to that port will
- * complete the 3-way handshake and invoke `on_recv` once data
- * arrives. `on_close` fires on connection teardown (either side). */
-int  tcp_listen(uint16_t port, tcp_recv_cb on_recv, tcp_close_cb on_close);
+/* Bind a single listener at `port`. `on_connect` fires the moment the
+ * 3-way handshake completes; `on_recv` fires for each data segment;
+ * `on_close` fires on connection teardown (either side). */
+int  tcp_listen(uint16_t port,
+                tcp_connect_cb on_connect,
+                tcp_recv_cb    on_recv,
+                tcp_close_cb   on_close);
 
 /* Send up to `len` bytes on an established connection. */
 int  tcp_send(struct tcb *t, const void *data, int len);
 
 /* Initiate close (send FIN + ACK). */
 int  tcp_close(struct tcb *t);
+
+/* Helpers for layers that don't have their own TCB pointer. We only
+ * have one TCB total in this minimal stack. */
+int  tcp_send_active (const void *data, int len);
+int  tcp_close_active(void);
+int  tcp_active_state(void);
 
 /* Called by ip_rx when protocol == 6. */
 void tcp_rx(const struct ip_hdr *iph, const void *seg, int len);

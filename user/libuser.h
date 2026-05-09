@@ -40,6 +40,10 @@ typedef unsigned int  size_t;
 #define SYS_READ       11
 #define SYS_WRITE_FD   12
 #define SYS_CLOSE      13
+#define SYS_SOCKET     14
+#define SYS_BIND       15
+#define SYS_LISTEN     16
+#define SYS_ACCEPT     17
 
 /* Single-char console write. The fd-aware variant (`sys_write` below)
  * is what new programs should call; this wraps the legacy SYS_WRITE
@@ -62,6 +66,14 @@ int      sys_open (const char *name);
 int      sys_read (int fd, void *buf, int n);
 int      sys_write(int fd, const void *buf, int n);
 int      sys_close(int fd);
+
+/* BSD-style sockets, but stripped down. No sockaddr structs — the
+ * port is just an int. The fd returned by sys_socket flows through
+ * the same fd table as files; sys_read/write/close work on it. */
+int      sys_socket(void);
+int      sys_bind  (int fd, int port);
+int      sys_listen(int fd, int backlog);
+int      sys_accept(int fd);
 
 void     putchar(char c);
 void     puts(const char *s);

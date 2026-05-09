@@ -16,12 +16,14 @@ enum {
     FD_STDIN,
     FD_STDOUT,
     FD_FS,
+    FD_SOCK,
 };
 
 struct task_fd {
     int      kind;
-    int      fs_idx;       /* used iff kind == FD_FS */
-    uint32_t offset;       /* used iff kind == FD_FS */
+    int      fs_idx;       /* used iff kind == FD_FS    */
+    uint32_t offset;       /* used iff kind == FD_FS    */
+    int      sock_idx;     /* used iff kind == FD_SOCK  */
 };
 
 enum {

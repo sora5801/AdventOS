@@ -80,16 +80,31 @@ static int tcp_send_segment(struct tcb *t, uint8_t flags,
     return ip_send(&t->remote_ip, IP_PROTO_TCP, buf, sizeof(*th) + len);
 }
 
-int tcp_listen(uint16_t port, tcp_recv_cb on_recv, tcp_close_cb on_close) {
+int tcp_listen(uint16_t port,
+               tcp_connect_cb on_connect,
+               tcp_recv_cb    on_recv,
+               tcp_close_cb   on_close) {
     memset(&g_tcb, 0, sizeof(g_tcb));
     g_tcb.state      = TCP_LISTEN;
     g_tcb.local_port = port;
+    g_tcb.on_connect = on_connect;
     g_tcb.on_recv    = on_recv;
     g_tcb.on_close   = on_close;
     g_listen_port    = port;
     g_listening      = 1;
     return 0;
 }
+
+int tcp_send_active(const void *data, int len) {
+    if (g_tcb.state != TCP_ESTABLISHED && g_tcb.state != TCP_CLOSE_WAIT) return -1;
+    return tcp_send(&g_tcb, data, len);
+}
+
+int tcp_close_active(void) {
+    return tcp_close(&g_tcb);
+}
+
+int tcp_active_state(void) { return g_tcb.state; }
 
 int tcp_send(struct tcb *t, const void *data, int len) {
     if (t->state != TCP_ESTABLISHED && t->state != TCP_CLOSE_WAIT) return -1;
@@ -113,11 +128,12 @@ int tcp_close(struct tcb *t) {
 
 static void back_to_listen(struct tcb *t) {
     /* Fully close and re-arm the listener for the next client. */
-    tcp_recv_cb  rcb = t->on_recv;
-    tcp_close_cb ccb = t->on_close;
-    uint16_t     port = g_listen_port;
+    tcp_connect_cb ncb = t->on_connect;
+    tcp_recv_cb    rcb = t->on_recv;
+    tcp_close_cb   ccb = t->on_close;
+    uint16_t       port = g_listen_port;
     if (ccb) ccb(t);
-    if (g_listening) tcp_listen(port, rcb, ccb);
+    if (g_listening) tcp_listen(port, ncb, rcb, ccb);
     else             t->state = TCP_CLOSED;
 }
 
@@ -177,6 +193,7 @@ void tcp_rx(const struct ip_hdr *iph, const void *seg, int len) {
             if (ack != g_tcb.snd_nxt)               return;
             g_tcb.snd_una = ack;
             g_tcb.state   = TCP_ESTABLISHED;
+            if (g_tcb.on_connect) g_tcb.on_connect(&g_tcb);
             /* Fall through: this segment may also have data piggybacked. */
         } /* fallthrough */
         case TCP_ESTABLISHED: {

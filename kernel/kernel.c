@@ -25,7 +25,7 @@
 #include "fs.h"
 #include "net.h"
 #include "tcp.h"
-#include "http.h"
+#include "sock.h"
 #include "elf.h"
 #include "shell.h"
 
@@ -173,39 +173,37 @@ void kmain(uint32_t boot_drive) {
     task_create(demo_task_a, "demo_a");
     task_create(demo_task_b, "demo_b");
 
-    /* TCP must be ready before the listener registers anything; HTTP
-     * server takes the LISTEN slot on port 80. */
+    /* TCP and the socket layer must be ready before any user task
+     * tries to bind/listen. The HTTP server is no longer in-kernel —
+     * it's a userspace task spawned below as `httpd.elf`. */
     tcp_init();
-    kputs("[boot] starting HTTP server on port 80\n");
-    http_init();
+    sock_init();
 
     kputs("\n");
     banner();
 
-    /* Try to launch the userspace shell as our primary input loop. If
-     * sh.elf isn't on disk for any reason, fall back to the in-kernel
-     * shell so we don't end up with a dead system. */
-    int fd = fs_open("sh.elf");
-    if (fd >= 0) {
-        struct elf_load_result r;
-        if (elf_load(fd, &r) == 0) {
-            /* sh.elf is a libuser program; _start expects argc/argv on
-             * the stack even when there's nothing meaningful to pass. */
-            const char *sh_argv[] = { "sh" };
-            elf_setup_args(&r, 1, sh_argv);
-            struct task *t = task_create_user(r.entry, r.user_esp,
-                                              r.cr3, "sh");
-            if (t) {
-                kputs("[boot] launched userspace shell (sh.elf) as pid ");
-                kprintf("%u\n\n", (unsigned)t->id);
-                /* kmain becomes the idle task — sit forever waking on IRQs. */
-                for (;;) __asm__ volatile ("sti; hlt");
-            }
-        }
-        kputs("[boot] sh.elf load failed; falling back to kernel shell\n");
-    } else {
-        kputs("[boot] sh.elf not found; using kernel shell\n");
-    }
+    /* Helper: load + setup args + spawn a single user task. */
+    /* (kept inline since we only call it twice from here)         */
+    #define LAUNCH(path, name) do {                                        \
+        int _fd = fs_open(path);                                           \
+        if (_fd >= 0) {                                                    \
+            struct elf_load_result _r;                                     \
+            if (elf_load(_fd, &_r) == 0) {                                 \
+                const char *_argv[] = { name };                            \
+                elf_setup_args(&_r, 1, _argv);                             \
+                struct task *_t = task_create_user(_r.entry, _r.user_esp,  \
+                                                   _r.cr3, name);          \
+                if (_t) kprintf("[boot] launched %s as pid %u\n",          \
+                                path, (unsigned)_t->id);                   \
+            }                                                              \
+        }                                                                  \
+    } while (0)
 
-    shell_run();
+    LAUNCH("httpd.elf", "httpd");
+    LAUNCH("sh.elf",    "sh");
+    kputc('\n');
+
+    /* If the shell launched, we expect it to drive the system from
+     * here. kmain becomes the idle task and just hlt's forever. */
+    for (;;) __asm__ volatile ("sti; hlt");
 }

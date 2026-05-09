@@ -100,7 +100,10 @@ struct task *task_create(task_fn entry, const char *name) {
     t->is_user = 0;
 
     /* Pre-wire fd 0/1/2 to stdin/stdout/stderr. */
-    for (int i = 0; i < TASK_MAX_FDS; i++) t->fds[i].kind = FD_FREE;
+    for (int i = 0; i < TASK_MAX_FDS; i++) {
+        t->fds[i].kind     = FD_FREE;
+        t->fds[i].sock_idx = -1;
+    }
     t->fds[0].kind = FD_STDIN;
     t->fds[1].kind = FD_STDOUT;
     t->fds[2].kind = FD_STDOUT;

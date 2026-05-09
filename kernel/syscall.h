@@ -18,6 +18,10 @@
 #define SYS_READ       11  /* (eax=11, ebx=fd, ecx=buf, edx=n) -> bytes or 0/-1 */
 #define SYS_WRITE_FD   12  /* (eax=12, ebx=fd, ecx=buf, edx=n) -> bytes or -1   */
 #define SYS_CLOSE      13  /* (eax=13, ebx=fd)           -> 0 or -1             */
+#define SYS_SOCKET     14  /* (eax=14)                   -> fd or -1            */
+#define SYS_BIND       15  /* (eax=15, ebx=fd, ecx=port) -> 0 or -1             */
+#define SYS_LISTEN     16  /* (eax=16, ebx=fd, ecx=back) -> 0 or -1             */
+#define SYS_ACCEPT     17  /* (eax=17, ebx=fd)           -> conn fd or -1       */
 
 void syscall_dispatch(struct registers *r);
 

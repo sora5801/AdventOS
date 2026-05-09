@@ -5,6 +5,7 @@
 #include "rtc.h"
 #include "shell.h"
 #include "fs.h"
+#include "sock.h"
 #include "string.h"
 
 #define USER_STR_MAX 256
@@ -137,6 +138,8 @@ void syscall_dispatch(struct registers *r) {
                                  t->fds[fd].offset, buf, (uint32_t)n);
                 if (rd > 0) t->fds[fd].offset += (uint32_t)rd;
                 ret = rd;
+            } else if (kind == FD_SOCK) {
+                ret = sock_read(t->fds[fd].sock_idx, buf, n);
             } else {
                 ret = -1;
             }
@@ -149,10 +152,16 @@ void syscall_dispatch(struct registers *r) {
 
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
-            if (t->fds[fd].kind != FD_STDOUT)         { ret = -1; break; }
+            int kind = t->fds[fd].kind;
 
-            for (int i = 0; i < n; i++) kputc(buf[i]);
-            ret = n;
+            if (kind == FD_STDOUT) {
+                for (int i = 0; i < n; i++) kputc(buf[i]);
+                ret = n;
+            } else if (kind == FD_SOCK) {
+                ret = sock_write(t->fds[fd].sock_idx, buf, n);
+            } else {
+                ret = -1;
+            }
             break;
         }
         case SYS_CLOSE: {
@@ -160,8 +169,68 @@ void syscall_dispatch(struct registers *r) {
             struct task *t = task_current();
             if (fd < 3 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind == FD_FREE)           { ret = -1; break; }
-            t->fds[fd].kind = FD_FREE;
+            if (t->fds[fd].kind == FD_SOCK) {
+                sock_close(t->fds[fd].sock_idx);
+            }
+            t->fds[fd].kind     = FD_FREE;
+            t->fds[fd].sock_idx = -1;
             ret = 0;
+            break;
+        }
+        case SYS_SOCKET: {
+            int sock_idx = sock_create();
+            if (sock_idx < 0) { ret = -1; break; }
+
+            struct task *t = task_current();
+            int fd;
+            for (fd = 3; fd < TASK_MAX_FDS; fd++) {
+                if (t->fds[fd].kind == FD_FREE) break;
+            }
+            if (fd == TASK_MAX_FDS) { sock_close(sock_idx); ret = -1; break; }
+
+            t->fds[fd].kind     = FD_SOCK;
+            t->fds[fd].sock_idx = sock_idx;
+            ret = fd;
+            break;
+        }
+        case SYS_BIND: {
+            int fd   = (int)a;
+            int port = (int)b;
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
+            ret = sock_bind(t->fds[fd].sock_idx, (uint16_t)port);
+            break;
+        }
+        case SYS_LISTEN: {
+            int fd = (int)a;
+            (void)b;                                 /* backlog ignored */
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
+            ret = sock_listen(t->fds[fd].sock_idx);
+            break;
+        }
+        case SYS_ACCEPT: {
+            int fd = (int)a;
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
+
+            int conn_sock = sock_accept(t->fds[fd].sock_idx);
+            if (conn_sock < 0) { ret = -1; break; }
+
+            int conn_fd;
+            for (conn_fd = 3; conn_fd < TASK_MAX_FDS; conn_fd++) {
+                if (t->fds[conn_fd].kind == FD_FREE) break;
+            }
+            if (conn_fd == TASK_MAX_FDS) {
+                sock_close(conn_sock);
+                ret = -1; break;
+            }
+            t->fds[conn_fd].kind     = FD_SOCK;
+            t->fds[conn_fd].sock_idx = conn_sock;
+            ret = conn_fd;
             break;
         }
         default:

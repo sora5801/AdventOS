@@ -34,6 +34,7 @@ USER_PROGRAMS = [
     ('sh.elf',    'user/_obj/sh.bin'),
     ('cat.elf',   'user/_obj/cat.bin'),
     ('echo.elf',  'user/_obj/echo.bin'),
+    ('httpd.elf', 'user/_obj/httpd.bin'),
 ]
 
 # Raw data files — go on the FS as-is, no ELF wrapper. cat.elf reads
