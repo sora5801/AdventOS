@@ -12,4 +12,9 @@ int  keyboard_has_char(void);
 /* Blocks until a key arrives (uses HLT between checks). */
 char keyboard_wait_char(void);
 
+/* Push raw bytes into the keyboard input ring as if they had been
+ * typed. Used by the TTY layer's SYS_TTY_INJECT to drive raw-mode
+ * tests without needing an actual keyboard / serial peer. */
+void keyboard_inject(const char *bytes, int n);
+
 #endif

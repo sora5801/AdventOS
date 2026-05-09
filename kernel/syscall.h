@@ -32,6 +32,9 @@
 #define SYS_SIGACTION  25  /* (eax=25, ebx=sig, ecx=handler, edx=tramp) -> previous handler */
 #define SYS_SIGRETURN  26  /* (eax=26)                   -> never returns to caller; restores ctx */
 #define SYS_BRK        27  /* (eax=27, ebx=new_brk_or_0) -> current/new heap_brk; 0 means "query" */
+#define SYS_TTY_SET_MODE 28 /* (eax=28, ebx=flags)        -> previous flags */
+#define SYS_TTY_GET_MODE 29 /* (eax=29)                   -> current flags */
+#define SYS_TTY_INJECT   30 /* (eax=30, ebx=ptr, ecx=n)   -> bytes pushed (test helper) */
 
 void syscall_dispatch(struct registers *r);
 

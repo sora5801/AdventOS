@@ -105,6 +105,10 @@ char keyboard_getc(void) {
     return c;
 }
 
+void keyboard_inject(const char *bytes, int n) {
+    for (int i = 0; i < n; i++) buf_push(bytes[i]);
+}
+
 char keyboard_wait_char(void) {
     for (;;) {
         /* Serial input doubles as a console for headless QEMU usage. */

@@ -263,6 +263,7 @@ static void cmd_help(void) {
     puts("  time              print epoch via SYS_TIME\n");
     puts("  sleep MS          pause MS milliseconds\n");
     puts("  forktest          fork() and have child + parent print their pids\n");
+    puts("  keys              raw-mode keyboard test (each keystroke = one read)\n");
     puts("  exit [CODE]       exit the shell\n");
     puts("\n");
     puts("Pipelines and redirection:\n");
@@ -280,6 +281,28 @@ static void cmd_sleep(const char *arg) {
     while (*arg >= '0' && *arg <= '9') { ms = ms * 10 + (*arg - '0'); arg++; }
     if (ms == 0) { puts("sleep: usage: sleep <ms>\n"); return; }
     sys_sleep_ms(ms);
+}
+
+/* Interactive raw-mode demo — flips stdin to raw, reads single
+ * keystrokes, prints each as char + hex. Exit on Enter (\r or \n).
+ * Restores cooked mode on exit so the shell's prompt loop survives. */
+static void cmd_keys(void) {
+    puts("Press keys (Enter to exit). Each keystroke arrives raw,\n");
+    puts("not waiting for newline — that's the whole point of raw mode.\n");
+
+    uint32_t prev = tty_get_mode();
+    tty_set_mode(TTY_RAW);
+    for (;;) {
+        char c;
+        int  n = sys_read(0, &c, 1);
+        if (n <= 0) continue;
+        if (c == '\n' || c == '\r') break;
+        printf("  '%c'  0x%02x\n",
+               (c >= 32 && c < 127) ? c : '?',
+               (uint32_t)(unsigned char)c);
+    }
+    tty_set_mode(prev);
+    puts("(canonical mode restored)\n");
 }
 
 static void cmd_forktest(void) {
@@ -448,6 +471,33 @@ static void selftest(void) {
         free(big);
     }
 
+    puts("[t8] tty: raw-mode read with injection\n");
+    {
+        uint32_t prev_mode = tty_get_mode();
+        printf("  current mode: 0x%x  (default = 0x%x)\n",
+               prev_mode, (uint32_t)TTY_DEFAULT);
+
+        /* Switch to raw mode (no canon, no echo) and prove a single
+         * sys_read returns immediately with whatever's available —
+         * not waiting for a newline like canonical does. */
+        tty_set_mode(TTY_RAW);
+        printf("  set raw: now 0x%x\n", tty_get_mode());
+
+        /* Inject six bytes WITHOUT a trailing newline. In canonical
+         * mode this would block forever; in raw mode the next sys_read
+         * returns them straight away. */
+        tty_inject("ABCxyz", 6);
+
+        char buf[16];
+        int n = sys_read(0, buf, sizeof(buf) - 1);
+        buf[n] = 0;
+        printf("  raw sys_read(stdin, ., 15) -> %d bytes = '%s'\n", n, buf);
+
+        /* Restore canonical so the prompt loop after selftest works. */
+        tty_set_mode(prev_mode);
+        printf("  restored: now 0x%x\n", tty_get_mode());
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
@@ -491,6 +541,7 @@ int main(int argc, char **argv) {
         if (strcmp(toks[0], "pid")      == 0) { cmd_pid();   continue; }
         if (strcmp(toks[0], "time")     == 0) { cmd_time();  continue; }
         if (strcmp(toks[0], "forktest") == 0) { cmd_forktest(); continue; }
+        if (strcmp(toks[0], "keys")     == 0) { cmd_keys();     continue; }
         if (strcmp(toks[0], "sleep")    == 0) {
             cmd_sleep(ntok > 1 ? toks[1] : "");
             continue;

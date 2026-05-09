@@ -28,6 +28,7 @@
 #include "sock.h"
 #include "pipe.h"
 #include "tmpfs.h"
+#include "tty.h"
 #include "elf.h"
 #include "shell.h"
 
@@ -182,6 +183,7 @@ void kmain(uint32_t boot_drive) {
     sock_init();
     pipe_init();
     tmpfs_init();
+    tty_init();
 
     kputs("\n");
     banner();

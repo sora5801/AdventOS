@@ -13,6 +13,7 @@
 #include "kmalloc.h"
 #include "paging.h"
 #include "pmm.h"
+#include "tty.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -182,7 +183,10 @@ void syscall_dispatch(struct registers *r) {
             struct task_fd *e = &t->fds[fd];
             switch (e->kind) {
                 case FD_STDIN:
-                    ret = kshell_read_line(buf, n);
+                    /* Mode-aware: canonical or raw, depending on
+                     * tty state. SYS_READ_LINE bypasses this and
+                     * always uses kshell_read_line. */
+                    ret = tty_read(buf, n);
                     break;
                 case FD_FS: {
                     int rd = fs_read(e->obj_idx, e->offset, buf, (uint32_t)n);
@@ -457,6 +461,28 @@ void syscall_dispatch(struct registers *r) {
              * incorrect). */
             signal_sigreturn(r);
             return;
+        }
+        case SYS_TTY_SET_MODE: {
+            uint32_t prev = tty_get_mode();
+            tty_set_mode((uint32_t)a);
+            ret = (int32_t)prev;
+            break;
+        }
+        case SYS_TTY_GET_MODE: {
+            ret = (int32_t)tty_get_mode();
+            break;
+        }
+        case SYS_TTY_INJECT: {
+            const char *p = (const char *)(uintptr_t)a;
+            int len = (int)b;
+            if (len < 0)         { ret = -1; break; }
+            if (len > 256)       len = 256;
+            /* Snapshot into kernel space — avoids the user
+             * potentially racing the inject against an unmap. */
+            char buf[256];
+            for (int i = 0; i < len; i++) buf[i] = p[i];
+            ret = tty_inject(buf, len);
+            break;
         }
         case SYS_BRK: {
             /* Linux-style brk(2): brk(0) returns current break;

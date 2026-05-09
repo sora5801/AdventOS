@@ -55,6 +55,15 @@ typedef unsigned int   size_t;
 #define SYS_SIGACTION  25
 #define SYS_SIGRETURN  26
 #define SYS_BRK        27
+#define SYS_TTY_SET_MODE 28
+#define SYS_TTY_GET_MODE 29
+#define SYS_TTY_INJECT   30
+
+/* TTY mode flags — must agree with kernel/tty.h. */
+#define TTY_ICANON   0x01
+#define TTY_ECHO     0x02
+#define TTY_DEFAULT  (TTY_ICANON | TTY_ECHO)
+#define TTY_RAW      0u
 
 /* Signal numbers — must match kernel/signal.h exactly. */
 #define SIGHUP      1
@@ -150,6 +159,16 @@ sighandler_t signal   (int sig, sighandler_t handler);
 int      sys_brk(int new_brk);
 void    *malloc (size_t size);
 void     free   (void *p);
+
+/* TTY (session 18). The mode is a single bitmap of TTY_ICANON +
+ * TTY_ECHO. set returns the previous flags so callers can save and
+ * restore. The default at boot is TTY_DEFAULT (= TTY_ICANON|TTY_ECHO).
+ * tty_inject() pushes bytes into the keyboard input ring as if they
+ * had been typed — used for tests and for headless boots that have
+ * no real input source. */
+uint32_t tty_set_mode(uint32_t flags);
+uint32_t tty_get_mode(void);
+int      tty_inject  (const char *bytes, int n);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

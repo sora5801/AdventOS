@@ -219,6 +219,33 @@ int sys_kill(int pid, int sig) {
     return ret;
 }
 
+uint32_t tty_set_mode(uint32_t flags) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TTY_SET_MODE), "b"(flags)
+                      : "memory");
+    return (uint32_t)ret;
+}
+
+uint32_t tty_get_mode(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TTY_GET_MODE)
+                      : "memory");
+    return (uint32_t)ret;
+}
+
+int tty_inject(const char *bytes, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TTY_INJECT), "b"(bytes), "c"(n)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"
