@@ -19,6 +19,11 @@ SECTIONS
         KEEP(*(.text.entry))
         *(.text*)
         *(.gnu.linkonce.t.*)
+        /* AP trampoline. Position-independent inside the section;
+         * the BSP memcpys it to physical 0x8000 at runtime. The
+         * symbols ap_trampoline_start/_end are defined in the
+         * trampoline source. */
+        KEEP(*(.text.aptramp))
     }
 
     .rdata : SUBALIGN(4)

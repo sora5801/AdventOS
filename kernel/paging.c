@@ -68,13 +68,19 @@ void paging_init(void) {
     memset(g_pd, 0, PAGE_SIZE);
 
     /* Identity-map all physical RAM, leaving page 0 unmapped so a null
-     * dereference page-faults loudly. Cap at 1 GiB to bound how many
-     * page tables we burn on huge-RAM systems. */
+     * dereference page-faults loudly. Round up to the configured RAM
+     * size (m=32 MiB by default) rather than just the PMM-tracked
+     * free pages — BIOS-reserved regions like the ACPI tables, MP
+     * tables, and EBDA live above the free-pool top but still need
+     * to be readable. Cap at 1 GiB. */
     uint32_t total_pages = pmm_total_pages();
     if (total_pages > (0x40000000u >> PMM_PAGE_SHIFT)) {
         total_pages = 0x40000000u >> PMM_PAGE_SHIFT;        /* 1 GiB */
     }
+    /* Round up to the next 4 MiB (PD entry size) so we cover any
+     * reserved tail-end pages the firmware planted. */
     uintptr_t end = (uintptr_t)total_pages << PMM_PAGE_SHIFT;
+    end = (end + 0x3FFFFFu) & ~0x3FFFFFu;
 
     for (uintptr_t a = PAGE_SIZE; a < end; a += PAGE_SIZE) {
         if (do_map(a, a, PTE_WRITABLE) != 0) return;
@@ -127,6 +133,16 @@ uint32_t *paging_create_user_pd(void) {
     /* Kernel identity-mapped region currently fits in PDEs 0..7 (32 MiB). */
     for (int i = 0; i < 8; i++) {
         pd[i] = g_pd[i];
+    }
+    /* Mirror any "global kernel" PDEs above the user-VA range. The
+     * LAPIC at 0xFEE00000 lives in PDE 1019 (= 0xFEE00000 / 4 MiB);
+     * mmap regions, IO APIC, and similar high-half MMIO would go
+     * here too. Sharing by reference is safe — these are kernel-
+     * only mappings and the user PD never modifies them. */
+    for (int i = 256; i < 1024; i++) {
+        if (g_pd[i] & PTE_PRESENT) {
+            pd[i] = g_pd[i];
+        }
     }
     return pd;
 }
@@ -197,10 +213,19 @@ uint32_t *paging_clone_user_pd(uint32_t *parent) {
 
 void paging_destroy_user_pd(uint32_t *pd) {
     if (!pd) return;
-    /* Skip PDEs 0..7 — those reference page tables that are shared
-     * with the kernel master PD. Free everything from PDE 8 upward. */
+    /* Skip PDEs 0..7 — those reference page tables shared with the
+     * kernel master PD. ALSO skip any high PDE whose value matches
+     * the kernel master PD's PDE — that's a "mirror by reference"
+     * we set up for kernel-only mappings (LAPIC, future IO APIC).
+     * Their underlying PTs are owned by the kernel and freeing them
+     * would corrupt cross-PD shared state. */
     for (uint32_t i = 8; i < 1024; i++) {
-        if (!(pd[i] & PTE_PRESENT)) continue;
+        if (!(pd[i] & PTE_PRESENT))    continue;
+        if (i >= 256 && pd[i] == g_pd[i]) {
+            /* mirrored kernel PDE — skip free */
+            pd[i] = 0;
+            continue;
+        }
         uint32_t *pt = (uint32_t *)(uintptr_t)(pd[i] & (uint32_t)PAGE_MASK);
         for (uint32_t j = 0; j < 1024; j++) {
             if (pt[j] & PTE_PRESENT) {

@@ -19,6 +19,7 @@
 #include "bcache.h"
 #include "vfs.h"
 #include "procfs.h"
+#include "lapic.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -489,6 +490,10 @@ void syscall_dispatch(struct registers *r) {
             int   pid = task_waitpid_nb_current(uout ? &exit_code : NULL);
             if (pid > 0 && uout) *uout = exit_code;
             ret = pid;
+            break;
+        }
+        case SYS_GETCPU: {
+            ret = (int32_t)lapic_id();
             break;
         }
         case SYS_KILL: {

@@ -455,6 +455,26 @@ static void cmd_forktest(void) {
 static void selftest(void) {
     puts("\n=== sh selftest: fork / exec / wait / pipe / > ===\n");
 
+    /* Run the SMP CPU-id check FIRST so we don't have to wait
+     * 60+ seconds of network tests to verify it. */
+    puts("[t22] SMP: sys_getcpu reports the running CPU's APIC ID\n");
+    {
+        int my_cpu = sys_getcpu();
+        printf("  shell pid=%d running on CPU apic_id=%d\n",
+               sys_getpid(), my_cpu);
+        for (int i = 0; i < 3; i++) {
+            int pid = sys_fork();
+            if (pid == 0) {
+                int c = sys_getcpu();
+                printf("  child %d (pid=%d) on CPU apic_id=%d\n",
+                       i, sys_getpid(), c);
+                sys_exit(0);
+            }
+            int code;
+            sys_wait(&code);
+        }
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

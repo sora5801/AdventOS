@@ -26,6 +26,7 @@
 #include "bcache.h"
 #include "vfs.h"
 #include "procfs.h"
+#include "smp.h"
 #include "net.h"
 #include "udp.h"
 #include "dhcp.h"
@@ -185,6 +186,13 @@ void kmain(uint32_t boot_drive) {
 
     kputs("[boot] enabling interrupts\n");
     __asm__ volatile ("sti");
+
+    /* SMP: parse ACPI MADT, enable LAPIC, bring up application
+     * processors. Has to be after interrupts are on (we use PIT
+     * to time the INIT-SIPI delay) but before any user task
+     * runs (so per-CPU TSSes are in place when ring-3 runs). */
+    kputs("[boot] starting SMP\n");
+    smp_init();
 
     /* NIC IRQs need to be live before init can succeed (the link-up
      * pre-fills the MAC via PIO, but later RX is IRQ-driven). */

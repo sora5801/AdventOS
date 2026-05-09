@@ -78,6 +78,7 @@ typedef unsigned int   size_t;
 #define SYS_BCACHE_STATS 48
 #define SYS_CONNECT      49
 #define SYS_WAIT_NB      50
+#define SYS_GETCPU       51
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -159,6 +160,11 @@ int      sys_wait (int *exit_code);
  * Used by fork-per-connection servers to drain zombies between
  * accept() calls without committing to a blocking wait. */
 int      sys_wait_nb(int *exit_code);
+
+/* Returns the LAPIC ID of the CPU currently servicing this task's
+ * syscall, which is also the CPU the task is running on at this
+ * instant. Useful for proving that work has migrated to an AP. */
+int      sys_getcpu(void);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

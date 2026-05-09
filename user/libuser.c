@@ -201,6 +201,15 @@ int sys_wait_nb(int *exit_code) {
     return ret;
 }
 
+int sys_getcpu(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETCPU)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

@@ -115,3 +115,9 @@ void idt_init(void) {
 
     idt_flush((uint32_t)(uintptr_t)&idtr);
 }
+
+/* For SMP: APs reuse the same IDT (handlers, vectors). They just
+ * lidt the same descriptor on their side after the trampoline. */
+uintptr_t idt_descriptor_addr(void) {
+    return (uintptr_t)&idtr;
+}
