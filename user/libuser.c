@@ -364,3 +364,182 @@ void *memcpy(void *d, const void *s, size_t n) {
     while (n--) *dd++ = *ss++;
     return d;
 }
+
+/* ---------- Heap: sys_brk + malloc / free --------------------------- */
+
+/*
+ * Port of the kernel's kmalloc free-list allocator into ring 3.
+ * Headered blocks threaded in physical-address order; first-fit,
+ * split-on-alloc, neighbor-coalesce on free.
+ *
+ * The heap grows on demand: when malloc can't satisfy a request from
+ * the existing free list, it issues SYS_BRK to map new pages between
+ * the current break and a target break, then drops a fresh free
+ * block on top of the new pages and retries.
+ *
+ * Allocator state is just `g_brk`. The list head is implicit:
+ * heap-empty iff g_brk == HEAP_START_VA, else the head is the
+ * mblock at HEAP_START_VA. This avoids needing a separate `g_head`
+ * pointer in .data — explained in detail in the deep dive.
+ */
+
+#define HEAP_START_VA   0x40200000u
+#define M_ALIGN         16
+#define M_HDR_SIZE      sizeof(struct mblock)
+#define M_MIN_PAYLOAD   16u
+#define M_MAGIC         0xCAFEu
+
+struct mblock {
+    uint32_t        size;
+    uint16_t        free;
+    uint16_t        magic;
+    struct mblock  *prev;
+    struct mblock  *next;
+};
+
+/* IMPORTANT: explicit non-zero initializer. user.ld discards .bss,
+ * which means a zero-initialized file-scope static would be linked
+ * at address 0. Setting g_brk = HEAP_START_VA both gives it the
+ * right initial value AND forces it into .data so the loader sets
+ * it correctly. */
+static uint32_t g_brk = HEAP_START_VA;
+
+int sys_brk(int new_brk) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BRK), "b"(new_brk)
+                      : "memory");
+    return ret;
+}
+
+static struct mblock *heap_head(void) {
+    return (g_brk == HEAP_START_VA) ? (struct mblock *)0
+                                    : (struct mblock *)HEAP_START_VA;
+}
+
+static struct mblock *heap_tail(void) {
+    struct mblock *b = heap_head();
+    if (!b) return (struct mblock *)0;
+    while (b->next) b = b->next;
+    return b;
+}
+
+/* Ask the kernel for at least `at_least` more bytes of heap (rounded
+ * up to a page), then drop a fresh free block on the new pages. If
+ * the previous tail block was free, coalesce. Returns 0 on success,
+ * -1 on out-of-memory. */
+static int grow_heap(uint32_t at_least) {
+    uint32_t need = (at_least + 4095u) & ~4095u;
+    uint32_t want = g_brk + need;
+    int got = sys_brk((int)want);
+    if (got != (int)want) return -1;
+
+    uint32_t old = g_brk;
+    g_brk = (uint32_t)got;
+
+    /* New free block at [old, g_brk). */
+    struct mblock *nb = (struct mblock *)(uint32_t)old;
+    nb->size  = (uint32_t)(g_brk - old - M_HDR_SIZE);
+    nb->free  = 1;
+    nb->magic = M_MAGIC;
+    nb->prev  = (struct mblock *)0;
+    nb->next  = (struct mblock *)0;
+
+    if (old == HEAP_START_VA) {
+        /* First growth — nb is the head AND the tail. Done. */
+        return 0;
+    }
+
+    /* Link after current tail. */
+    struct mblock *tail = heap_tail();
+    if (!tail) return -1;
+    tail->next = nb;
+    nb->prev   = tail;
+
+    /* If the old tail was free, coalesce nb into it. */
+    if (tail->free) {
+        tail->size += M_HDR_SIZE + nb->size;
+        tail->next  = (struct mblock *)0;
+    }
+    return 0;
+}
+
+void *malloc(size_t size) {
+    if (size == 0) return (void *)0;
+    size_t want = (size + M_ALIGN - 1) & ~(size_t)(M_ALIGN - 1);
+
+    for (;;) {
+        for (struct mblock *b = heap_head(); b; b = b->next) {
+            if (b->magic != M_MAGIC) return (void *)0;     /* corruption */
+            if (!b->free || b->size < want) continue;
+
+            /* Found a fit. Split if leftover would be a usable block. */
+            size_t leftover = b->size - want;
+            if (leftover >= M_HDR_SIZE + M_MIN_PAYLOAD) {
+                struct mblock *n =
+                    (struct mblock *)((uint32_t)b + M_HDR_SIZE + want);
+                n->size  = (uint32_t)(leftover - M_HDR_SIZE);
+                n->free  = 1;
+                n->magic = M_MAGIC;
+                n->prev  = b;
+                n->next  = b->next;
+                if (b->next) b->next->prev = n;
+                b->next  = n;
+                b->size  = (uint32_t)want;
+            }
+            b->free = 0;
+            return (void *)((uint32_t)b + M_HDR_SIZE);
+        }
+
+        /* No fit — grow and retry. Bail if the kernel says no. */
+        if (grow_heap((uint32_t)(want + M_HDR_SIZE)) != 0) return (void *)0;
+    }
+}
+
+void free(void *p) {
+    if (!p) return;
+    struct mblock *b = (struct mblock *)((uint32_t)p - M_HDR_SIZE);
+    if (b->magic != M_MAGIC || b->free) return;       /* double-free / corrupt */
+    b->free = 1;
+
+    /* Coalesce with the next block if free. */
+    if (b->next && b->next->free) {
+        struct mblock *n = b->next;
+        b->size += M_HDR_SIZE + n->size;
+        b->next  = n->next;
+        if (n->next) n->next->prev = b;
+        n->magic = 0;
+    }
+
+    /* Coalesce with the previous block if free. */
+    if (b->prev && b->prev->free) {
+        struct mblock *pp = b->prev;
+        pp->size += M_HDR_SIZE + b->size;
+        pp->next  = b->next;
+        if (b->next) b->next->prev = pp;
+        b->magic = 0;
+    }
+}
+
+uint32_t malloc_brk(void) { return g_brk; }
+
+uint32_t malloc_total(void) {
+    return g_brk - HEAP_START_VA;
+}
+
+uint32_t malloc_used(void) {
+    uint32_t total = 0;
+    for (struct mblock *b = heap_head(); b; b = b->next) {
+        if (!b->free) total += b->size + M_HDR_SIZE;
+    }
+    return total;
+}
+
+uint32_t malloc_free_bytes(void) {
+    uint32_t total = 0;
+    for (struct mblock *b = heap_head(); b; b = b->next) {
+        if (b->free) total += b->size;
+    }
+    return total;
+}

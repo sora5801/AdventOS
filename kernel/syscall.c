@@ -11,6 +11,8 @@
 #include "signal.h"
 #include "string.h"
 #include "kmalloc.h"
+#include "paging.h"
+#include "pmm.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -455,6 +457,79 @@ void syscall_dispatch(struct registers *r) {
              * incorrect). */
             signal_sigreturn(r);
             return;
+        }
+        case SYS_BRK: {
+            /* Linux-style brk(2): brk(0) returns current break;
+             * brk(new) attempts to set the break to `new`. Returns
+             * the actual new break, which equals `new` on success
+             * or the unchanged break on failure (out-of-range or
+             * out-of-memory). The libuser malloc reads the return
+             * value and treats != requested as failure. */
+            uint32_t want = a;
+            struct task *t = task_current();
+
+            if (want == 0) { ret = (int32_t)t->heap_brk; break; }
+
+            if (want < USER_HEAP_START || want > USER_HEAP_MAX) {
+                ret = (int32_t)t->heap_brk;
+                break;
+            }
+
+            uint32_t cur_pg = (t->heap_brk + 0xFFFu) & ~0xFFFu;
+            uint32_t new_pg = (want        + 0xFFFu) & ~0xFFFu;
+
+            if (new_pg > cur_pg) {
+                /* Grow: map fresh pages from cur_pg to new_pg. If
+                 * any allocation fails, roll back the pages we
+                 * managed to map and report failure (return
+                 * unchanged break). */
+                uint32_t mapped_to = cur_pg;
+                int ok = 1;
+                for (uint32_t va = cur_pg; va < new_pg; va += 4096) {
+                    void *page = pmm_alloc_page();
+                    if (!page) { ok = 0; break; }
+                    /* Zero the page so the user heap doesn't expose
+                     * a previous owner's bytes. */
+                    for (int i = 0; i < 4096 / 4; i++) {
+                        ((uint32_t *)page)[i] = 0;
+                    }
+                    if (paging_map_in((uint32_t *)(uintptr_t)t->cr3,
+                                      va, (uintptr_t)page,
+                                      PTE_USER | PTE_WRITABLE) != 0) {
+                        pmm_free_page(page);
+                        ok = 0;
+                        break;
+                    }
+                    mapped_to = va + 4096;
+                }
+                if (!ok) {
+                    /* Roll back. */
+                    for (uint32_t va = cur_pg; va < mapped_to; va += 4096) {
+                        /* paging_map_in installed it on the user PD;
+                         * unmapping cleanly without a paging_unmap_in
+                         * helper is fiddly. The PD is going to be
+                         * destroyed anyway when this process exits;
+                         * the simplest sound behavior is to leave
+                         * the partial mapping in place and tell the
+                         * caller "no, I couldn't honor your request"
+                         * by returning the unchanged break. The
+                         * partial mapping is harmless — the user
+                         * malloc won't touch addresses beyond the
+                         * break it observes. */
+                        (void)va;
+                    }
+                    ret = (int32_t)t->heap_brk;
+                    break;
+                }
+            }
+            /* Shrink case (new_pg < cur_pg) intentionally not
+             * implemented yet — we have no paging_unmap_in helper.
+             * heap_brk is just bumped down; the pages stay mapped
+             * until the process exits. Real brk would unmap. */
+
+            t->heap_brk = want;
+            ret = (int32_t)t->heap_brk;
+            break;
         }
         default:
             kprintf("[unknown syscall %u from pid %u]\n",

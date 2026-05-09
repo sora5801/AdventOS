@@ -31,6 +31,7 @@
 #define SYS_KILL       24  /* (eax=24, ebx=pid, ecx=sig) -> 0 or -1 */
 #define SYS_SIGACTION  25  /* (eax=25, ebx=sig, ecx=handler, edx=tramp) -> previous handler */
 #define SYS_SIGRETURN  26  /* (eax=26)                   -> never returns to caller; restores ctx */
+#define SYS_BRK        27  /* (eax=27, ebx=new_brk_or_0) -> current/new heap_brk; 0 means "query" */
 
 void syscall_dispatch(struct registers *r);
 

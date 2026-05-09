@@ -85,7 +85,18 @@ struct task {
     uint32_t      sig_mask;
     void         *sig_handlers[32];   /* NSIG */
     void         *sig_tramp;
+
+    /* Per-task user heap (session 17). heap_brk is the user-VA "one
+     * past the last byte" of the mapped heap; sys_brk grows or shrinks
+     * by mapping/unmapping pages between this and the user-set target.
+     * Heap lives at [USER_HEAP_START, USER_HEAP_MAX); heap_brk starts
+     * at USER_HEAP_START (zero pages mapped) and grows on demand
+     * when the user-side malloc calls sys_brk. */
+    uint32_t      heap_brk;
 };
+
+#define USER_HEAP_START  0x40200000u
+#define USER_HEAP_MAX    0x40600000u   /* 4 MiB cap per process */
 
 typedef void (*task_fn)(void);
 

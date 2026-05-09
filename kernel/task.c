@@ -120,6 +120,9 @@ struct task *task_create(task_fn entry, const char *name) {
     /* Signal table: all SIG_DFL, no pending, no mask, no trampoline yet. */
     signal_init_task(t);
 
+    /* Heap: empty until the user calls SYS_BRK. */
+    t->heap_brk = USER_HEAP_START;
+
     /* Splice into the round-robin list right after current. */
     __asm__ volatile ("cli");
     t->next = g_current->next;
@@ -448,6 +451,11 @@ struct task *task_fork(struct registers *parent_regs) {
     child->sig_tramp = parent->sig_tramp;
     child->sig_pending = 0;
 
+    /* 5c. Inherit heap_brk verbatim. The deep-PD copy already
+     *     duplicated the heap pages — child has its own physical
+     *     copies at the same VAs, so its heap_brk is meaningful. */
+    child->heap_brk = parent->heap_brk;
+
     /* 6. Splice into the round-robin ring. */
     __asm__ volatile ("cli");
     child->next       = parent->next;
@@ -505,6 +513,11 @@ int task_exec_inplace(struct registers *r,
      * VA is in the OLD address space and the new ELF will install
      * its own when it calls signal() — clear it. */
     signal_reset_on_exec(t);
+
+    /* Reset the heap. The old PD (and all heap pages) is gone; the
+     * new ELF gets a fresh empty heap that will grow on its first
+     * malloc → sys_brk. */
+    t->heap_brk = USER_HEAP_START;
 
     /* Rewrite the iret frame so the syscall return jumps into the
      * freshly-loaded program at its entry point with the new ESP. */

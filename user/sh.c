@@ -406,6 +406,48 @@ static void selftest(void) {
         printf("  child reaped, exit=%d\n", code);
     }
 
+    puts("[t7] malloc / free / brk\n");
+    {
+        uint32_t brk0 = (uint32_t)sys_brk(0);
+        printf("  initial brk: 0x%x  (heap empty)\n", brk0);
+
+        void *a = malloc(32);
+        void *b = malloc(64);
+        void *c = malloc(128);
+        uint32_t brk1 = (uint32_t)sys_brk(0);
+        printf("  malloc 32/64/128:\n");
+        printf("    a=0x%x  b=0x%x  c=0x%x\n",
+               (uint32_t)a, (uint32_t)b, (uint32_t)c);
+        printf("    brk now 0x%x  (grew by %u bytes)\n",
+               brk1, brk1 - brk0);
+
+        /* Touch each to prove they're writable + independent. */
+        *(int *)a = 0xa1a1a1a1;
+        *(int *)b = 0xb2b2b2b2;
+        *(int *)c = 0xc3c3c3c3;
+        printf("    *a=0x%x  *b=0x%x  *c=0x%x  (read back ok)\n",
+               *(int *)a, *(int *)b, *(int *)c);
+
+        /* Free middle, alloc same size — should reuse the hole
+         * (first-fit returns the same address). */
+        free(b);
+        void *b2 = malloc(64);
+        printf("  free(b) + malloc(64) -> b2=0x%x  reused=%s\n",
+               (uint32_t)b2, (b2 == b) ? "yes" : "no");
+
+        /* Free everything, then ask for a big block to force the
+         * heap to grow and exercise coalescing. */
+        free(a); free(b2); free(c);
+        printf("  after free-all: used=%u  free=%u  brk=0x%x\n",
+               malloc_used(), malloc_free_bytes(), malloc_brk());
+
+        void *big = malloc(8192);
+        uint32_t brk2 = (uint32_t)sys_brk(0);
+        printf("  malloc(8192) -> 0x%x  brk=0x%x  (grew %u bytes total)\n",
+               (uint32_t)big, brk2, brk2 - brk0);
+        free(big);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

@@ -22,9 +22,10 @@
 
 #include <stdarg.h>
 
-typedef unsigned int  uint32_t;
-typedef int           int32_t;
-typedef unsigned int  size_t;
+typedef unsigned int   uint32_t;
+typedef int            int32_t;
+typedef unsigned short uint16_t;
+typedef unsigned int   size_t;
 
 /* Must agree with kernel/syscall.h numbers */
 #define SYS_WRITE      1
@@ -53,6 +54,7 @@ typedef unsigned int  size_t;
 #define SYS_KILL       24
 #define SYS_SIGACTION  25
 #define SYS_SIGRETURN  26
+#define SYS_BRK        27
 
 /* Signal numbers — must match kernel/signal.h exactly. */
 #define SIGHUP      1
@@ -131,6 +133,29 @@ int      sys_open_w (const char *name);
 int          sys_kill (int pid, int sig);
 sighandler_t sigaction(int sig, sighandler_t handler);
 sighandler_t signal   (int sig, sighandler_t handler);
+
+/* Heap.
+ *   sys_brk(0)      query current break (returns user-VA of the
+ *                   first byte past the heap)
+ *   sys_brk(new)    set break to `new`. Returns the actual break;
+ *                   != requested means failure (out-of-range or
+ *                   out-of-memory). The heap lives in a fixed
+ *                   per-process VA window; first call extends from
+ *                   USER_HEAP_START upward by mapping fresh pages.
+ *   malloc/free     a free-list allocator that grows the heap via
+ *                   sys_brk on demand. Same shape as kernel kmalloc:
+ *                   16-byte aligned blocks, split-on-alloc,
+ *                   neighbor-coalesce on free.
+ */
+int      sys_brk(int new_brk);
+void    *malloc (size_t size);
+void     free   (void *p);
+
+/* Diagnostics — read internal allocator state for tests / heap dumps. */
+uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */
+uint32_t malloc_used (void);     /* bytes in non-free blocks */
+uint32_t malloc_free_bytes(void);/* bytes in free blocks */
+uint32_t malloc_brk(void);       /* current break VA */
 
 void     putchar(char c);
 void     puts(const char *s);
