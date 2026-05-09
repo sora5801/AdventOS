@@ -66,6 +66,7 @@ typedef unsigned int   size_t;
 #define SYS_KILLPG       36
 #define SYS_TCSETPGRP    37
 #define SYS_TCGETPGRP    38
+#define SYS_DNS_RESOLVE  39
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -202,6 +203,12 @@ int      getsid   (int pid);
 int      killpg   (int pgid, int sig);
 int      tcsetpgrp(int fd, int pgid);
 int      tcgetpgrp(int fd);
+
+/* DNS A-record lookup. Blocks until the kernel's DNS resolver gets
+ * a reply or times out. Writes the IPv4 address into the 4-byte
+ * buffer at `ip`. Returns 0 on success, -1 on timeout / parse fail
+ * / DNS not configured. */
+int      sys_dns_resolve(const char *name, unsigned char ip[4]);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

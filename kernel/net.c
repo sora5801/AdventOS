@@ -4,9 +4,12 @@
 #include "kprintf.h"
 
 struct mac_addr g_my_mac;
-struct ip_addr  g_my_ip       = { { 10,  0,  2, 15 } };  /* SLIRP guest IP */
-struct ip_addr  g_gateway_ip  = { { 10,  0,  2,  2 } };  /* SLIRP gateway  */
-struct ip_addr  g_subnet_mask = { { 255,255,255,  0 } };
+/* All-zero defaults — DHCP fills these in at boot. If DHCP times out
+ * the dhcp layer falls back to SLIRP's hardcoded values. */
+struct ip_addr  g_my_ip       = { { 0, 0, 0, 0 } };
+struct ip_addr  g_gateway_ip  = { { 0, 0, 0, 0 } };
+struct ip_addr  g_subnet_mask = { { 0, 0, 0, 0 } };
+struct ip_addr  g_dns_server  = { { 0, 0, 0, 0 } };
 int             g_net_up;
 
 void net_init(void) {
@@ -16,14 +19,9 @@ void net_init(void) {
     }
     g_net_up = 1;
 
-    kputs("net: link up — ");
-    kputs("MAC ");
+    kputs("net: link up — MAC ");
     net_print_mac(&g_my_mac);
-    kputs("  IP ");
-    net_print_ip(&g_my_ip);
-    kputs("  GW ");
-    net_print_ip(&g_gateway_ip);
-    kputc('\n');
+    kputs("  (IP unconfigured — waiting for DHCP)\n");
 }
 
 void net_rx_frame(const void *frame, uint32_t len) {

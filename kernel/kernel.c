@@ -24,6 +24,9 @@
 #include "rtc.h"
 #include "fs.h"
 #include "net.h"
+#include "udp.h"
+#include "dhcp.h"
+#include "dns.h"
 #include "tcp.h"
 #include "sock.h"
 #include "pipe.h"
@@ -167,6 +170,18 @@ void kmain(uint32_t boot_drive) {
      * pre-fills the MAC via PIO, but later RX is IRQ-driven). */
     kputs("[boot] starting network stack\n");
     net_init();
+
+    /* UDP transport — must come before DHCP, which uses port 68/67. */
+    udp_init();
+
+    /* Synchronous DHCP lease (or fall back to SLIRP defaults if the
+     * server doesn't reply within 2s twice). After this g_my_ip etc
+     * are set up. */
+    if (g_net_up) {
+        dhcp_acquire_lease();
+    }
+
+    dns_init();
 
     /* Sanity beep: short delay, prove the timer is ticking */
     pit_sleep(50);

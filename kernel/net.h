@@ -29,6 +29,7 @@ extern struct mac_addr g_my_mac;
 extern struct ip_addr  g_my_ip;
 extern struct ip_addr  g_gateway_ip;
 extern struct ip_addr  g_subnet_mask;
+extern struct ip_addr  g_dns_server;       /* set by DHCP option 6 */
 extern int             g_net_up;
 
 /* Bring up the network stack: discover NIC, init drivers, fix up IP

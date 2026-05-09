@@ -170,7 +170,7 @@ gdtr:
 dap:
     .byte 0x10              /* size of packet */
     .byte 0x00              /* reserved */
-    .word 112               /* number of sectors to read (56 KiB) */
+    .word 128               /* number of sectors to read (64 KiB) — was 112; bumped in session 21 when UDP/DHCP/DNS pushed kernel.bin past 56 KiB */
     .word 0x0000            /* destination offset */
     .word 0x1000            /* destination segment (linear 0x10000) */
     .quad 1                 /* starting LBA */

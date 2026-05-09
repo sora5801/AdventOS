@@ -318,6 +318,15 @@ int tcgetpgrp(int fd) {
     return ret;
 }
 
+int sys_dns_resolve(const char *name, unsigned char ip[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_DNS_RESOLVE), "b"(name), "c"(ip)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

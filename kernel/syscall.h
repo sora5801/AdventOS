@@ -43,6 +43,7 @@
 #define SYS_KILLPG       36 /* (eax=36, ebx=pgid, ecx=sig) -> 0 / -1 */
 #define SYS_TCSETPGRP    37 /* (eax=37, ebx=fd, ecx=pgid)  -> 0 / -1; sets the foreground pgrp */
 #define SYS_TCGETPGRP    38 /* (eax=38, ebx=fd)            -> current foreground pgrp */
+#define SYS_DNS_RESOLVE  39 /* (eax=39, ebx=name, ecx=ip[4]) -> 0 / -1; blocks until DNS reply or timeout */
 
 void syscall_dispatch(struct registers *r);
 

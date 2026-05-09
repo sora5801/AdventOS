@@ -2,8 +2,20 @@
 #include "arp.h"
 #include "icmp.h"
 #include "tcp.h"
+#include "udp.h"
 #include "string.h"
 #include "kprintf.h"
+
+/* Broadcast destination — used by DHCP-style "I don't have an IP yet"
+ * traffic. We bypass ARP and put the Ethernet broadcast MAC directly. */
+static int is_ip_broadcast(const struct ip_addr *ip) {
+    return ip->b[0] == 255 && ip->b[1] == 255 &&
+           ip->b[2] == 255 && ip->b[3] == 255;
+}
+
+static int we_have_ip(void) {
+    return g_my_ip.b[0] || g_my_ip.b[1] || g_my_ip.b[2] || g_my_ip.b[3];
+}
 
 uint16_t ip_checksum(const void *data, uint32_t len) {
     /* One's-complement sum of 16-bit half-words, with end-around carry. */
@@ -21,14 +33,21 @@ int ip_send(const struct ip_addr *dst, uint8_t proto,
             const void *payload, uint32_t len) {
     if (len > 1500 - sizeof(struct ip_hdr)) return -1;
 
-    /* Choose next-hop: dst itself if local, gateway otherwise. */
-    struct ip_addr  nexthop = net_is_local(dst) ? *dst : g_gateway_ip;
     struct mac_addr mac;
-    if (arp_lookup(&nexthop, &mac) != 0) {
-        /* Cache miss: fire an ARP request now and let the caller
-         * retry (typical "ping" pattern). */
-        arp_send_request(&nexthop);
-        return -2;
+    if (is_ip_broadcast(dst)) {
+        /* Skip ARP — broadcast goes to ff:ff:ff:ff:ff:ff. This is
+         * how DHCP-DISCOVER reaches the server before we have an
+         * IP / gateway / ARP cache. */
+        for (int i = 0; i < 6; i++) mac.b[i] = 0xff;
+    } else {
+        /* Choose next-hop: dst itself if local, gateway otherwise. */
+        struct ip_addr nexthop = net_is_local(dst) ? *dst : g_gateway_ip;
+        if (arp_lookup(&nexthop, &mac) != 0) {
+            /* Cache miss: fire an ARP request now and let the caller
+             * retry (typical "ping" pattern). */
+            arp_send_request(&nexthop);
+            return -2;
+        }
     }
 
     uint8_t buf[1500];
@@ -59,10 +78,16 @@ void ip_rx(const struct eth_hdr *eth, const void *payload, uint32_t len) {
     if (ihl < sizeof(*iph))     return;
     if (ntohs(iph->total_len) > len) return;
 
-    /* Drop anything not addressed to us (we're not a router). */
-    for (int i = 0; i < 4; i++) {
-        if (iph->dst.b[i] != g_my_ip.b[i]) return;
-    }
+    /* Accept if (1) the packet is for us, (2) it's a broadcast, OR
+     * (3) we don't have an IP yet (pre-DHCP — anything that made it
+     * past the Ethernet MAC filter is interesting). */
+    int is_bcast   = is_ip_broadcast(&iph->dst);
+    int matches_us = we_have_ip() &&
+                     iph->dst.b[0] == g_my_ip.b[0] &&
+                     iph->dst.b[1] == g_my_ip.b[1] &&
+                     iph->dst.b[2] == g_my_ip.b[2] &&
+                     iph->dst.b[3] == g_my_ip.b[3];
+    if (!matches_us && !is_bcast && we_have_ip()) return;
 
     const uint8_t *body  = (const uint8_t *)payload + ihl;
     uint32_t       blen  = (uint32_t)ntohs(iph->total_len) - ihl;
@@ -70,6 +95,7 @@ void ip_rx(const struct eth_hdr *eth, const void *payload, uint32_t len) {
     switch (iph->proto) {
         case IP_PROTO_ICMP: icmp_rx(eth, iph, body, blen); break;
         case IP_PROTO_TCP:  tcp_rx (iph, body, (int)blen); break;
+        case IP_PROTO_UDP:  udp_rx (iph, body, (int)blen); break;
         default:                                            break;
     }
 }

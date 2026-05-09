@@ -14,6 +14,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "tty.h"
+#include "dns.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -543,6 +544,22 @@ void syscall_dispatch(struct registers *r) {
         case SYS_TCGETPGRP: {
             (void)a;
             ret = (int32_t)tty_get_fg_pgrp();
+            break;
+        }
+        case SYS_DNS_RESOLVE: {
+            const char *uname = (const char *)(uintptr_t)a;
+            uint8_t    *uout  = (uint8_t *)(uintptr_t)b;
+            char name[64];
+            int  i;
+            for (i = 0; i < (int)sizeof(name) - 1 && uname[i]; i++) name[i] = uname[i];
+            name[i] = 0;
+            struct ip_addr ip;
+            int rc = dns_resolve(name, &ip);
+            if (rc == 0 && uout) {
+                uout[0] = ip.b[0]; uout[1] = ip.b[1];
+                uout[2] = ip.b[2]; uout[3] = ip.b[3];
+            }
+            ret = rc;
             break;
         }
         case SYS_FS_WRITE: {

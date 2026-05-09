@@ -692,6 +692,23 @@ static void selftest(void) {
                c1, c2);
     }
 
+    puts("[t12] DNS A-record lookup\n");
+    {
+        const char *names[] = { "example.com", "github.com", 0 };
+        for (int i = 0; names[i]; i++) {
+            unsigned char ip[4] = {0,0,0,0};
+            int rc = sys_dns_resolve(names[i], ip);
+            if (rc == 0) {
+                printf("  %s -> %u.%u.%u.%u\n",
+                       names[i],
+                       (uint32_t)ip[0], (uint32_t)ip[1],
+                       (uint32_t)ip[2], (uint32_t)ip[3]);
+            } else {
+                printf("  %s -> (timeout / no record)\n", names[i]);
+            }
+        }
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
