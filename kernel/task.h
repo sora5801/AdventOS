@@ -6,7 +6,10 @@
 #define TASK_NAME_MAX  16
 #define TASK_MAX       16
 #define TASK_STACK_SZ  0x4000     /* 16 KiB per kernel task */
-#define TASK_MAX_FDS   8
+/* Bumped from 8 in session 26 — a 4-stage pipeline opens 3 pipes (6 fds)
+ * in the parent before forking; with stdin/stdout/stderr already at 0/1/2
+ * that needed 9 slots. 16 lets longer pipelines through cleanly. */
+#define TASK_MAX_FDS   16
 
 /* Per-process file descriptor entry. fd 0/1/2 are wired up to console
  * stdin/stdout/stderr at task_create time; fd 3+ hold handles obtained

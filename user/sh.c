@@ -332,7 +332,11 @@ static void cmd_help(void) {
     puts("  cmd1 | cmd2 | ... [> outfile]\n");
     puts("  Each stage is a separate fork()+exec(); | wires stdin/stdout\n");
     puts("  via SYS_PIPE+SYS_DUP2; > opens an in-RAM tmpfs file you can\n");
-    puts("  later cat back. Programs in /:  hello count cat echo httpd\n");
+    puts("  later cat back.\n");
+    puts("\n");
+    puts("Coreutils sweep (binaries in /; pipe-friendly):\n");
+    puts("  hello count cat echo httpd ed\n");
+    puts("  wc head tail grep sort uniq tee tr seq date kill ls pwd\n");
 }
 
 static void cmd_pid(void)  { printf("shell pid: %d\n", sys_getpid()); }
@@ -918,6 +922,97 @@ static void selftest(void) {
         printf("  cwd after cd /: '%s'\n", cwd);
     }
 
+    puts("[t17] coreutils sweep: pipelines through wc/head/tail/grep/sort/uniq/tr/tee/seq\n");
+    {
+        /* Each of these drives a real pipeline through parse_pipeline
+         * + run_pipeline. The shell forks a child per stage, wires
+         * stdin/stdout via pipe+dup2, and waits. The binaries in /
+         * are exec()d and read/write through the pipe fds. */
+
+        #define RUN_LINE(label, src) do {                                  \
+            puts(label);                                                   \
+            char _line[128];                                               \
+            int  _li = 0;                                                  \
+            for (const char *_p = (src); *_p && _li < 127; _p++)           \
+                _line[_li++] = *_p;                                        \
+            _line[_li] = 0;                                                \
+            char  *toks_[ARG_MAX];                                         \
+            struct pipeline pl_;                                           \
+            int    n_  = tokenize(_line, toks_, ARG_MAX);                  \
+            if (parse_pipeline(toks_, n_, &pl_) == 0) {                    \
+                int rc_ = run_pipeline(&pl_);                              \
+                printf("  rc=%d\n", rc_);                                  \
+            } else {                                                       \
+                puts("  parse failed\n");                                  \
+            }                                                              \
+        } while (0)
+
+        RUN_LINE("  seq 5 | wc:\n",          "seq 5 | wc");
+        RUN_LINE("  seq 10 | head -3:\n",    "seq 10 | head -3");
+        RUN_LINE("  seq 10 | tail -3:\n",    "seq 10 | tail -3");
+        RUN_LINE("  seq 30 | grep 7:\n",     "seq 30 | grep 7");
+        RUN_LINE("  seq 5 | grep -v 3:\n",   "seq 5 | grep -v 3");
+        RUN_LINE("  echo hello | tr e E:\n", "echo hello | tr e E");
+        RUN_LINE("  echo aXbXc | tr -d X:\n","echo aXbXc | tr -d X");
+
+        /* tee: split a stream to a tmpfs file and to wc-l. The cat
+         * back proves the file got the same bytes. */
+        RUN_LINE("  seq 3 | tee /seq.txt | wc -l:\n",
+                 "seq 3 | tee /seq.txt | wc -l");
+        RUN_LINE("  cat /seq.txt:\n", "cat /seq.txt");
+
+        /* sort + uniq end-to-end: dup the file with cat to give sort
+         * adjacent equals, then uniq collapses them. */
+        RUN_LINE("  cat /seq.txt /seq.txt | sort | uniq | wc -l:\n",
+                 "cat /seq.txt /seq.txt | sort | uniq | wc -l");
+
+        /* Directory enumeration through the ls binary, into wc. */
+        RUN_LINE("  ls /etc | wc -l:\n", "ls /etc | wc -l");
+
+        /* date as a standalone command. */
+        RUN_LINE("  date:\n", "date");
+
+        /* pwd | tr / -  — pwd is now a real binary, so the pipeline
+         * fork+execs it instead of running the shell builtin. */
+        RUN_LINE("  pwd | tr / -:\n", "pwd | tr / -");
+
+        /* kill: fork a sleeping child, send SIGTERM via the binary,
+         * reap. Demonstrates that argv-driven pid is right. */
+        puts("  kill: fork sleeper, kill via the binary:\n");
+        {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_sleep_ms(2000);
+                sys_exit(0);
+            }
+            sys_sleep_ms(40);
+
+            /* Stitch "kill -15 <pid>" — printing the pid as decimal
+             * by hand because the macro takes a literal source. */
+            char l[32];
+            int  o = 0;
+            const char *pre = "kill -15 ";
+            for (int i = 0; pre[i]; i++) l[o++] = pre[i];
+            int v = pid;
+            char tmp[8]; int ti = 0;
+            if (v == 0) tmp[ti++] = '0';
+            while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+            while (ti--) l[o++] = tmp[ti];
+            l[o] = 0;
+
+            char  *toks2[ARG_MAX];
+            int    n2  = tokenize(l, toks2, ARG_MAX);
+            struct pipeline pl2;
+            if (parse_pipeline(toks2, n2, &pl2) == 0) run_pipeline(&pl2);
+            int code = 0;
+            sys_wait(&code);
+            printf("  child pid=%d reaped exit=%d (expect 143 = 128+SIGTERM)\n",
+                   pid, code);
+        }
+
+        #undef RUN_LINE
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
@@ -962,27 +1057,43 @@ int main(int argc, char **argv) {
         int ntok = tokenize(line, toks, ARG_MAX);
         if (ntok == 0) continue;
 
-        /* Builtins (only valid as the SOLE token sequence — pipelines
-         * containing builtins are not supported, since builtins run
-         * inline in the shell process). */
+        /* Detect pipeline operators. If any are present, every "soft"
+         * builtin (the ones that can also exist as binaries — ls, pwd,
+         * mkdir) falls through to fork+exec so the pipeline can wire
+         * them up properly. "Hard" builtins (cd, exit, jobs, …) always
+         * run inline because they mutate the shell's own state. */
+        int has_pipe_op = 0;
+        for (int i = 0; i < ntok; i++) {
+            if ((toks[i][0] == '|' || toks[i][0] == '>') && toks[i][1] == 0) {
+                has_pipe_op = 1; break;
+            }
+        }
+
+        /* Hard builtins — always inline (state mutation, special exit). */
         if (strcmp(toks[0], "help")     == 0) { cmd_help();  continue; }
         if (strcmp(toks[0], "pid")      == 0) { cmd_pid();   continue; }
         if (strcmp(toks[0], "time")     == 0) { cmd_time();  continue; }
         if (strcmp(toks[0], "forktest") == 0) { cmd_forktest(); continue; }
         if (strcmp(toks[0], "keys")     == 0) { cmd_keys();     continue; }
         if (strcmp(toks[0], "jobs")     == 0) { cmd_jobs();     continue; }
-        if (strcmp(toks[0], "pwd")      == 0) { cmd_pwd();      continue; }
         if (strcmp(toks[0], "cd")       == 0) {
             cmd_cd(ntok > 1 ? toks[1] : "/");
-            continue;
-        }
-        if (strcmp(toks[0], "ls")       == 0) {
-            cmd_ls(ntok > 1 ? toks[1] : "");
             continue;
         }
         if (strcmp(toks[0], "sleep")    == 0) {
             cmd_sleep(ntok > 1 ? toks[1] : "");
             continue;
+        }
+
+        /* Soft builtins — only run inline when the line is a single
+         * stage with no pipe/redirect. Pipelines fork+exec the .elf
+         * binary of the same name. */
+        if (!has_pipe_op) {
+            if (strcmp(toks[0], "pwd") == 0) { cmd_pwd(); continue; }
+            if (strcmp(toks[0], "ls")  == 0) {
+                cmd_ls(ntok > 1 ? toks[1] : "");
+                continue;
+            }
         }
         if (strcmp(toks[0], "exit") == 0) {
             int code = 0;

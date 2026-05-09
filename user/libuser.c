@@ -536,6 +536,41 @@ void *memcpy(void *d, const void *s, size_t n) {
     return d;
 }
 
+int memcmp(const void *a, const void *b, size_t n) {
+    const unsigned char *aa = a;
+    const unsigned char *bb = b;
+    while (n--) {
+        if (*aa != *bb) return (int)*aa - (int)*bb;
+        aa++; bb++;
+    }
+    return 0;
+}
+
+/* Decimal-only atoi. Skips leading whitespace; honors a single +/- sign;
+ * stops at the first non-digit. No overflow detection — callers in the
+ * coreutils sweep pass small counts (line counts, signal numbers, pids)
+ * that comfortably fit in int. */
+int atoi(const char *s) {
+    int v = 0, sign = 1;
+    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+    if      (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') {             s++; }
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    return v * sign;
+}
+
+const char *strchr(const char *s, int c) {
+    char ch = (char)c;
+    while (*s) {
+        if (*s == ch) return s;
+        s++;
+    }
+    return (ch == 0) ? s : 0;
+}
+
 /* ---------- Heap: sys_brk + malloc / free --------------------------- */
 
 /*

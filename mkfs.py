@@ -34,9 +34,9 @@ EHDR_SIZE         = 52
 PHDR_SIZE         = 32
 
 FS_NAME_MAX       = 16
-FS_MAX_FILES      = 16
+FS_MAX_FILES      = 32          # bumped from 16 in session 26 to fit the coreutils sweep
 FS_ENTRY_SIZE     = 32          # name(16) + start(4) + size(4) + type(1) + parent(1) + 6 reserved
-FS_SUPER_SECTORS  = 2
+FS_SUPER_SECTORS  = 3           # 1 header sector + 2 entry sectors (32 * 32 = 1024B)
 
 FS_TYPE_FREE      = 0
 FS_TYPE_FILE      = 1
@@ -62,6 +62,20 @@ USER_PROGRAMS = [
     ('httpd.elf', 'user/_obj/httpd.bin', None),
     ('ed.elf',    'user/_obj/ed.bin',    None),
     ('init.elf',  'user/_obj/init.bin',  None),
+    # Coreutils sweep — session 26.
+    ('wc.elf',    'user/_obj/wc.bin',    None),
+    ('head.elf',  'user/_obj/head.bin',  None),
+    ('tail.elf',  'user/_obj/tail.bin',  None),
+    ('grep.elf',  'user/_obj/grep.bin',  None),
+    ('sort.elf',  'user/_obj/sort.bin',  None),
+    ('uniq.elf',  'user/_obj/uniq.bin',  None),
+    ('tee.elf',   'user/_obj/tee.bin',   None),
+    ('tr.elf',    'user/_obj/tr.bin',    None),
+    ('seq.elf',   'user/_obj/seq.bin',   None),
+    ('date.elf',  'user/_obj/date.bin',  None),
+    ('kill.elf',  'user/_obj/kill.bin',  None),
+    ('ls.elf',    'user/_obj/ls.bin',    None),
+    ('pwd.elf',   'user/_obj/pwd.bin',   None),
 ]
 
 # (on-disk filename, source path, parent directory name or None for root)

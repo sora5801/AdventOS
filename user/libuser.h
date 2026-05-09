@@ -257,5 +257,10 @@ int      strcmp(const char *a, const char *b);
 int      strncmp(const char *a, const char *b, size_t n);
 void    *memset(void *p, int c, size_t n);
 void    *memcpy(void *d, const void *s, size_t n);
+int      memcmp(const void *a, const void *b, size_t n);
+
+/* Common C-library bits used by the coreutils sweep (session 26). */
+int          atoi  (const char *s);
+const char  *strchr(const char *s, int c);
 
 #endif
