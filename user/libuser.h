@@ -74,6 +74,8 @@ typedef unsigned int   size_t;
 #define SYS_CHDIR        44
 #define SYS_GETCWD       45
 #define SYS_READDIR      46
+#define SYS_BCACHE_SYNC  47
+#define SYS_BCACHE_STATS 48
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -247,6 +249,18 @@ uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */
 uint32_t malloc_used (void);     /* bytes in non-free blocks */
 uint32_t malloc_free_bytes(void);/* bytes in free blocks */
 uint32_t malloc_brk(void);       /* current break VA */
+
+/* Block cache plumbing (session 27). bcache_sync forces every dirty
+ * block out to disk and returns the number of writes issued. The
+ * stats array gets filled with cumulative counters:
+ *   out[0] = hits           cache lookups served without disk I/O
+ *   out[1] = misses         cache lookups that triggered an ata_read
+ *   out[2] = logical_writes total calls to bcache_write
+ *   out[3] = disk_writes    actual ata_write_sector calls (sync + evict)
+ *   out[4] = dirty          live count of dirty cache slots right now
+ */
+uint32_t sys_bcache_sync (void);
+int      sys_bcache_stats(uint32_t out[5]);
 
 void     putchar(char c);
 void     puts(const char *s);

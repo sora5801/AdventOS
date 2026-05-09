@@ -16,6 +16,7 @@
 #include "tty.h"
 #include "dns.h"
 #include "mmap.h"
+#include "bcache.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -677,6 +678,21 @@ void syscall_dispatch(struct registers *r) {
                 if (k < FS_NAME_MAX) uname[k] = 0;
             }
             ret = next;
+            break;
+        }
+        case SYS_BCACHE_SYNC: {
+            ret = (int32_t)bcache_sync();
+            break;
+        }
+        case SYS_BCACHE_STATS: {
+            uint32_t *uout = (uint32_t *)(uintptr_t)a;
+            if (!uout) { ret = -1; break; }
+            uout[0] = bcache_hits();
+            uout[1] = bcache_misses();
+            uout[2] = bcache_logical_writes();
+            uout[3] = bcache_disk_writes();
+            uout[4] = bcache_dirty();
+            ret = 0;
             break;
         }
         case SYS_DNS_RESOLVE: {

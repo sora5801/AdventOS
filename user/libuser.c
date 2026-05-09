@@ -390,6 +390,24 @@ int sys_readdir(const char *dir_path, int *iter, char *name_buf) {
     return ret;
 }
 
+uint32_t sys_bcache_sync(void) {
+    uint32_t ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BCACHE_SYNC)
+                      : "memory");
+    return ret;
+}
+
+int sys_bcache_stats(uint32_t out[5]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BCACHE_STATS), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

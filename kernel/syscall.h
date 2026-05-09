@@ -51,6 +51,8 @@
 #define SYS_CHDIR        44 /* (eax=44, ebx=path)                        -> 0 or -1     */
 #define SYS_GETCWD       45 /* (eax=45, ebx=buf, ecx=cap)                -> bytes or -1 */
 #define SYS_READDIR      46 /* (eax=46, ebx=dir_path, ecx=&iter, edx=name_buf16) -> idx or -1 */
+#define SYS_BCACHE_SYNC  47 /* (eax=47)                                  -> blocks flushed */
+#define SYS_BCACHE_STATS 48 /* (eax=48, ebx=uint32_t out[5])             -> 0 or -1     */
 
 void syscall_dispatch(struct registers *r);
 

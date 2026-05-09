@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "ata.h"
+#include "bcache.h"
 #include "task.h"
 #include "kprintf.h"
 #include "string.h"
@@ -51,10 +52,13 @@ static void bitmap_free_run(uint32_t start, uint32_t n) {
 }
 
 void fs_init(void) {
-    /* Read 2 sectors of superblock. */
+    /* Read superblock sectors via the cache (which is initialized
+     * before fs_init in kmain). The first call here populates the
+     * cache; subsequent fs_init in a hypothetical re-mount would
+     * see hits. */
     uint8_t sb[FS_SUPER_SECTORS * 512];
     for (uint32_t s = 0; s < FS_SUPER_SECTORS; s++) {
-        if (ata_read_sector(FS_DISK_OFFSET_SECTORS + s, sb + s * 512) != 0) {
+        if (bcache_read(FS_DISK_OFFSET_SECTORS + s, sb + s * 512) != 0) {
             kputs("fs: failed to read superblock\n");
             return;
         }
@@ -94,7 +98,10 @@ static int fs_write_super(void) {
     for (int i = 0; i < (int)sizeof(sb); i++) sb[i] = 0;
     memcpy(sb, &g_super, sizeof(g_super));
     for (uint32_t s = 0; s < FS_SUPER_SECTORS; s++) {
-        if (ata_write_sector(FS_DISK_OFFSET_SECTORS + s, sb + s * 512) != 0) return -1;
+        /* Write-through the cache: bcache_write updates the cached
+         * copy and marks it dirty; the periodic syncer / next
+         * eviction flushes it to disk. */
+        if (bcache_write(FS_DISK_OFFSET_SECTORS + s, sb + s * 512) != 0) return -1;
     }
     return 0;
 }
@@ -206,7 +213,7 @@ int fs_read(int idx, uint32_t offset, void *buf, uint32_t n) {
                           + (abs_off / 512);
         uint32_t off_in   = abs_off % 512;
 
-        if (ata_read_sector(lba, sec_buf) != 0) return -1;
+        if (bcache_read(lba, sec_buf) != 0) return -1;
 
         uint32_t take = 512 - off_in;
         if (take > n) take = n;
@@ -373,8 +380,8 @@ int fs_write_all(const char *path, const void *data, uint32_t size) {
         uint32_t take = (off + 512 <= size) ? 512 : (size - off);
         for (int i = 0; i < 512; i++) buf[i] = 0;
         if (take > 0) memcpy(buf, src + off, take);
-        if (ata_write_sector(FS_DISK_OFFSET_SECTORS + (uint32_t)new_start + s,
-                             buf) != 0) {
+        if (bcache_write(FS_DISK_OFFSET_SECTORS + (uint32_t)new_start + s,
+                         buf) != 0) {
             bitmap_free_run((uint32_t)new_start, needed);
             return -1;
         }

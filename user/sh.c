@@ -1013,6 +1013,89 @@ static void selftest(void) {
         #undef RUN_LINE
     }
 
+    puts("[t18] block cache: hit ratio + write coalescing + sync\n");
+    {
+        /* The cache has been live since boot, so the first stat
+         * snapshot won't be zero — the kernel's own fs_init,
+         * elf_load of init/sh/httpd, and tests t1..t17 all
+         * went through bcache. We measure DELTAS between
+         * snapshots taken before and after a controlled action. */
+
+        uint32_t s0[5], s1[5], s2[5], s3[5];
+
+        sys_bcache_stats(s0);
+        printf("  baseline: hits=%u misses=%u "
+               "logical_w=%u disk_w=%u dirty=%u\n",
+               s0[0], s0[1], s0[2], s0[3], s0[4]);
+
+        /* (a) Hit ratio. Read the same file twice. The first read
+         *     populates the cache (mostly misses); the second read
+         *     should be all hits. */
+        int fd = sys_open("/etc/inittab");
+        if (fd >= 0) {
+            char rbuf[512];
+            int  r;
+            while ((r = sys_read(fd, rbuf, sizeof(rbuf))) > 0) {}
+            sys_close(fd);
+        }
+        sys_bcache_stats(s1);
+
+        fd = sys_open("/etc/inittab");
+        if (fd >= 0) {
+            char rbuf[512];
+            int  r;
+            while ((r = sys_read(fd, rbuf, sizeof(rbuf))) > 0) {}
+            sys_close(fd);
+        }
+        sys_bcache_stats(s2);
+
+        uint32_t first_hits   = s1[0] - s0[0];
+        uint32_t first_misses = s1[1] - s0[1];
+        uint32_t reread_hits  = s2[0] - s1[0];
+        uint32_t reread_misses= s2[1] - s1[1];
+        printf("  first read /etc/inittab : delta hits=%u misses=%u\n",
+               first_hits, first_misses);
+        printf("  re-read /etc/inittab    : delta hits=%u misses=%u "
+               "(should be all hits)\n", reread_hits, reread_misses);
+
+        /* (b) Write coalescing. Rewrite the same file 11 times.
+         *     With write-through, each rewrite hits 1 data sector +
+         *     2 superblock sectors = ~3 disk writes per rewrite, or
+         *     33 total. With write-back + same-LBA coalescing, those
+         *     dirty entries collapse to one outstanding dirty per
+         *     LBA — the post-rewrite delta in disk_writes should be
+         *     0 (or 0 plus whatever the periodic syncer caught). */
+        const char *body = "rewrite via bcache test\n";
+        for (int i = 0; i < 11; i++) {
+            sys_fs_write("bc.txt", body, (uint32_t)strlen(body));
+        }
+        sys_bcache_stats(s3);
+        uint32_t logical_delta = s3[2] - s2[2];
+        uint32_t disk_delta    = s3[3] - s2[3];
+        printf("  11x sys_fs_write bc.txt: delta logical_w=%u disk_w=%u "
+               "dirty=%u\n",
+               logical_delta, disk_delta, s3[4]);
+
+        /* (c) Sync flushes everything outstanding. */
+        uint32_t flushed = sys_bcache_sync();
+        sys_bcache_stats(s3);
+        printf("  sys_bcache_sync flushed %u block(s); dirty after=%u\n",
+               flushed, s3[4]);
+
+        /* (d) Persistence — read back via the cache (which is now
+         *     in a clean state) and confirm the file's bytes are what
+         *     we wrote 11 rewrites later. */
+        fd = sys_open("bc.txt");
+        if (fd >= 0) {
+            char rbuf[64];
+            int  r = sys_read(fd, rbuf, sizeof(rbuf) - 1);
+            sys_close(fd);
+            if (r < 0) r = 0;
+            rbuf[r] = 0;
+            printf("  read bc.txt after sync: '%s' (%d bytes)\n", rbuf, r);
+        }
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

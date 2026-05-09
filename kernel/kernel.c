@@ -23,6 +23,7 @@
 #include "ata.h"
 #include "rtc.h"
 #include "fs.h"
+#include "bcache.h"
 #include "net.h"
 #include "udp.h"
 #include "dhcp.h"
@@ -148,6 +149,13 @@ void kmain(uint32_t boot_drive) {
     ata_init();
     kputs("ok\n");
 
+    /* Block cache must be live BEFORE fs_init — fs.c reads its
+     * superblock through bcache_read on the first call. */
+    kputs("[boot] initializing block cache... ");
+    bcache_init();
+    kprintf("ok (%d slots, %d KiB)\n",
+            (int)BCACHE_NR, (int)(BCACHE_NR * BCACHE_BLKSZ / 1024));
+
     kputs("[boot] mounting AdventFS... ");
     fs_init();
 
@@ -190,6 +198,10 @@ void kmain(uint32_t boot_drive) {
     task_reaper_start();
     task_create(demo_task_a, "demo_a");
     task_create(demo_task_b, "demo_b");
+
+    /* The bcache syncer needs the task system + interrupts up so its
+     * pit_sleep() loop can actually be scheduled. */
+    bcache_start_syncer();
 
     /* TCP and the socket layer must be ready before any user task
      * tries to bind/listen. The HTTP server is no longer in-kernel —

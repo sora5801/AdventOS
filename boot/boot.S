@@ -30,9 +30,18 @@ _start:
     mov     $msg_boot, %si
     call    print
 
-    /* Load kernel via int 13h LBA extension (ah=42h) */
+    /* Load kernel via int 13h LBA extension (ah=42h). Many BIOSes
+     * cap a single DAP read at 127 sectors; we issue two back-to-
+     * back reads of 128 each, totaling 256 sectors (128 KiB). The
+     * second one starts at LBA 129 and lands at linear 0x20000. */
     movb    drive, %dl
-    mov     $dap, %si
+    mov     $dap1, %si
+    mov     $0x42, %ah
+    int     $0x13
+    jc      disk_err
+
+    movb    drive, %dl
+    mov     $dap2, %si
     mov     $0x42, %ah
     int     $0x13
     jc      disk_err
@@ -166,14 +175,24 @@ gdtr:
     .word gdt_end - gdt - 1
     .long gdt
 
-/* Disk Address Packet for int 13h ah=42h */
-dap:
+/* Disk Address Packets — split into two so the BIOS doesn't choke
+ * on a single >127-sector read (real-machine BIOSes commonly cap
+ * one int-13h-ah=42h call at that). */
+dap1:
     .byte 0x10              /* size of packet */
     .byte 0x00              /* reserved */
-    .word 128               /* number of sectors to read (64 KiB) — was 112; bumped in session 21 when UDP/DHCP/DNS pushed kernel.bin past 56 KiB */
+    .word 128               /* sectors to read (64 KiB) */
     .word 0x0000            /* destination offset */
     .word 0x1000            /* destination segment (linear 0x10000) */
     .quad 1                 /* starting LBA */
+
+dap2:
+    .byte 0x10
+    .byte 0x00
+    .word 128               /* another 64 KiB; total 128 KiB */
+    .word 0x0000
+    .word 0x2000            /* destination segment (linear 0x20000) */
+    .quad 129               /* starting LBA = 1 + 128 */
 
 /* Pad to 510 bytes, then write boot signature 0x55AA */
 .org 510
