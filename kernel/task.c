@@ -8,6 +8,9 @@
 #include "isr.h"
 #include "elf.h"
 #include "fs.h"
+#include "sock.h"
+#include "pipe.h"
+#include "tmpfs.h"
 #include "../include/io.h"
 
 extern void task_switch(uint32_t *old_esp, uint32_t new_esp);
@@ -105,8 +108,9 @@ struct task *task_create(task_fn entry, const char *name) {
 
     /* Pre-wire fd 0/1/2 to stdin/stdout/stderr. */
     for (int i = 0; i < TASK_MAX_FDS; i++) {
-        t->fds[i].kind     = FD_FREE;
-        t->fds[i].sock_idx = -1;
+        t->fds[i].kind    = FD_FREE;
+        t->fds[i].obj_idx = -1;
+        t->fds[i].offset  = 0;
     }
     t->fds[0].kind = FD_STDIN;
     t->fds[1].kind = FD_STDOUT;
@@ -415,13 +419,19 @@ struct task *task_fork(struct registers *parent_regs) {
     child->exit_code        = 0;
     strncpy(child->name, parent->name, TASK_NAME_MAX - 1);
 
-    /* 5. Inherit fd table verbatim. fd offsets are per-fd (no shared
-     *    open-file table), so child gets an independent file position;
-     *    socket fds work but a double-close becomes the second close
-     *    failing rather than UB — acceptable for our shell which never
-     *    forks while a socket is open. */
+    /* 5. Inherit fd table. memcpy the entries + bump refcounts on the
+     *    underlying objects for kinds that reference-count (pipes,
+     *    tmpfs). Sockets and FS handles share by index without
+     *    explicit refs — fine today because the shell doesn't fork
+     *    while sockets are open and FS handles are read-only. */
     for (int i = 0; i < TASK_MAX_FDS; i++) {
         child->fds[i] = parent->fds[i];
+        switch (parent->fds[i].kind) {
+            case FD_PIPE_R: pipe_inc_read (parent->fds[i].obj_idx); break;
+            case FD_PIPE_W: pipe_inc_write(parent->fds[i].obj_idx); break;
+            case FD_TMPFS:  tmpfs_inc_ref (parent->fds[i].obj_idx); break;
+            default: break;
+        }
     }
 
     /* 6. Splice into the round-robin ring. */
@@ -489,9 +499,35 @@ int task_exec_inplace(struct registers *r,
     return 0;
 }
 
+/* Drop all per-fd references this task holds. Mirrors syscall.c's
+ * release_fd() but inlined here so task.c doesn't need to include
+ * syscall.h. Kernel-only tasks (no user PD) skip this — they don't
+ * own user-visible fds. */
+static void close_all_fds(struct task *t) {
+    for (int i = 0; i < TASK_MAX_FDS; i++) {
+        struct task_fd *e = &t->fds[i];
+        switch (e->kind) {
+            case FD_SOCK:    sock_close       (e->obj_idx); break;
+            case FD_PIPE_R:  pipe_close_read  (e->obj_idx); break;
+            case FD_PIPE_W:  pipe_close_write (e->obj_idx); break;
+            case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
+            default: break;
+        }
+        e->kind    = FD_FREE;
+        e->obj_idx = -1;
+        e->offset  = 0;
+    }
+}
+
 void task_exit_current(int exit_code) {
     struct task *t = g_current;
     t->exit_code = exit_code;
+
+    /* Close everything we still have open. Critical for pipes:
+     * without this, a child that exits without explicitly close()'ing
+     * its pipe-write end would leave write_refs > 0 forever and the
+     * reader on the other side would never see EOF. */
+    if (t->is_user) close_all_fds(t);
 
     /* If our parent is waiting for any child, wake it. The parent will
      * loop scanning its children for a zombie and harvest us. */

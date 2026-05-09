@@ -47,6 +47,9 @@ typedef unsigned int  size_t;
 #define SYS_FORK       18
 #define SYS_EXEC       19
 #define SYS_WAIT       20
+#define SYS_PIPE       21
+#define SYS_DUP2       22
+#define SYS_OPEN_W     23
 
 /* Single-char console write. The fd-aware variant (`sys_write` below)
  * is what new programs should call; this wraps the legacy SYS_WRITE
@@ -85,6 +88,14 @@ int      sys_accept(int fd);
 int      sys_fork (void);
 int      sys_exec (const char *path, const char *const *argv);
 int      sys_wait (int *exit_code);
+
+/* Pipes + redirection plumbing.
+ *   pipe(fds): fds[0] = read end, fds[1] = write end
+ *   dup2(o,n): atomic close-then-clone, n becomes a copy of o
+ *   open_w   : create-or-truncate a writable in-RAM file (the > target) */
+int      sys_pipe   (int fds[2]);
+int      sys_dup2   (int oldfd, int newfd);
+int      sys_open_w (const char *name);
 
 void     putchar(char c);
 void     puts(const char *s);

@@ -183,10 +183,49 @@ int sys_wait(int *exit_code) {
     return ret;
 }
 
+int sys_pipe(int fds[2]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_PIPE), "b"(fds)
+                      : "memory");
+    return ret;
+}
+
+int sys_dup2(int oldfd, int newfd) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_DUP2), "b"(oldfd), "c"(newfd)
+                      : "memory");
+    return ret;
+}
+
+int sys_open_w(const char *name) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_OPEN_W), "b"(name)
+                      : "memory");
+    return ret;
+}
+
 /* ---------- Output --------------------------------------------------- */
 
-void putchar(char c) { sys_putchar(c); }
-void puts(const char *s) { sys_write_str(s); }
+/*
+ * stdout-aware versions. Going through SYS_WRITE_FD with fd=1 means
+ * dup2(pipe_w, 1) before exec actually causes our printf output to
+ * land in the pipe instead of the console — which is the whole point
+ * of session 15. The legacy sys_putchar / sys_write_str syscalls
+ * still exist (the .up1/.up2 asm demos use them by number) but the
+ * higher-level libuser stack no longer calls them.
+ */
+void putchar(char c)        { sys_write(1, &c, 1); }
+void puts(const char *s)    {
+    int n = 0;
+    while (s[n]) n++;
+    sys_write(1, s, n);
+}
 
 static void put_dec_signed(int32_t n) {
     char buf[12];

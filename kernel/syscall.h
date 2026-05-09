@@ -25,6 +25,9 @@
 #define SYS_FORK       18  /* (eax=18)                   -> child pid (parent), 0 (child), -1 err */
 #define SYS_EXEC       19  /* (eax=19, ebx=path, ecx=argv) -> -1 on err, no return on success */
 #define SYS_WAIT       20  /* (eax=20, ebx=&exit_code)   -> child pid or -1 if no children */
+#define SYS_PIPE       21  /* (eax=21, ebx=&fds[2])      -> 0 / -1; fds[0]=read end fds[1]=write end */
+#define SYS_DUP2       22  /* (eax=22, ebx=oldfd, ecx=newfd) -> newfd or -1 */
+#define SYS_OPEN_W     23  /* (eax=23, ebx=name)         -> tmpfs fd (truncated) or -1 */
 
 void syscall_dispatch(struct registers *r);
 

@@ -6,8 +6,34 @@
 #include "shell.h"
 #include "fs.h"
 #include "sock.h"
+#include "pipe.h"
+#include "tmpfs.h"
 #include "string.h"
 #include "kmalloc.h"
+
+/* Allocate the lowest free fd >= 3 in the calling task's table.
+ * Returns the fd index or -1 if the table is full. */
+static int alloc_fd(struct task *t) {
+    for (int fd = 3; fd < TASK_MAX_FDS; fd++) {
+        if (t->fds[fd].kind == FD_FREE) return fd;
+    }
+    return -1;
+}
+
+/* Drop a per-fd reference to whatever resource backs `e`. Pipes and
+ * tmpfs files use proper refcounting; sockets close immediately
+ * (refcount discipline is local to sock.c and adequate for our
+ * fork/exec paths today). After the call the caller is expected to
+ * mark e->kind = FD_FREE itself. */
+static void release_fd(struct task_fd *e) {
+    switch (e->kind) {
+        case FD_SOCK:    sock_close       (e->obj_idx); break;
+        case FD_PIPE_R:  pipe_close_read  (e->obj_idx); break;
+        case FD_PIPE_W:  pipe_close_write (e->obj_idx); break;
+        case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
+        default: break;     /* FD_FS / FD_STDIN / FD_STDOUT have no refcount */
+    }
+}
 
 #define USER_STR_MAX 256
 
@@ -98,19 +124,48 @@ void syscall_dispatch(struct registers *r) {
             for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
             name[i] = 0;
 
+            struct task *t = task_current();
+            int fd = alloc_fd(t);
+            if (fd < 0) { ret = -1; break; }
+
+            /* Try the on-disk read-only fs first; fall back to tmpfs
+             * if the name was created earlier via SYS_OPEN_W. */
             int fs_idx = fs_open(name);
-            if (fs_idx < 0) { ret = -1; break; }
+            if (fs_idx >= 0) {
+                t->fds[fd].kind    = FD_FS;
+                t->fds[fd].obj_idx = fs_idx;
+                t->fds[fd].offset  = 0;
+                ret = fd;
+                break;
+            }
+            int tmp_idx = tmpfs_open(name);
+            if (tmp_idx >= 0) {
+                t->fds[fd].kind    = FD_TMPFS;
+                t->fds[fd].obj_idx = tmp_idx;
+                t->fds[fd].offset  = 0;
+                ret = fd;
+                break;
+            }
+            ret = -1;
+            break;
+        }
+        case SYS_OPEN_W: {
+            const char *uname = (const char *)(uintptr_t)a;
+            char name[FS_NAME_MAX + 1];
+            int  i;
+            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
+            name[i] = 0;
 
             struct task *t = task_current();
-            int fd;
-            for (fd = 3; fd < TASK_MAX_FDS; fd++) {
-                if (t->fds[fd].kind == FD_FREE) break;
-            }
-            if (fd == TASK_MAX_FDS) { ret = -1; break; }
+            int fd = alloc_fd(t);
+            if (fd < 0) { ret = -1; break; }
 
-            t->fds[fd].kind   = FD_FS;
-            t->fds[fd].fs_idx = fs_idx;
-            t->fds[fd].offset = 0;
+            int tmp_idx = tmpfs_create(name);
+            if (tmp_idx < 0) { ret = -1; break; }
+
+            t->fds[fd].kind    = FD_TMPFS;
+            t->fds[fd].obj_idx = tmp_idx;
+            t->fds[fd].offset  = 0;
             ret = fd;
             break;
         }
@@ -121,20 +176,33 @@ void syscall_dispatch(struct registers *r) {
 
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)        { ret = -1; break; }
-            int kind = t->fds[fd].kind;
-            if (kind == FD_FREE)                     { ret = -1; break; }
-
-            if (kind == FD_STDIN) {
-                ret = kshell_read_line(buf, n);
-            } else if (kind == FD_FS) {
-                int rd = fs_read(t->fds[fd].fs_idx,
-                                 t->fds[fd].offset, buf, (uint32_t)n);
-                if (rd > 0) t->fds[fd].offset += (uint32_t)rd;
-                ret = rd;
-            } else if (kind == FD_SOCK) {
-                ret = sock_read(t->fds[fd].sock_idx, buf, n);
-            } else {
-                ret = -1;
+            struct task_fd *e = &t->fds[fd];
+            switch (e->kind) {
+                case FD_STDIN:
+                    ret = kshell_read_line(buf, n);
+                    break;
+                case FD_FS: {
+                    int rd = fs_read(e->obj_idx, e->offset, buf, (uint32_t)n);
+                    if (rd > 0) e->offset += (uint32_t)rd;
+                    ret = rd;
+                    break;
+                }
+                case FD_TMPFS: {
+                    int rd = tmpfs_read(e->obj_idx, e->offset,
+                                        buf, (uint32_t)n);
+                    if (rd > 0) e->offset += (uint32_t)rd;
+                    ret = rd;
+                    break;
+                }
+                case FD_SOCK:
+                    ret = sock_read(e->obj_idx, buf, n);
+                    break;
+                case FD_PIPE_R:
+                    ret = pipe_read(e->obj_idx, buf, n);
+                    break;
+                default:
+                    ret = -1;
+                    break;
             }
             break;
         }
@@ -145,15 +213,24 @@ void syscall_dispatch(struct registers *r) {
 
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
-            int kind = t->fds[fd].kind;
-
-            if (kind == FD_STDOUT) {
-                for (int i = 0; i < n; i++) kputc(buf[i]);
-                ret = n;
-            } else if (kind == FD_SOCK) {
-                ret = sock_write(t->fds[fd].sock_idx, buf, n);
-            } else {
-                ret = -1;
+            struct task_fd *e = &t->fds[fd];
+            switch (e->kind) {
+                case FD_STDOUT:
+                    for (int i = 0; i < n; i++) kputc(buf[i]);
+                    ret = n;
+                    break;
+                case FD_SOCK:
+                    ret = sock_write(e->obj_idx, buf, n);
+                    break;
+                case FD_PIPE_W:
+                    ret = pipe_write(e->obj_idx, buf, n);
+                    break;
+                case FD_TMPFS:
+                    ret = tmpfs_write(e->obj_idx, buf, (uint32_t)n);
+                    break;
+                default:
+                    ret = -1;
+                    break;
             }
             break;
         }
@@ -162,11 +239,10 @@ void syscall_dispatch(struct registers *r) {
             struct task *t = task_current();
             if (fd < 3 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind == FD_FREE)           { ret = -1; break; }
-            if (t->fds[fd].kind == FD_SOCK) {
-                sock_close(t->fds[fd].sock_idx);
-            }
-            t->fds[fd].kind     = FD_FREE;
-            t->fds[fd].sock_idx = -1;
+            release_fd(&t->fds[fd]);
+            t->fds[fd].kind    = FD_FREE;
+            t->fds[fd].obj_idx = -1;
+            t->fds[fd].offset  = 0;
             ret = 0;
             break;
         }
@@ -175,14 +251,11 @@ void syscall_dispatch(struct registers *r) {
             if (sock_idx < 0) { ret = -1; break; }
 
             struct task *t = task_current();
-            int fd;
-            for (fd = 3; fd < TASK_MAX_FDS; fd++) {
-                if (t->fds[fd].kind == FD_FREE) break;
-            }
-            if (fd == TASK_MAX_FDS) { sock_close(sock_idx); ret = -1; break; }
+            int fd = alloc_fd(t);
+            if (fd < 0) { sock_close(sock_idx); ret = -1; break; }
 
-            t->fds[fd].kind     = FD_SOCK;
-            t->fds[fd].sock_idx = sock_idx;
+            t->fds[fd].kind    = FD_SOCK;
+            t->fds[fd].obj_idx = sock_idx;
             ret = fd;
             break;
         }
@@ -192,7 +265,7 @@ void syscall_dispatch(struct registers *r) {
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
-            ret = sock_bind(t->fds[fd].sock_idx, (uint16_t)port);
+            ret = sock_bind(t->fds[fd].obj_idx, (uint16_t)port);
             break;
         }
         case SYS_LISTEN: {
@@ -201,7 +274,7 @@ void syscall_dispatch(struct registers *r) {
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
-            ret = sock_listen(t->fds[fd].sock_idx);
+            ret = sock_listen(t->fds[fd].obj_idx);
             break;
         }
         case SYS_ACCEPT: {
@@ -210,20 +283,78 @@ void syscall_dispatch(struct registers *r) {
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
 
-            int conn_sock = sock_accept(t->fds[fd].sock_idx);
+            int conn_sock = sock_accept(t->fds[fd].obj_idx);
             if (conn_sock < 0) { ret = -1; break; }
 
-            int conn_fd;
-            for (conn_fd = 3; conn_fd < TASK_MAX_FDS; conn_fd++) {
-                if (t->fds[conn_fd].kind == FD_FREE) break;
-            }
-            if (conn_fd == TASK_MAX_FDS) {
-                sock_close(conn_sock);
+            int conn_fd = alloc_fd(t);
+            if (conn_fd < 0) { sock_close(conn_sock); ret = -1; break; }
+
+            t->fds[conn_fd].kind    = FD_SOCK;
+            t->fds[conn_fd].obj_idx = conn_sock;
+            ret = conn_fd;
+            break;
+        }
+        case SYS_PIPE: {
+            int *ufds = (int *)(uintptr_t)a;
+            struct task *t = task_current();
+
+            int rfd = alloc_fd(t);
+            if (rfd < 0) { ret = -1; break; }
+            /* Tentatively claim rfd so alloc_fd doesn't return it
+             * again for wfd. */
+            t->fds[rfd].kind    = FD_PIPE_R;
+            t->fds[rfd].obj_idx = -1;
+            int wfd = alloc_fd(t);
+            if (wfd < 0) {
+                t->fds[rfd].kind = FD_FREE;
                 ret = -1; break;
             }
-            t->fds[conn_fd].kind     = FD_SOCK;
-            t->fds[conn_fd].sock_idx = conn_sock;
-            ret = conn_fd;
+
+            int p = pipe_new();
+            if (p < 0) {
+                t->fds[rfd].kind = FD_FREE;
+                ret = -1; break;
+            }
+
+            t->fds[rfd].kind    = FD_PIPE_R;
+            t->fds[rfd].obj_idx = p;
+            t->fds[wfd].kind    = FD_PIPE_W;
+            t->fds[wfd].obj_idx = p;
+            ufds[0] = rfd;
+            ufds[1] = wfd;
+            ret = 0;
+            break;
+        }
+        case SYS_DUP2: {
+            int oldfd = (int)a;
+            int newfd = (int)b;
+            struct task *t = task_current();
+            if (oldfd < 0 || oldfd >= TASK_MAX_FDS)   { ret = -1; break; }
+            if (newfd < 0 || newfd >= TASK_MAX_FDS)   { ret = -1; break; }
+            if (t->fds[oldfd].kind == FD_FREE)        { ret = -1; break; }
+            if (oldfd == newfd) { ret = newfd; break; }
+
+            /* Drop newfd's existing reference (if any) before
+             * overwriting. POSIX dup2 is "atomic close+dup" — same
+             * end-state, no fd ever briefly unallocated. */
+            if (t->fds[newfd].kind != FD_FREE) {
+                release_fd(&t->fds[newfd]);
+            }
+
+            t->fds[newfd] = t->fds[oldfd];
+
+            /* Bump the underlying object's refcount so close(oldfd)
+             * doesn't free what newfd is still pointing at. */
+            switch (t->fds[oldfd].kind) {
+                case FD_PIPE_R:  pipe_inc_read  (t->fds[oldfd].obj_idx); break;
+                case FD_PIPE_W:  pipe_inc_write (t->fds[oldfd].obj_idx); break;
+                case FD_TMPFS:   tmpfs_inc_ref  (t->fds[oldfd].obj_idx); break;
+                /* Sockets and FS handles share via memcpy: there's no
+                 * per-fd refcount today. fork()'s own dup-the-table
+                 * behavior has the same semantics. */
+                default: break;
+            }
+            ret = newfd;
             break;
         }
         case SYS_FORK: {

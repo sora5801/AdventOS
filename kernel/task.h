@@ -9,21 +9,28 @@
 #define TASK_MAX_FDS   8
 
 /* Per-process file descriptor entry. fd 0/1/2 are wired up to console
- * stdin/stdout/stderr at task_create time; fd 3+ hold filesystem-backed
- * handles obtained via SYS_OPEN. */
+ * stdin/stdout/stderr at task_create time; fd 3+ hold handles obtained
+ * via SYS_OPEN, SYS_OPEN_W, SYS_SOCKET, SYS_PIPE, SYS_ACCEPT.
+ *
+ * The fd entry is kind-discriminated: `obj_idx` indexes the per-kind
+ * table (fs / sock / pipe / tmpfs). Using one slot for all kinds keeps
+ * dup2 trivial — the entry is just (kind, obj_idx, offset) and we
+ * memcpy on dup2 (after bumping the underlying object's refcount). */
 enum {
     FD_FREE   = 0,
     FD_STDIN,
     FD_STDOUT,
     FD_FS,
     FD_SOCK,
+    FD_PIPE_R,
+    FD_PIPE_W,
+    FD_TMPFS,
 };
 
 struct task_fd {
     int      kind;
-    int      fs_idx;       /* used iff kind == FD_FS    */
-    uint32_t offset;       /* used iff kind == FD_FS    */
-    int      sock_idx;     /* used iff kind == FD_SOCK  */
+    int      obj_idx;      /* fs_idx / sock_idx / pipe_idx / tmpfs_idx */
+    uint32_t offset;       /* used by FD_FS, FD_TMPFS                  */
 };
 
 enum {

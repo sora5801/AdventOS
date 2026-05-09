@@ -6,9 +6,15 @@
 #include "libuser.h"
 
 int main(int argc, char **argv) {
+    /* No args: copy stdin to stdout until EOF. Lets cat slot into a
+     * pipeline as `... | cat | ...` or `... | cat`. */
     if (argc < 2) {
-        sys_write(2, "usage: cat <file> [...]\n", 24);
-        return 1;
+        char buf[256];
+        int  n;
+        while ((n = sys_read(0, buf, sizeof(buf))) > 0) {
+            sys_write(1, buf, n);
+        }
+        return 0;
     }
 
     for (int i = 1; i < argc; i++) {

@@ -1,63 +1,257 @@
 /*
- * AdventOS userspace shell — pid 5 at boot, plus a `forktest` builtin
- * that demonstrates fork/exec/wait independently of running an external
- * program.
+ * AdventOS userspace shell — pid 5 at boot. Pipelines + redirection.
  *
- * Read a line, tokenize it, then:
- *   - if it matches a builtin, run it inline,
- *   - otherwise fork(); the child execs argv[0]+".elf" via SYS_EXEC,
- *     and the parent waits for it.
+ * Read a line, tokenize it on `|` and `>`, then for each pipeline
+ * stage do the standard fork → dup2 → close → exec dance:
  *
- * The previous SYS_KCMD path is gone — every external command is now
- * a real ring-3 process spawned with fork() + exec(). The kernel
- * commands (ifconfig, tasks, meminfo, ...) live in kernel/shell.c
- * still, but they're no longer reachable from this shell. They could
- * be ported to user-mode programs in a future session.
+ *   pipe(p[i])      for each adjacent pair of stages
+ *   for each stage:
+ *     fork()
+ *       child: dup2 prev pipe read end to fd 0 (if any),
+ *              dup2 next pipe write end to fd 1 (if any),
+ *              dup2 the > target to fd 1 if this is the last stage,
+ *              close every leftover pipe fd,
+ *              exec()
+ *   parent: close every pipe fd, wait() for each child.
+ *
+ * Builtins (help, pid, time, sleep, forktest, exit) run inline.
+ * Everything else is a fork+exec pipeline.
  */
 
 #include "libuser.h"
 
-#define LINE_MAX  256
-#define ARG_MAX   16
+#define LINE_MAX        256
+#define ARG_MAX         16
+#define PIPELINE_MAX    8
 
 static const char *g_prompt = "advent$ ";
 
 /* ---- helpers ------------------------------------------------------- */
 
-/* In-place tokenize on spaces. Writes NULs over separators and fills
- * argv[]. Returns argc. Stops at ARG_MAX-1 args (leaves room for the
- * NULL terminator argv expects). */
-static int tokenize(char *line, char **argv) {
-    int argc = 0;
+/* Tokenize on whitespace AND on `|`/`>` — the operator characters
+ * become standalone tokens. Writes NULs over separators in `line` and
+ * fills tokens[]. Returns token count. Stops at `cap-1` tokens.
+ *
+ * Example: "echo hi | cat > foo" → ["echo","hi","|","cat",">","foo"]. */
+static int tokenize(char *line, char **tokens, int cap) {
+    int n = 0;
     char *p = line;
-    while (*p && argc < ARG_MAX - 1) {
+    while (*p && n < cap - 1) {
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
-        argv[argc++] = p;
-        while (*p && *p != ' ' && *p != '\t') p++;
-        if (*p) { *p = 0; p++; }
+
+        if (*p == '|' || *p == '>') {
+            char saved = *p;
+            *p++ = 0;        /* nothing to terminate, but be tidy */
+            (void)saved;
+            /* Write a one-char token in a separate static buffer per
+             * operator, since the source byte itself is now NUL. */
+            static char pipe_tok[2] = {'|', 0};
+            static char gt_tok  [2] = {'>', 0};
+            tokens[n++] = (saved == '|') ? pipe_tok : gt_tok;
+            continue;
+        }
+
+        tokens[n++] = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '|' && *p != '>') p++;
+        if (*p == ' ' || *p == '\t') { *p = 0; p++; }
+        /* If we hit '|' or '>', leave them for the next iteration. */
     }
-    argv[argc] = 0;
-    return argc;
+    tokens[n] = 0;
+    return n;
 }
 
-/* Append ".elf" to a name if it doesn't already have it. Static buffer
- * — fine, the shell is single-threaded against itself. */
+/* Append ".elf" to a name if it doesn't already have it.
+ *
+ * `buf` is initialized non-zero on purpose: a bare `static char buf[64]`
+ * goes into .bss, which user.ld DISCARDs (we have no .bss-zeroing
+ * startup), leaving the symbol resolved at address 0 and the next
+ * write a NULL deref. An explicit non-zero init forces .data, where
+ * the bytes are loaded from the ELF as-is. */
 static const char *resolve_program(const char *name) {
-    static char buf[64];
+    static char buf[64] = ".";
     int i = 0;
     while (name[i] && i < 60) { buf[i] = name[i]; i++; }
-    /* Already has .elf? */
     if (i >= 4 && buf[i-4] == '.' && buf[i-3] == 'e' &&
         buf[i-2] == 'l' && buf[i-1] == 'f') {
         buf[i] = 0;
         return buf;
     }
-    /* Append. */
-    if (i + 4 >= (int)sizeof(buf)) return name;   /* too long, give up */
+    if (i + 4 >= (int)sizeof(buf)) return name;
     buf[i++] = '.'; buf[i++] = 'e'; buf[i++] = 'l'; buf[i++] = 'f';
     buf[i] = 0;
     return buf;
+}
+
+/* ---- pipeline parser ----------------------------------------------- */
+
+/* A parsed pipeline: an array of stages, each stage being its own
+ * argv slice into the tokens[] buffer. Plus one optional `>` target
+ * that applies to the last stage. */
+struct stage {
+    char **argv;     /* NULL-terminated, points into tokens[] */
+    int    argc;
+};
+
+struct pipeline {
+    struct stage stages[PIPELINE_MAX];
+    int          nstages;
+    const char  *outfile;       /* > target, or NULL */
+};
+
+/* Walk tokens[] and split into stages by `|`. A trailing `>` <name>
+ * binds to the last stage. Returns 0 on success, -1 on syntax error.
+ *
+ * tokens[] is mutated: the operator slots get NUL'd to terminate
+ * each stage's argv slice, so argv[argc] is NULL as exec expects. */
+static int parse_pipeline(char **tokens, int ntok, struct pipeline *pl) {
+    pl->nstages = 0;
+    pl->outfile = 0;
+
+    int start = 0;
+    for (int j = 0; j < ntok; j++) {
+        char *t = tokens[j];
+        if (t[0] == '|' && t[1] == 0) {
+            if (pl->nstages >= PIPELINE_MAX) return -1;
+            if (j == start)                  return -1;   /* empty LHS */
+            pl->stages[pl->nstages].argv = &tokens[start];
+            pl->stages[pl->nstages].argc = j - start;
+            tokens[j] = 0;                                 /* terminate slice */
+            pl->nstages++;
+            start = j + 1;
+        } else if (t[0] == '>' && t[1] == 0) {
+            /* Everything from `start` through j-1 is the last stage's
+             * argv; the next token is the outfile name. */
+            if (j + 1 >= ntok)               return -1;
+            if (j == start)                  return -1;
+            if (pl->nstages >= PIPELINE_MAX) return -1;
+            pl->stages[pl->nstages].argv = &tokens[start];
+            pl->stages[pl->nstages].argc = j - start;
+            tokens[j] = 0;
+            pl->nstages++;
+            pl->outfile = tokens[j + 1];
+            return 0;       /* anything after the filename is ignored */
+        }
+    }
+    /* Tail stage with no trailing operator. */
+    if (start < ntok) {
+        if (pl->nstages >= PIPELINE_MAX) return -1;
+        pl->stages[pl->nstages].argv = &tokens[start];
+        pl->stages[pl->nstages].argc = ntok - start;
+        pl->nstages++;
+    }
+    return pl->nstages > 0 ? 0 : -1;
+}
+
+/* ---- execution ----------------------------------------------------- */
+
+/* Run a pipeline. Forks one child per stage, wires up stdin/stdout
+ * with dup2, closes every stale pipe fd in each child, then waits
+ * for all children to exit. Returns the exit code of the LAST stage
+ * (the canonical pipeline status), or -1 on setup failure. */
+static int run_pipeline(struct pipeline *pl) {
+    int n = pl->nstages;
+
+    /* Allocate n-1 pipes up front so each child gets the right pair. */
+    int pipes[PIPELINE_MAX - 1][2];
+    for (int i = 0; i < n - 1; i++) {
+        if (sys_pipe(pipes[i]) < 0) {
+            puts("sh: pipe() failed\n");
+            /* Close any pipes we already created. */
+            for (int k = 0; k < i; k++) {
+                sys_close(pipes[k][0]);
+                sys_close(pipes[k][1]);
+            }
+            return -1;
+        }
+    }
+
+    /* Open the > target if any. We do it in the parent so the parent
+     * keeps a reference; the child will dup2 then close. */
+    int outfd = -1;
+    if (pl->outfile) {
+        outfd = sys_open_w(pl->outfile);
+        if (outfd < 0) {
+            puts("sh: cannot open > target: "); puts(pl->outfile); puts("\n");
+            for (int i = 0; i < n - 1; i++) {
+                sys_close(pipes[i][0]); sys_close(pipes[i][1]);
+            }
+            return -1;
+        }
+    }
+
+    int pids[PIPELINE_MAX];
+    for (int i = 0; i < n; i++) pids[i] = -1;
+
+    for (int i = 0; i < n; i++) {
+        int pid = sys_fork();
+        if (pid < 0) {
+            puts("sh: fork() failed mid-pipeline\n");
+            /* Best effort: close everything, wait for the children
+             * we already spawned. */
+            for (int k = 0; k < n - 1; k++) {
+                sys_close(pipes[k][0]); sys_close(pipes[k][1]);
+            }
+            if (outfd >= 0) sys_close(outfd);
+            for (int k = 0; k < i; k++) {
+                int code; sys_wait(&code);
+            }
+            return -1;
+        }
+
+        if (pid == 0) {
+            /* Child stage i.
+             *   - if i > 0   : dup the prev pipe's read end to fd 0.
+             *   - if i < n-1 : dup this pipe's write end to fd 1.
+             *   - if i==n-1 and outfile: dup outfd to fd 1.
+             *   - then close ALL pipe fds + outfd we don't need.
+             *   - exec.
+             */
+            if (i > 0)            sys_dup2(pipes[i - 1][0], 0);
+            if (i < n - 1)        sys_dup2(pipes[i][1],     1);
+            else if (outfd >= 0)  sys_dup2(outfd,           1);
+
+            for (int k = 0; k < n - 1; k++) {
+                sys_close(pipes[k][0]);
+                sys_close(pipes[k][1]);
+            }
+            if (outfd >= 0) sys_close(outfd);
+
+            const char *path = resolve_program(pl->stages[i].argv[0]);
+            sys_exec(path, (const char *const *)pl->stages[i].argv);
+            /* exec only returns on failure. */
+            sys_write(2, "sh: exec failed: ", 17);
+            sys_write(2, path, (int)strlen(path));
+            sys_write(2, "\n", 1);
+            sys_exit(127);
+        }
+        pids[i] = pid;
+    }
+
+    /* Parent: drop all pipe references so writers can see EOF when
+     * all children writing to a given pipe exit. Critical — if we
+     * held the read end of pipe[0] open, the cat in stage 1 reading
+     * from it would never see EOF after echo in stage 0 exits. */
+    for (int i = 0; i < n - 1; i++) {
+        sys_close(pipes[i][0]);
+        sys_close(pipes[i][1]);
+    }
+    if (outfd >= 0) sys_close(outfd);
+
+    /* Wait for every child. Track the last-stage exit code as the
+     * pipeline result. */
+    int last_code = 0;
+    int waited    = 0;
+    while (waited < n) {
+        int code = 0;
+        int r    = sys_wait(&code);
+        if (r < 0) break;
+        for (int i = 0; i < n; i++) {
+            if (pids[i] == r && i == n - 1) last_code = code;
+        }
+        waited++;
+    }
+    return last_code;
 }
 
 /* ---- builtins ------------------------------------------------------ */
@@ -67,25 +261,19 @@ static void cmd_help(void) {
     puts("  help              this list\n");
     puts("  pid               print our pid via SYS_GETPID\n");
     puts("  time              print epoch via SYS_TIME\n");
-    puts("  sleep MS          pause MS milliseconds (yields to other tasks)\n");
+    puts("  sleep MS          pause MS milliseconds\n");
     puts("  forktest          fork() and have child + parent print their pids\n");
     puts("  exit [CODE]       exit the shell\n");
     puts("\n");
-    puts("Anything else is launched as a separate process via fork()+exec().\n");
-    puts("The kernel will look up <NAME>.elf in AdventFS, build a fresh user PD\n");
-    puts("for it, and run it concurrently with the shell. The shell then waits\n");
-    puts("for the child to exit and prints its exit code.\n");
-    puts("\n");
-    puts("Programs available in /:  hello  count  cat  echo  httpd\n");
+    puts("Pipelines and redirection:\n");
+    puts("  cmd1 | cmd2 | ... [> outfile]\n");
+    puts("  Each stage is a separate fork()+exec(); | wires stdin/stdout\n");
+    puts("  via SYS_PIPE+SYS_DUP2; > opens an in-RAM tmpfs file you can\n");
+    puts("  later cat back. Programs in /:  hello count cat echo httpd\n");
 }
 
-static void cmd_pid(void) {
-    printf("shell pid: %d\n", sys_getpid());
-}
-
-static void cmd_time(void) {
-    printf("epoch: %u\n", sys_time());
-}
+static void cmd_pid(void)  { printf("shell pid: %d\n", sys_getpid()); }
+static void cmd_time(void) { printf("epoch: %u\n", sys_time()); }
 
 static void cmd_sleep(const char *arg) {
     uint32_t ms = 0;
@@ -94,147 +282,152 @@ static void cmd_sleep(const char *arg) {
     sys_sleep_ms(ms);
 }
 
-/* fork() demo — proves the syscall returns twice with two different
- * EAX values, and that the child gets its own user PD (we modify a
- * stack variable in the child and parent never sees the change). */
 static void cmd_forktest(void) {
     int marker = 0xCAFE;
     int pid = sys_fork();
-    if (pid < 0) {
-        puts("forktest: fork() failed\n");
-        return;
-    }
+    if (pid < 0) { puts("forktest: fork() failed\n"); return; }
     if (pid == 0) {
-        /* Child */
         marker = 0xBABE;
         printf("  child : pid=%d  marker=0x%x  (was 0xCAFE in parent)\n",
                sys_getpid(), marker);
         sys_exit(42);
     }
-    /* Parent */
     int code = -1;
     int reaped = sys_wait(&code);
     printf("  parent: pid=%d  marker=0x%x  child_pid=%d  reaped=%d  exit=%d\n",
            sys_getpid(), marker, pid, reaped, code);
 }
 
-/* ---- main loop ----------------------------------------------------- */
+/* ---- selftest ------------------------------------------------------ */
 
-/* Auto-run a fork/exec/wait demo at startup. Triggered by passing
- * "selftest" as argv[1] — kmain does this so that the milestone is
- * verifiable on a headless boot without needing keyboard input. */
+/* Headless boot can't drive the shell from the keyboard, so kmain
+ * passes "selftest" as argv[1]. We run a sequence of demos that
+ * exercise fork/exec/wait, pipes, and > redirection — each prints
+ * something verifiable on the serial log. */
 static void selftest(void) {
-    puts("\n=== sh selftest: fork / exec / wait ===\n");
+    puts("\n=== sh selftest: fork / exec / wait / pipe / > ===\n");
 
-    /* Test 1: fork() returns twice with two different EAX values. */
     puts("[t1] forktest:\n");
     cmd_forktest();
 
-    /* Test 2: fork + exec hello.elf, parent waits. */
     puts("[t2] fork + exec hello.elf:\n");
-    int pid = sys_fork();
-    if (pid == 0) {
-        const char *argv2[] = { "hello.elf", 0 };
-        sys_exec("hello.elf", argv2);
-        sys_exit(127);
-    }
-    int code = -1;
-    int r = sys_wait(&code);
-    printf("  parent waited: pid=%d  exit=%d\n", r, code);
-
-    /* Test 3: nested fork — parent forks, child forks again, all three
-     * print pids and exit. Demonstrates that a forked child can fork. */
-    puts("[t3] nested fork:\n");
-    int pid2 = sys_fork();
-    if (pid2 == 0) {
-        printf("  child1 pid=%d, about to fork()\n", sys_getpid());
-        int pid3 = sys_fork();
-        if (pid3 == 0) {
-            printf("  child2 pid=%d (parent=%d)\n",
-                   sys_getpid(), pid2);
-            sys_exit(7);
+    {
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv2[] = { "hello.elf", 0 };
+            sys_exec("hello.elf", argv2);
+            sys_exit(127);
         }
-        int c2 = 0;
-        sys_wait(&c2);
-        printf("  child1 reaped grandchild, exit=%d\n", c2);
-        sys_exit(11);
+        int code = -1;
+        int r = sys_wait(&code);
+        printf("  parent waited: pid=%d  exit=%d\n", r, code);
     }
-    int c1 = 0;
-    sys_wait(&c1);
-    printf("  parent reaped child1, exit=%d\n", c1);
+
+    puts("[t3] pipe: echo hello world | cat\n");
+    {
+        char line[] = "echo hello world from a pipe | cat";
+        char *toks[ARG_MAX];
+        int n = tokenize(line, toks, ARG_MAX);
+        struct pipeline pl;
+        if (parse_pipeline(toks, n, &pl) == 0) {
+            int rc = run_pipeline(&pl);
+            printf("  pipeline rc=%d\n", rc);
+        } else {
+            puts("  parse failed\n");
+        }
+    }
+
+    puts("[t4] redirect: echo line1 > tmp.txt ; cat tmp.txt\n");
+    {
+        char line[] = "echo line1 written via redirect > tmp.txt";
+        char *toks[ARG_MAX];
+        int n = tokenize(line, toks, ARG_MAX);
+        struct pipeline pl;
+        if (parse_pipeline(toks, n, &pl) == 0) {
+            int rc = run_pipeline(&pl);
+            printf("  redirect rc=%d  (now reading it back)\n", rc);
+        }
+        char line2[] = "cat tmp.txt";
+        n = tokenize(line2, toks, ARG_MAX);
+        if (parse_pipeline(toks, n, &pl) == 0) {
+            int rc = run_pipeline(&pl);
+            printf("  cat rc=%d\n", rc);
+        }
+    }
+
+    puts("[t5] pipeline + redirect: echo a b c | cat > tmp2.txt ; cat tmp2.txt\n");
+    {
+        char line[] = "echo a b c | cat > tmp2.txt";
+        char *toks[ARG_MAX];
+        int n = tokenize(line, toks, ARG_MAX);
+        struct pipeline pl;
+        if (parse_pipeline(toks, n, &pl) == 0) {
+            int rc = run_pipeline(&pl);
+            printf("  rc=%d\n", rc);
+        }
+        char line2[] = "cat tmp2.txt";
+        n = tokenize(line2, toks, ARG_MAX);
+        if (parse_pipeline(toks, n, &pl) == 0) {
+            run_pipeline(&pl);
+        }
+    }
 
     puts("=== selftest done ===\n\n");
 }
 
+/* ---- main loop ----------------------------------------------------- */
+
 int main(int argc, char **argv) {
-    /* If invoked with "selftest" as a positional arg, run the
-     * fork/exec/wait demo before entering the prompt loop. */
     int run_selftest = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "selftest") == 0) { run_selftest = 1; break; }
     }
 
     puts("\nAdventOS userspace shell, pid="); printf("%d\n", sys_getpid());
-    puts("Type 'help' for builtins. External programs run via fork()+exec().\n\n");
+    puts("Type 'help' for builtins. | and > are honored.\n\n");
 
     if (run_selftest) selftest();
 
     char  line[LINE_MAX];
-    char *targv[ARG_MAX];
+    char *toks[ARG_MAX];
 
     for (;;) {
         puts(g_prompt);
         int n = sys_read_line(line, sizeof(line));
         if (n <= 0) continue;
 
-        /* Tokenize a working copy so the rest of the shell sees argv[]. */
-        int targc = tokenize(line, targv);
-        if (targc == 0) continue;
+        int ntok = tokenize(line, toks, ARG_MAX);
+        if (ntok == 0) continue;
 
-        /* Builtins. */
-        if (strcmp(targv[0], "help")     == 0) { cmd_help(); continue; }
-        if (strcmp(targv[0], "pid")      == 0) { cmd_pid();  continue; }
-        if (strcmp(targv[0], "time")     == 0) { cmd_time(); continue; }
-        if (strcmp(targv[0], "forktest") == 0) { cmd_forktest(); continue; }
-        if (strcmp(targv[0], "sleep")    == 0) {
-            cmd_sleep(targc > 1 ? targv[1] : "");
+        /* Builtins (only valid as the SOLE token sequence — pipelines
+         * containing builtins are not supported, since builtins run
+         * inline in the shell process). */
+        if (strcmp(toks[0], "help")     == 0) { cmd_help();  continue; }
+        if (strcmp(toks[0], "pid")      == 0) { cmd_pid();   continue; }
+        if (strcmp(toks[0], "time")     == 0) { cmd_time();  continue; }
+        if (strcmp(toks[0], "forktest") == 0) { cmd_forktest(); continue; }
+        if (strcmp(toks[0], "sleep")    == 0) {
+            cmd_sleep(ntok > 1 ? toks[1] : "");
             continue;
         }
-        if (strcmp(targv[0], "exit") == 0) {
+        if (strcmp(toks[0], "exit") == 0) {
             int code = 0;
-            if (targc > 1) {
-                const char *p = targv[1];
+            if (ntok > 1) {
+                const char *p = toks[1];
                 while (*p >= '0' && *p <= '9') { code = code*10 + (*p - '0'); p++; }
             }
             puts("bye\n");
             sys_exit(code);
         }
 
-        /* External: fork() then exec() in the child, wait() in parent. */
-        const char *path = resolve_program(targv[0]);
-        int pid = sys_fork();
-        if (pid < 0) {
-            puts("sh: fork() failed\n");
+        struct pipeline pl;
+        if (parse_pipeline(toks, ntok, &pl) < 0) {
+            puts("sh: parse error\n");
             continue;
         }
-        if (pid == 0) {
-            /* Child: argv[] still points into the (cloned) parent
-             * stack page, which is private to us now. Pass it through
-             * to exec — the kernel snapshots strings before tearing
-             * down our address space. */
-            sys_exec(path, (const char *const *)targv);
-            /* If exec returns at all, it failed. */
-            puts("sh: exec failed: "); puts(path); puts("\n");
-            sys_exit(127);
-        }
-
-        /* Parent: wait for the child we just forked. Our shell only
-         * has one outstanding child at a time so this works without
-         * matching pid against the returned wait value. */
-        int code = 0;
-        int reaped = sys_wait(&code);
-        if (reaped > 0 && code != 0) {
-            printf("[pid %d exited with code %d]\n", reaped, code);
+        int rc = run_pipeline(&pl);
+        if (rc != 0) {
+            printf("[exit %d]\n", rc);
         }
     }
 }
