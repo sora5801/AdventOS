@@ -182,17 +182,19 @@ void kmain(uint32_t boot_drive) {
     kputs("\n");
     banner();
 
-    /* Helper: load + setup args + spawn a single user task. */
-    /* (kept inline since we only call it twice from here)         */
-    #define LAUNCH(path, name) do {                                        \
+    /* Helper: load + setup args + spawn a single user task. argv is a
+     * brace-enclosed initializer list — pass any number of strings.
+     * Example: LAUNCH("sh.elf", "sh", "selftest"); */
+    #define LAUNCH(path, ...) do {                                         \
         int _fd = fs_open(path);                                           \
         if (_fd >= 0) {                                                    \
             struct elf_load_result _r;                                     \
             if (elf_load(_fd, &_r) == 0) {                                 \
-                const char *_argv[] = { name };                            \
-                elf_setup_args(&_r, 1, _argv);                             \
+                const char *_argv[] = { __VA_ARGS__ };                     \
+                int _argc = (int)(sizeof(_argv) / sizeof(_argv[0]));       \
+                elf_setup_args(&_r, _argc, _argv);                         \
                 struct task *_t = task_create_user(_r.entry, _r.user_esp,  \
-                                                   _r.cr3, name);          \
+                                                   _r.cr3, _argv[0]);      \
                 if (_t) kprintf("[boot] launched %s as pid %u\n",          \
                                 path, (unsigned)_t->id);                   \
             }                                                              \
@@ -200,7 +202,7 @@ void kmain(uint32_t boot_drive) {
     } while (0)
 
     LAUNCH("httpd.elf", "httpd");
-    LAUNCH("sh.elf",    "sh");
+    LAUNCH("sh.elf",    "sh", "selftest");
     kputc('\n');
 
     /* If the shell launched, we expect it to drive the system from

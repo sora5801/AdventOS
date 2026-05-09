@@ -38,3 +38,22 @@ _task_switch:
     pop     %ebp
     popfl                       /* restores IF for the incoming task */
     ret
+
+/*
+ * Trampoline used by task_fork(): identical to the tail of
+ * isr_common_stub. The forked child's kernel stack was synthesized so
+ * that task_switch's `ret` jumps here, and the iret frame at the top
+ * of that stack matches what the parent's syscall entry pushed (with
+ * EAX zeroed so fork() returns 0 in the child).
+ */
+.global _fork_child_return
+_fork_child_return:
+    pop     %eax                /* saved DS                          */
+    mov     %ax, %ds
+    mov     %ax, %es
+    mov     %ax, %fs
+    mov     %ax, %gs
+
+    popa                        /* restores all GP regs (eax = 0)    */
+    add     $8, %esp            /* skip int_no + err_code            */
+    iret                        /* back to ring 3 at parent's EIP    */

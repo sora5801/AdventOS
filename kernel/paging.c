@@ -137,6 +137,64 @@ int paging_map_in(uint32_t *pd, uintptr_t virt, uintptr_t phys, uint32_t flags) 
     return r;
 }
 
+uint32_t *paging_clone_user_pd(uint32_t *parent) {
+    if (!parent) return NULL;
+
+    uint32_t *child = (uint32_t *)pmm_alloc_page();
+    if (!child) return NULL;
+    memset(child, 0, PAGE_SIZE);
+
+    /* Mirror kernel PDEs by reference — same page tables, same mappings.
+     * Kernel code/data/stacks live here and must stay reachable after the
+     * eventual CR3 swap. */
+    for (int i = 0; i < 8; i++) {
+        child[i] = parent[i];
+    }
+
+    for (uint32_t i = 8; i < 1024; i++) {
+        if (!(parent[i] & PTE_PRESENT)) continue;
+
+        uint32_t *parent_pt = (uint32_t *)(uintptr_t)(parent[i] & (uint32_t)PAGE_MASK);
+        uint32_t *child_pt  = (uint32_t *)pmm_alloc_page();
+        if (!child_pt) {
+            paging_destroy_user_pd(child);
+            return NULL;
+        }
+        memset(child_pt, 0, PAGE_SIZE);
+
+        for (uint32_t j = 0; j < 1024; j++) {
+            uint32_t pte = parent_pt[j];
+            if (!(pte & PTE_PRESENT)) continue;
+
+            void *src_page = (void *)(uintptr_t)(pte & (uint32_t)PAGE_MASK);
+            void *dst_page = pmm_alloc_page();
+            if (!dst_page) {
+                /* Free what we already allocated in this PT. The outer
+                 * paging_destroy_user_pd will reach this child_pt via
+                 * the (already-set) child PDE — install it first. */
+                child[i] = ((uint32_t)(uintptr_t)child_pt & (uint32_t)PAGE_MASK)
+                           | (parent[i] & 0xFFFu);
+                paging_destroy_user_pd(child);
+                return NULL;
+            }
+
+            /* Both pages are identity-mapped under the kernel master PD,
+             * so we can copy via their physical addresses directly. */
+            memcpy(dst_page, src_page, PAGE_SIZE);
+
+            child_pt[j] = ((uint32_t)(uintptr_t)dst_page & (uint32_t)PAGE_MASK)
+                          | (pte & 0xFFFu);
+        }
+
+        /* Install the child PT into the child PDE with the parent's
+         * exact PDE flags (PRESENT/USER/WRITABLE/etc.). */
+        child[i] = ((uint32_t)(uintptr_t)child_pt & (uint32_t)PAGE_MASK)
+                   | (parent[i] & 0xFFFu);
+    }
+
+    return child;
+}
+
 void paging_destroy_user_pd(uint32_t *pd) {
     if (!pd) return;
     /* Skip PDEs 0..7 — those reference page tables that are shared

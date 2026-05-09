@@ -80,15 +80,6 @@ int sys_read_line(char *buf, int cap) {
     return ret;
 }
 
-int sys_kcmd(const char *line) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(SYS_KCMD), "b"(line)
-                      : "memory");
-    return ret;
-}
-
 int sys_open(const char *name) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -157,6 +148,37 @@ int sys_accept(int fd) {
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_ACCEPT), "b"(fd)
+                      : "memory");
+    return ret;
+}
+
+int sys_fork(void) {
+    int ret;
+    /* The kernel synthesizes the child's stack so its first user
+     * instruction is the one immediately after `int $0x80`, with
+     * EAX=0. So control returns from this asm twice: in the parent
+     * with EAX=child_pid, in the child with EAX=0. */
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FORK)
+                      : "memory");
+    return ret;
+}
+
+int sys_exec(const char *path, const char *const *argv) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_EXEC), "b"(path), "c"(argv)
+                      : "memory");
+    return ret;
+}
+
+int sys_wait(int *exit_code) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WAIT), "b"(exit_code)
                       : "memory");
     return ret;
 }

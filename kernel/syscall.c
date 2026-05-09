@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "sock.h"
 #include "string.h"
+#include "kmalloc.h"
 
 #define USER_STR_MAX 256
 
@@ -40,10 +41,10 @@ void syscall_dispatch(struct registers *r) {
         case SYS_EXIT: {
             kprintf("\n[user task pid=%u exited code=%d]\n",
                     (unsigned)task_current()->id, (int)a);
-            task_current()->state = TASK_STATE_DEAD;
-            /* schedule() picks a non-DEAD task. We never return here:
-             * the dead task's kernel stack still has our return frame
-             * but nothing will ever pop it. */
+            /* Records exit_code, wakes our parent if it's waiting on
+             * us, and demotes us to ZOMBIE (parent will harvest via
+             * sys_wait) or DEAD (kernel reaper will free). */
+            task_exit_current((int)a);
             schedule();
             for (;;) __asm__ volatile ("hlt");
         }
@@ -86,18 +87,10 @@ void syscall_dispatch(struct registers *r) {
             ret = kshell_read_line(user_buf, cap);
             break;
         }
-        case SYS_KCMD: {
-            /* Snapshot the user string into kernel memory because
-             * kshell_run_line modifies it (NUL-terminates the verb). */
-            const char *p = (const char *)(uintptr_t)a;
-            char buf[256];
-            int  i;
-            for (i = 0; i < (int)sizeof(buf) - 1 && p[i]; i++) buf[i] = p[i];
-            buf[i] = 0;
-            kshell_run_line(buf);
-            ret = 0;
-            break;
-        }
+        /* SYS_KCMD removed in session 14 — userspace shell uses
+         * fork/exec/wait now. The case is intentionally absent so
+         * an old binary calling SYS_KCMD = 9 falls through to the
+         * default handler and gets -1 + an "unknown syscall" log. */
         case SYS_OPEN: {
             const char *uname = (const char *)(uintptr_t)a;
             char name[FS_NAME_MAX + 1];
@@ -231,6 +224,84 @@ void syscall_dispatch(struct registers *r) {
             t->fds[conn_fd].kind     = FD_SOCK;
             t->fds[conn_fd].sock_idx = conn_sock;
             ret = conn_fd;
+            break;
+        }
+        case SYS_FORK: {
+            struct task *child = task_fork(r);
+            if (!child) { ret = -1; break; }
+            /* Parent path: return child's pid. The child's "return" is
+             * synthesized inside task_fork — it'll iret to the same
+             * user EIP with EAX=0 the next time it's scheduled. */
+            ret = (int32_t)child->id;
+            break;
+        }
+        case SYS_EXEC: {
+            /* Snapshot path + argv into kernel memory BEFORE we touch
+             * the user PD (task_exec_inplace will free it). After that
+             * point, every user pointer is invalid. */
+            const char  *upath = (const char *)(uintptr_t)a;
+            const char **uargv = (const char **)(uintptr_t)b;
+
+            char path[64];
+            int i;
+            for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) path[i] = upath[i];
+            path[i] = 0;
+
+            /* Walk uargv (NULL-terminated user pointer array), copy
+             * each string into a kmalloc'd buf. Cap at 16 args. */
+            #define EXEC_MAX_ARGS 16
+            char *argv_kbufs[EXEC_MAX_ARGS] = {0};
+            int   argc = 0;
+            if (uargv) {
+                for (argc = 0; argc < EXEC_MAX_ARGS && uargv[argc]; argc++) {
+                    const char *s = uargv[argc];
+                    int len; for (len = 0; s[len]; len++) {}
+                    char *kb = (char *)kmalloc((size_t)len + 1);
+                    if (!kb) {
+                        for (int j = 0; j < argc; j++) kfree(argv_kbufs[j]);
+                        ret = -1;
+                        goto exec_done;
+                    }
+                    for (int j = 0; j < len; j++) kb[j] = s[j];
+                    kb[len] = 0;
+                    argv_kbufs[argc] = kb;
+                }
+            }
+            if (argc == 0) {
+                /* No argv passed — synthesize argv[0] = path so _start
+                 * always sees at least one arg. */
+                int len; for (len = 0; path[len]; len++) {}
+                char *kb = (char *)kmalloc((size_t)len + 1);
+                if (!kb) { ret = -1; goto exec_done; }
+                for (int j = 0; j < len; j++) kb[j] = path[j];
+                kb[len] = 0;
+                argv_kbufs[0] = kb;
+                argc = 1;
+            }
+
+            int err = task_exec_inplace(r, path, argc,
+                                        (const char *const *)argv_kbufs);
+
+            /* The strings have been copied onto the new user stack by
+             * elf_setup_args; we own the kernel copies. Free them
+             * regardless of success/failure. */
+            for (int j = 0; j < argc; j++) kfree(argv_kbufs[j]);
+
+            if (err != 0) ret = -1;
+            else          ret = 0;
+            /* On success r->eip/useresp have been rewritten — when the
+             * isr_common_stub iret runs we land in the new program.
+             * _start's first instruction overwrites eax with argc, so
+             * the dispatcher's `r->eax = ret` below is harmless. */
+        exec_done:
+            break;
+        }
+        case SYS_WAIT: {
+            int  *uout = (int *)(uintptr_t)a;
+            int   exit_code = 0;
+            int   pid = task_wait_current(uout ? &exit_code : NULL);
+            if (pid > 0 && uout) *uout = exit_code;
+            ret = pid;
             break;
         }
         default:

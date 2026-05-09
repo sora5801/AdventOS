@@ -35,7 +35,7 @@ typedef unsigned int  size_t;
 #define SYS_SLEEP_MS   6
 #define SYS_TIME       7
 #define SYS_READ_LINE  8
-#define SYS_KCMD       9
+/* SYS_KCMD = 9 retired in session 14 (real fork/exec/wait shell) */
 #define SYS_OPEN       10
 #define SYS_READ       11
 #define SYS_WRITE_FD   12
@@ -44,6 +44,9 @@ typedef unsigned int  size_t;
 #define SYS_BIND       15
 #define SYS_LISTEN     16
 #define SYS_ACCEPT     17
+#define SYS_FORK       18
+#define SYS_EXEC       19
+#define SYS_WAIT       20
 
 /* Single-char console write. The fd-aware variant (`sys_write` below)
  * is what new programs should call; this wraps the legacy SYS_WRITE
@@ -57,7 +60,6 @@ int      sys_write_str(const char *s);
 void     sys_sleep_ms(uint32_t ms);
 uint32_t sys_time(void);
 int      sys_read_line(char *buf, int cap);
-int      sys_kcmd(const char *line);
 
 /* Unix-flavored fd operations. fd 0/1/2 are pre-wired in the kernel
  * to stdin/stdout/stderr; sys_open returns a fresh descriptor for
@@ -74,6 +76,15 @@ int      sys_socket(void);
 int      sys_bind  (int fd, int port);
 int      sys_listen(int fd, int backlog);
 int      sys_accept(int fd);
+
+/* Process primitives. fork() returns the child pid in the parent and
+ * 0 in the child. exec() never returns on success — it replaces the
+ * calling process's address space with the loaded ELF and restarts
+ * at the new program's _start. wait() blocks until any child exits;
+ * if exit_code is non-NULL it receives the child's exit code. */
+int      sys_fork (void);
+int      sys_exec (const char *path, const char *const *argv);
+int      sys_wait (int *exit_code);
 
 void     putchar(char c);
 void     puts(const char *s);

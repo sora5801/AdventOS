@@ -40,4 +40,14 @@ int       paging_map_in(uint32_t *pd, uintptr_t virt, uintptr_t phys, uint32_t f
  * present PT, frees the PT pages, then frees the PD page itself. */
 void      paging_destroy_user_pd(uint32_t *pd);
 
+/* Deep-copy `parent` into a fresh user PD. Kernel PDEs (0..7) are shared
+ * by reference (same page-table pointers as paging_create_user_pd would
+ * install). Each user PDE is rebuilt: a new PT is allocated, then for
+ * every present PTE in the parent's PT a new physical page is allocated
+ * and the parent page's contents are memcpy'd into it.
+ *
+ * Returns the child PD's virtual address (== physical, identity-mapped),
+ * or NULL on out-of-memory. On failure all partial allocations are freed. */
+uint32_t *paging_clone_user_pd(uint32_t *parent);
+
 #endif
