@@ -6,11 +6,45 @@
 
 static struct sock g_socks[SOCK_MAX];
 
+/* ---- listener accept queue ---------------------------------------- */
+
+static int q_empty(struct sock *s) {
+    return s->pending_head == s->pending_tail;
+}
+static int q_full(struct sock *s) {
+    /* Treat backlog as the cap; full when adding would equal tail. */
+    int next = (s->pending_head + 1) % SOCK_BACKLOG_MAX;
+    return next == s->pending_tail ||
+           ((s->pending_head - s->pending_tail + SOCK_BACKLOG_MAX) % SOCK_BACKLOG_MAX
+                >= s->backlog);
+}
+static void q_init(struct sock *s, int backlog) {
+    if (backlog <= 0)               backlog = 1;
+    if (backlog > SOCK_BACKLOG_MAX) backlog = SOCK_BACKLOG_MAX;
+    s->backlog      = backlog;
+    s->pending_head = 0;
+    s->pending_tail = 0;
+    for (int i = 0; i < SOCK_BACKLOG_MAX; i++) s->pending_conns[i] = -1;
+}
+static int q_push(struct sock *s, int conn_idx) {
+    if (q_full(s)) return -1;
+    s->pending_conns[s->pending_head] = conn_idx;
+    s->pending_head = (s->pending_head + 1) % SOCK_BACKLOG_MAX;
+    return 0;
+}
+static int q_pop(struct sock *s) {
+    if (q_empty(s)) return -1;
+    int v = s->pending_conns[s->pending_tail];
+    s->pending_conns[s->pending_tail] = -1;
+    s->pending_tail = (s->pending_tail + 1) % SOCK_BACKLOG_MAX;
+    return v;
+}
+
 void sock_init(void) {
     for (int i = 0; i < SOCK_MAX; i++) {
         memset(&g_socks[i], 0, sizeof(g_socks[i]));
-        g_socks[i].state        = SOCK_FREE;
-        g_socks[i].pending_conn = -1;
+        g_socks[i].state    = SOCK_FREE;
+        q_init(&g_socks[i], 0);
     }
 }
 
@@ -18,10 +52,10 @@ int sock_create(void) {
     for (int i = 0; i < SOCK_MAX; i++) {
         if (g_socks[i].state == SOCK_FREE) {
             memset(&g_socks[i], 0, sizeof(g_socks[i]));
-            g_socks[i].state        = SOCK_NEW;
-            g_socks[i].refcount     = 1;
-            g_socks[i].pending_conn = -1;
-            g_socks[i].tcb          = 0;
+            g_socks[i].state    = SOCK_NEW;
+            g_socks[i].refcount = 1;
+            g_socks[i].tcb      = 0;
+            q_init(&g_socks[i], 0);
             return i;
         }
     }
@@ -77,6 +111,12 @@ static void on_connect(struct tcb *t) {
     struct sock *l = s;
     if (l->state != SOCK_LISTEN) return;
 
+    /* Refuse if our backlog ring is full. The TCB has already
+     * been allocated; we'd ideally tear it down here so the
+     * peer sees RST, but for now leak — the kernel reaper will
+     * release it when its state machine progresses. */
+    if (q_full(l)) return;
+
     int conn = -1;
     for (int i = 0; i < SOCK_MAX; i++) {
         if (g_socks[i].state == SOCK_FREE) { conn = i; break; }
@@ -86,15 +126,15 @@ static void on_connect(struct tcb *t) {
     memset(&g_socks[conn], 0, sizeof(g_socks[conn]));
     g_socks[conn].state        = SOCK_CONNECTED;
     g_socks[conn].refcount     = 1;
-    g_socks[conn].pending_conn = -1;
     g_socks[conn].tcb          = t;
     g_socks[conn].peer_closed  = 0;
+    q_init(&g_socks[conn], 0);
 
     /* Re-target the conn TCB's user_data at the new conn sock so
      * subsequent on_recv / on_close land on the right ring. */
     t->user_data = (void *)(uintptr_t)(conn + 1);
 
-    l->pending_conn = conn;
+    q_push(l, conn);
 }
 
 /* Fires per data segment (IRQ context). Pushes bytes into the conn
@@ -120,11 +160,11 @@ static void on_close(struct tcb *t) {
 
 /* ---- Public ops ---------------------------------------------------- */
 
-int sock_listen(int idx) {
+int sock_listen(int idx, int backlog) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     if (g_socks[idx].state != SOCK_NEW) return -1;
-    g_socks[idx].state        = SOCK_LISTEN;
-    g_socks[idx].pending_conn = -1;
+    g_socks[idx].state = SOCK_LISTEN;
+    q_init(&g_socks[idx], backlog);
     /* user_data is sock_idx + 1 so 0 is reserved for "no callback". */
     void *ud = (void *)(uintptr_t)(idx + 1);
     g_socks[idx].tcb = tcp_listen(g_socks[idx].port,
@@ -140,12 +180,13 @@ int sock_accept(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     if (g_socks[idx].state != SOCK_LISTEN) return -1;
 
-    while (g_socks[idx].pending_conn < 0) {
+    /* Block until something's queued. Multiple SYNs can land while
+     * we're blocked here; each one pushes a fresh conn-sock into
+     * the listener's pending ring (capped at backlog). */
+    while (q_empty(&g_socks[idx])) {
         task_yield();
     }
-    int conn = g_socks[idx].pending_conn;
-    g_socks[idx].pending_conn = -1;
-    return conn;
+    return q_pop(&g_socks[idx]);
 }
 
 int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
@@ -157,10 +198,10 @@ int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
     for (int i = 0; i < 4; i++) remote.b[i] = dst[i];
 
     g_socks[idx].state        = SOCK_CONNECTING;
-    g_socks[idx].pending_conn = -1;
     g_socks[idx].peer_closed  = 0;
     g_socks[idx].rx_head      = 0;
     g_socks[idx].rx_tail      = 0;
+    q_init(&g_socks[idx], 0);
 
     void *ud = (void *)(uintptr_t)(idx + 1);
     struct tcb *t = tcp_connect(&remote, port,
@@ -237,8 +278,8 @@ int sock_close(int idx) {
         /* tcp_close may have released the tcb; don't deref. */
         s->tcb = 0;
     }
-    s->state        = SOCK_FREE;
-    s->refcount     = 0;
-    s->pending_conn = -1;
+    s->state    = SOCK_FREE;
+    s->refcount = 0;
+    q_init(s, 0);
     return 0;
 }

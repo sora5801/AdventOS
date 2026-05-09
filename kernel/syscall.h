@@ -54,6 +54,7 @@
 #define SYS_BCACHE_SYNC  47 /* (eax=47)                                  -> blocks flushed */
 #define SYS_BCACHE_STATS 48 /* (eax=48, ebx=uint32_t out[5])             -> 0 or -1     */
 #define SYS_CONNECT      49 /* (eax=49, ebx=fd, ecx=ip[4], edx=port)     -> 0 or -1     */
+#define SYS_WAIT_NB      50 /* (eax=50, ebx=&exit_code) -> pid or 0 (no zombie ready) or -1 (no children) */
 
 void syscall_dispatch(struct registers *r);
 

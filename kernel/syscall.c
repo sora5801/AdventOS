@@ -304,12 +304,12 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_LISTEN: {
-            int fd = (int)a;
-            (void)b;                                 /* backlog ignored */
+            int fd      = (int)a;
+            int backlog = (int)b;
             struct task *t = task_current();
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
-            ret = sock_listen(t->fds[fd].obj_idx);
+            ret = sock_listen(t->fds[fd].obj_idx, backlog);
             break;
         }
         case SYS_CONNECT: {
@@ -479,6 +479,14 @@ void syscall_dispatch(struct registers *r) {
             int  *uout = (int *)(uintptr_t)a;
             int   exit_code = 0;
             int   pid = task_wait_current(uout ? &exit_code : NULL);
+            if (pid > 0 && uout) *uout = exit_code;
+            ret = pid;
+            break;
+        }
+        case SYS_WAIT_NB: {
+            int  *uout = (int *)(uintptr_t)a;
+            int   exit_code = 0;
+            int   pid = task_waitpid_nb_current(uout ? &exit_code : NULL);
             if (pid > 0 && uout) *uout = exit_code;
             ret = pid;
             break;

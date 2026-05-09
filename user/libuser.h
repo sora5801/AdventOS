@@ -77,6 +77,7 @@ typedef unsigned int   size_t;
 #define SYS_BCACHE_SYNC  47
 #define SYS_BCACHE_STATS 48
 #define SYS_CONNECT      49
+#define SYS_WAIT_NB      50
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -149,6 +150,15 @@ int      sys_connect(int fd, const unsigned char ip[4], int port);
 int      sys_fork (void);
 int      sys_exec (const char *path, const char *const *argv);
 int      sys_wait (int *exit_code);
+
+/* Non-blocking variant. Returns:
+ *    >0  pid of a reaped zombie (exit_code filled if non-NULL)
+ *     0  no zombie ready right now (children may still be live)
+ *    -1  no children at all
+ *
+ * Used by fork-per-connection servers to drain zombies between
+ * accept() calls without committing to a blocking wait. */
+int      sys_wait_nb(int *exit_code);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

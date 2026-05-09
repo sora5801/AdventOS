@@ -26,12 +26,11 @@
 #define TCP_RX_BUF 2048
 #define TCP_TX_BUF 2048
 
-/* Pool size — bumped from 1 in session 29. Each listener occupies
- * one slot; each established connection occupies one. With 6 we can
- * run httpd + ircd as listeners (2), plus an active outbound client
- * + its server-side conn (2), plus a host-side curl connecting
- * concurrently (2). Five would normally be enough but tight. */
-#define TCP_MAX_TCBS 6
+/* Pool size — bumped to 16 in session 30 for fork-per-conn httpd.
+ * Each accepted connection holds 2 TCBs (server-side conn + client-
+ * side conn for loopback tests). 1 LISTEN + 3 concurrent loopback
+ * connections = 7 TCBs minimum; bumped to 16 with headroom. */
+#define TCP_MAX_TCBS 16
 
 enum {
     TCP_CLOSED = 0,

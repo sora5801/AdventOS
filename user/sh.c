@@ -1353,6 +1353,50 @@ static void selftest(void) {
         #undef RUN_NET
     }
 
+    puts("[t21] multi-conn TCP: 3 parallel wgets vs queueing httpd\n");
+    {
+        /* Fork three wget clients in parallel and verify all three
+         * complete with HTTP 200. Each one connects to localhost:80
+         * (httpd), races through the 3-way handshake against the
+         * accept queue, gets forked off as a child by httpd, and
+         * comes back with the canned banner.
+         *
+         * The accept queue is what makes this work: with backlog=8,
+         * up to 8 SYNs can land while httpd's parent is between
+         * accept() calls and they all get queued. Without it (the
+         * old single-pending-conn design), only one would land and
+         * the rest would be silently dropped. */
+        int n_clients = 3;
+        int pids[8];
+        for (int i = 0; i < n_clients; i++) {
+            int pid = sys_fork();
+            if (pid == 0) {
+                const char *argv2[] = {
+                    "wget.elf", "http://localhost/", 0
+                };
+                sys_exec("wget.elf", argv2);
+                sys_exit(127);
+            }
+            pids[i] = pid;
+        }
+        printf("  spawned %d wget clients (pids", n_clients);
+        for (int i = 0; i < n_clients; i++) printf(" %d", pids[i]);
+        puts(")\n");
+
+        /* Reap them all. Each prints its own status line on stderr
+         * which gets interleaved into the serial console; the order
+         * varies by scheduler timing. */
+        int ok = 0, fail = 0;
+        for (int i = 0; i < n_clients; i++) {
+            int code = -1;
+            int reaped = sys_wait(&code);
+            if (reaped > 0 && code == 0) ok++;
+            else                          fail++;
+            printf("  reaped pid=%d exit=%d\n", reaped, code);
+        }
+        printf("  result: %d/%d clients succeeded\n", ok, n_clients);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

@@ -743,3 +743,11 @@ int task_wait_current(int *out_code) {
         schedule();
     }
 }
+
+int task_waitpid_nb_current(int *out_code) {
+    struct task *t = g_current;
+    uint32_t pid = reap_one_zombie_of(t, out_code);
+    if (pid != 0) return (int)pid;
+    if (!has_any_live_or_zombie_child(t)) return -1;
+    return 0;       /* children alive, no zombie ready right now */
+}

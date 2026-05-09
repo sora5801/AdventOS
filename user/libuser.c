@@ -192,6 +192,15 @@ int sys_wait(int *exit_code) {
     return ret;
 }
 
+int sys_wait_nb(int *exit_code) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WAIT_NB), "b"(exit_code)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

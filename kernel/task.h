@@ -208,4 +208,14 @@ void           task_exit_current(int exit_code);
  * returns -1 immediately if no children at all). */
 int            task_wait_current(int *out_code);
 
+/* Non-blocking variant of task_wait_current. Returns:
+ *    pid > 0   a zombie child was harvested
+ *    0         a child exists but no zombie is ready right now
+ *    -1        no children at all
+ *
+ * Used by fork-per-conn servers (e.g. httpd) to drain zombies in
+ * between accepts without committing to a blocking wait. Mirrors
+ * Linux waitpid(-1, ..., WNOHANG). */
+int            task_waitpid_nb_current(int *out_code);
+
 #endif

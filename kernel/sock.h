@@ -16,8 +16,9 @@
  * any mix of listeners and clients up to TCP_MAX_TCBS at once.
  */
 
-#define SOCK_MAX     8
-#define SOCK_RX_BUF  2048
+#define SOCK_MAX           16     /* bumped to fit fork-per-conn httpd */
+#define SOCK_RX_BUF        2048
+#define SOCK_BACKLOG_MAX   8      /* per-listener accept-queue depth */
 
 enum {
     SOCK_FREE = 0,
@@ -36,9 +37,16 @@ struct sock {
     uint16_t          port;
     struct tcb       *tcb;          /* live underlying TCP control block */
 
-    /* For LISTEN sockets: the conn-socket index that's been
-     * created but not yet accepted. -1 if no pending connection. */
-    int               pending_conn;
+    /* For LISTEN sockets: a FIFO ring of conn-socket indices that
+     * have completed the 3-way handshake and are awaiting accept.
+     * `backlog` is the configured cap (set by sock_listen). When the
+     * ring is full, an arriving SYN-ACK from the peer still gets
+     * back-pressured by TCP — but we drop the conn from on_connect
+     * since we can't queue it. tail->head order is FIFO. */
+    int               pending_conns[SOCK_BACKLOG_MAX];
+    int               pending_head;       /* enqueue at head */
+    int               pending_tail;       /* dequeue at tail */
+    int               backlog;            /* configured queue depth */
 
     /* For CONNECTED/CONNECTING sockets: SPSC ring buffer. Producer
      * is the TCP rx callback (IRQ context); consumer is the user
@@ -54,7 +62,7 @@ void sock_init(void);
 
 int  sock_create (void);                                /* idx or -1 */
 int  sock_bind   (int idx, uint16_t port);
-int  sock_listen (int idx);
+int  sock_listen (int idx, int backlog);                /* backlog 1..SOCK_BACKLOG_MAX */
 int  sock_accept (int idx);                             /* blocks; returns new idx */
 
 /* Active open. dst is a 4-byte IPv4 in network order; port is host
