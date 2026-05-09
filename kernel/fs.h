@@ -46,4 +46,16 @@ uint32_t    fs_size(int idx);
 const char *fs_name(int idx);
 int         fs_count(void);
 
+/* Write `size` bytes from `data` as the entire contents of `name`,
+ * creating the file if it doesn't exist. Replaces any prior contents.
+ * Allocates a fresh contiguous sector run from the disk's free area
+ * (no in-place rewrite — old sectors leak; cheap and simple), then
+ * persists the updated superblock back to disk so the file survives
+ * a reboot. Returns 0 on success, -1 on error (no slot, write fail). */
+int         fs_write_all(const char *name, const void *data, uint32_t size);
+
+/* Free disk space remaining (in sectors past the high-water mark).
+ * Used by the shell's selftest for sanity reporting. */
+uint32_t    fs_free_sectors(void);
+
 #endif

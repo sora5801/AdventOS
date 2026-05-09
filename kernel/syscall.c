@@ -484,6 +484,22 @@ void syscall_dispatch(struct registers *r) {
             ret = tty_inject(buf, len);
             break;
         }
+        case SYS_FS_WRITE: {
+            /* Snapshot the name into kernel space so a long-ish
+             * write that needs many ata_write_sector calls can't be
+             * tripped up by user-side state changes mid-call. The
+             * data buffer stays user-side: we read it sector-by-
+             * sector via fs_write_all, all on the user task's CR3. */
+            const char *uname = (const char *)(uintptr_t)a;
+            const void *udata = (const void *)(uintptr_t)b;
+            uint32_t    n     = c;
+            char name[FS_NAME_MAX + 1];
+            int  i;
+            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
+            name[i] = 0;
+            ret = fs_write_all(name, udata, n);
+            break;
+        }
         case SYS_BRK: {
             /* Linux-style brk(2): brk(0) returns current break;
              * brk(new) attempts to set the break to `new`. Returns

@@ -76,7 +76,7 @@ echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
 
-USER_PROGS=(hello count sh cat echo httpd)
+USER_PROGS=(hello count sh cat echo httpd ed)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -99,6 +99,18 @@ if [ "$sz" -lt "$fs_offset" ]; then
     dd if=/dev/zero bs=1 count="$pad" >> os.img 2>/dev/null
 fi
 cat fs.img >> os.img
+
+# Pad up to (fs_lba + 1024) sectors so SYS_FS_WRITE can grow files
+# past the initial mkfs payload. The kernel's fs.c caps the FS area
+# at 1024 sectors past the superblock; QEMU's raw drive treats the
+# file's size as the disk's size, so any write beyond it is silently
+# discarded — that's what bit us in session 19 before this padding.
+final_size=$(( (fs_lba + 1024) * 512 ))
+sz=$(stat -c%s os.img)
+if [ "$sz" -lt "$final_size" ]; then
+    truncate -s "$final_size" os.img
+fi
+
 echo "        os.img = $(stat -c%s os.img) bytes  (boot + kernel + FS @ LBA $fs_lba)"
 
 echo "OK. Run with:"

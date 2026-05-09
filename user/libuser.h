@@ -58,6 +58,7 @@ typedef unsigned int   size_t;
 #define SYS_TTY_SET_MODE 28
 #define SYS_TTY_GET_MODE 29
 #define SYS_TTY_INJECT   30
+#define SYS_FS_WRITE     31
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -169,6 +170,12 @@ void     free   (void *p);
 uint32_t tty_set_mode(uint32_t flags);
 uint32_t tty_get_mode(void);
 int      tty_inject  (const char *bytes, int n);
+
+/* Persist `n` bytes as the entire contents of file `name` on the
+ * on-disk AdventFS. Creates the file if it doesn't exist; replaces
+ * any prior contents. Returns 0 on success, -1 on out-of-disk or
+ * out-of-slot. The new contents survive a reboot. */
+int      sys_fs_write(const char *name, const void *data, uint32_t n);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

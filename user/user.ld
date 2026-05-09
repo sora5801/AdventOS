@@ -35,12 +35,20 @@ SECTIONS
     .data : SUBALIGN(4) {
         *(.data*)
         *(.gnu.linkonce.d.*)
-    }
 
-    /DISCARD/ : {
+        /* Fold .bss INTO .data so zero-initialized statics get real
+         * bytes in the .bin output (the linker promotes the input
+         * NOBITS sections to PROGBITS as zeros when their output
+         * section is PROGBITS). Without this, user.ld's old /DISCARD/
+         * for .bss left the symbols resolving to address 0 — every
+         * "static int g_x = 0;" would write-fault on first touch. */
+        . = ALIGN(4);
         *(.bss*)
         *(COMMON)
         *(.gnu.linkonce.b.*)
+    }
+
+    /DISCARD/ : {
         *(.comment)
         *(.note*)
         *(.eh_frame*)

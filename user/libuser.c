@@ -246,6 +246,15 @@ int tty_inject(const char *bytes, int n) {
     return ret;
 }
 
+int sys_fs_write(const char *name, const void *data, uint32_t n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FS_WRITE), "b"(name), "c"(data), "d"(n)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

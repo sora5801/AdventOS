@@ -498,6 +498,53 @@ static void selftest(void) {
         printf("  restored: now 0x%x\n", tty_get_mode());
     }
 
+    puts("[t9] fs write + ed editor pipeline\n");
+    {
+        /* Step A: persistent disk write via SYS_FS_WRITE — independent
+         * of the editor, proves the FS write path works on its own. */
+        const char *initial = "alpha\nbeta\ngamma\n";
+        int rc = sys_fs_write("notes.txt", initial, (uint32_t)strlen(initial));
+        printf("  sys_fs_write notes.txt -> %d  (%u bytes)\n",
+               rc, (uint32_t)strlen(initial));
+
+        int fd = sys_open("notes.txt");
+        char rbuf[128];
+        int  n = sys_read(fd, rbuf, sizeof(rbuf) - 1);
+        sys_close(fd);
+        rbuf[n] = 0;
+        printf("  read back %d bytes:\n%s", n, rbuf);
+
+        /* Step B: drive ed by injecting commands into the keyboard
+         * input ring. ed reads them via sys_read_line as if typed.
+         * Script: delete line 1 (alpha), append "delta" after the
+         * new current line, save, quit. */
+        const char *script =
+            "1d\n"
+            "a\n"
+            "delta\n"
+            ".\n"
+            "w notes.txt\n"
+            "q\n";
+        tty_inject(script, (int)strlen(script));
+
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv[] = { "ed.elf", "notes.txt", 0 };
+            sys_exec("ed.elf", argv);
+            sys_exit(127);
+        }
+        int code = 0;
+        sys_wait(&code);
+        printf("\n  ed exited code=%d\n", code);
+
+        /* Step C: re-read to confirm the edit persisted to disk. */
+        fd = sys_open("notes.txt");
+        n  = sys_read(fd, rbuf, sizeof(rbuf) - 1);
+        sys_close(fd);
+        rbuf[n] = 0;
+        printf("  final notes.txt (%d bytes):\n%s", n, rbuf);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

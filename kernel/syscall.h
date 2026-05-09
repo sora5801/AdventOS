@@ -35,6 +35,7 @@
 #define SYS_TTY_SET_MODE 28 /* (eax=28, ebx=flags)        -> previous flags */
 #define SYS_TTY_GET_MODE 29 /* (eax=29)                   -> current flags */
 #define SYS_TTY_INJECT   30 /* (eax=30, ebx=ptr, ecx=n)   -> bytes pushed (test helper) */
+#define SYS_FS_WRITE     31 /* (eax=31, ebx=name, ecx=buf, edx=n) -> 0 / -1; persists to disk */
 
 void syscall_dispatch(struct registers *r);
 
