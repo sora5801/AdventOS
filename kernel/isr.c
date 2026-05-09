@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "syscall.h"
 #include "signal.h"
+#include "mmap.h"
 #include "../include/io.h"
 
 static const char *exception_names[32] = {
@@ -53,6 +54,20 @@ void isr_handler(struct registers *r) {
     }
 
     if (n < 32) {
+        /* Page fault graduates from defensive panic to productive
+         * lazy-loader (session 24). If cr2 lands in any of the
+         * current task's mmap regions, the handler allocates a fresh
+         * page, fs_reads the file slice into it, maps it, returns.
+         * Otherwise we fall through to the existing diagnostic +
+         * halt so unhandled faults still surface loudly. */
+        if (n == 14) {
+            uint32_t cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            if (mmap_handle_fault(r, cr2) == 0) {
+                return;
+            }
+        }
+
         kprintf("\n[!] CPU EXCEPTION %u: %s (err=0x%x) at %x:%x  eflags=0x%x\n",
                 (unsigned)n,
                 exception_names[n],

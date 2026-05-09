@@ -45,6 +45,8 @@
 #define SYS_TCGETPGRP    38 /* (eax=38, ebx=fd)            -> current foreground pgrp */
 #define SYS_DNS_RESOLVE  39 /* (eax=39, ebx=name, ecx=ip[4]) -> 0 / -1; blocks until DNS reply or timeout */
 #define SYS_FS_FREE_SECTORS 40 /* (eax=40)                  -> count of unallocated FS sectors */
+#define SYS_MMAP         41 /* (eax=41, ebx=fd, ecx=offset, edx=length) -> user VA or 0  */
+#define SYS_MUNMAP       42 /* (eax=42, ebx=addr, ecx=length)            -> 0 or -1     */
 
 void syscall_dispatch(struct registers *r);
 

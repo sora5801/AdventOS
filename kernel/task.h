@@ -95,6 +95,23 @@ struct task {
      * when the user-side malloc calls sys_brk. */
     uint32_t      heap_brk;
 
+    /* mmap regions (session 24). Each entry covers a contiguous,
+     * page-aligned range [va_start, va_end) backed by a file at
+     * file_offset for file_length bytes (any tail past file_length
+     * inside the last page reads as zero). Pages within the range
+     * aren't backed by physical memory until first touch — the page
+     * fault handler does the on-demand fs_read + paging_map_in.
+     * mmap_brk bump-allocates VAs from USER_MMAP_START. */
+    struct task_mmap {
+        int      in_use;
+        uint32_t va_start;
+        uint32_t va_end;
+        int      fs_idx;
+        uint32_t file_offset;
+        uint32_t file_length;
+    } mmaps[8];
+    uint32_t      mmap_brk;
+
     /* Job control (session 20). pgid groups related processes (a
      * pipeline = one pgrp); sid is the session a pgrp belongs to.
      * Both default to 0 (no pgrp / kernel task); a user task that
@@ -106,6 +123,10 @@ struct task {
 
 #define USER_HEAP_START  0x40200000u
 #define USER_HEAP_MAX    0x40600000u   /* 4 MiB cap per process */
+
+#define USER_MMAP_START  0x50000000u
+#define USER_MMAP_MAX    0x60000000u   /* 256 MiB window for mappings */
+#define TASK_MMAP_MAX    8
 
 typedef void (*task_fn)(void);
 

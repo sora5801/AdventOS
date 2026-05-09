@@ -124,6 +124,12 @@ struct task *task_create(task_fn entry, const char *name) {
     /* Heap: empty until the user calls SYS_BRK. */
     t->heap_brk = USER_HEAP_START;
 
+    /* mmap (session 24): no regions, bump-allocator at the window
+     * start. Each sys_mmap call advances mmap_brk; pages are demand-
+     * loaded by the page fault handler. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) t->mmaps[i].in_use = 0;
+    t->mmap_brk = USER_MMAP_START;
+
     /* Splice into the round-robin list right after current. */
     __asm__ volatile ("cli");
     t->next = g_current->next;
@@ -462,6 +468,13 @@ struct task *task_fork(struct registers *parent_regs) {
      *     copies at the same VAs, so its heap_brk is meaningful. */
     child->heap_brk = parent->heap_brk;
 
+    /* 5e. Inherit mmap regions verbatim (session 24). Pages already
+     *     faulted in for the parent are deep-copied with the rest of
+     *     the user PD. Pages NOT yet faulted will be faulted-and-
+     *     populated independently in each task. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) child->mmaps[i] = parent->mmaps[i];
+    child->mmap_brk = parent->mmap_brk;
+
     /* 5d. Inherit job-control state (session 20). POSIX: fork
      *     preserves both pgid and sid. setpgid is used by the
      *     parent (or child) to put the child into its own pgrp. */
@@ -530,6 +543,12 @@ int task_exec_inplace(struct registers *r,
      * new ELF gets a fresh empty heap that will grow on its first
      * malloc → sys_brk. */
     t->heap_brk = USER_HEAP_START;
+
+    /* Reset mmap regions (session 24). The old PD's mappings are
+     * gone with paging_destroy_user_pd; the new ELF gets a clean
+     * mmap window. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) t->mmaps[i].in_use = 0;
+    t->mmap_brk = USER_MMAP_START;
 
     /* Rewrite the iret frame so the syscall return jumps into the
      * freshly-loaded program at its entry point with the new ESP. */

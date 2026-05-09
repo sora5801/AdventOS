@@ -68,6 +68,8 @@ typedef unsigned int   size_t;
 #define SYS_TCGETPGRP    38
 #define SYS_DNS_RESOLVE  39
 #define SYS_FS_FREE_SECTORS 40
+#define SYS_MMAP         41
+#define SYS_MUNMAP       42
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -215,6 +217,15 @@ int      sys_dns_resolve(const char *name, unsigned char ip[4]);
  * bitmap directly — useful for tests that want to verify rewrites
  * actually reuse old sectors instead of leaking them. */
 uint32_t sys_fs_free_sectors(void);
+
+/* Map a file region into our address space. Returns a user VA on
+ * success or NULL on failure (out of mmap window / no slot / not an
+ * FS fd). The pages are NOT backed by physical memory until first
+ * touch — the kernel's #PF handler reads the file slice on demand.
+ * Behaves like POSIX mmap(NULL, length, PROT_READ|PROT_WRITE,
+ * MAP_PRIVATE, fd, offset) — writes don't propagate back to disk. */
+void    *sys_mmap   (int fd, uint32_t offset, uint32_t length);
+int      sys_munmap (void *addr, uint32_t length);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

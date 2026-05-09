@@ -336,6 +336,24 @@ uint32_t sys_fs_free_sectors(void) {
     return (uint32_t)ret;
 }
 
+void *sys_mmap(int fd, uint32_t offset, uint32_t length) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MMAP), "b"(fd), "c"(offset), "d"(length)
+                      : "memory");
+    return (void *)(uint32_t)ret;
+}
+
+int sys_munmap(void *addr, uint32_t length) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MUNMAP), "b"(addr), "c"(length)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

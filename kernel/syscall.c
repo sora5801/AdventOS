@@ -15,6 +15,7 @@
 #include "pmm.h"
 #include "tty.h"
 #include "dns.h"
+#include "mmap.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -548,6 +549,24 @@ void syscall_dispatch(struct registers *r) {
         }
         case SYS_FS_FREE_SECTORS: {
             ret = (int32_t)fs_free_sectors();
+            break;
+        }
+        case SYS_MMAP: {
+            int      fd  = (int)a;
+            uint32_t off = b;
+            uint32_t len = c;
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)        { ret = 0; break; }
+            if (t->fds[fd].kind != FD_FS)            { ret = 0; break; }
+            void *va = mmap_register((uint32_t)t->fds[fd].obj_idx,
+                                     off, len);
+            ret = (int32_t)(uintptr_t)va;
+            break;
+        }
+        case SYS_MUNMAP: {
+            uint32_t addr = a;
+            uint32_t len  = b;
+            ret = mmap_unregister(addr, len);
             break;
         }
         case SYS_DNS_RESOLVE: {

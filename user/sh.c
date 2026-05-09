@@ -761,6 +761,49 @@ static void selftest(void) {
                after_eleven, before - after_eleven);
     }
 
+    puts("[t15] mmap fd: lazy page-in via #PF handler\n");
+    {
+        /* Map hello.txt and read its bytes via direct memory access.
+         * The first read on any page in the mapped range triggers a
+         * page fault; the kernel fault handler allocates a page,
+         * fs_reads the file slice into it, and returns. The user
+         * instruction retries and sees the bytes — no syscall in
+         * the read path. */
+        int fd = sys_open("hello.txt");
+        if (fd < 0) { puts("  open(hello.txt) failed\n"); }
+        else {
+            const uint32_t LEN = 274;     /* hello.txt size from session 8 */
+            char *p = (char *)sys_mmap(fd, 0, LEN);
+            if (!p) {
+                puts("  sys_mmap failed\n");
+                sys_close(fd);
+            } else {
+                printf("  mmap returned VA 0x%x\n", (uint32_t)p);
+                puts("  before touch: page is unmapped (next read will fault)\n");
+
+                /* The deref below is what triggers the fault. Print
+                 * the result to prove the kernel populated the page. */
+                printf("  p[0] = '%c' (0x%x)\n", p[0],
+                       (uint32_t)(unsigned char)p[0]);
+                printf("  bytes 0..15:");
+                for (int i = 0; i < 16; i++) {
+                    printf(" %x", (uint32_t)(unsigned char)p[i]);
+                }
+                puts("\n");
+
+                /* Print the first line. */
+                puts("  first line via mmap: ");
+                for (int i = 0; i < (int)LEN && p[i] != '\n'; i++) {
+                    sys_write(1, &p[i], 1);
+                }
+                puts("\n");
+
+                sys_munmap(p, LEN);
+                sys_close(fd);
+            }
+        }
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
