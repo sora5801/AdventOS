@@ -12,7 +12,7 @@ void __main(void) {}
 
 /* ---------- Syscall wrappers --------------------------------------- */
 
-int sys_write(char c) {
+int sys_putchar(char c) {
     int ret;
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
@@ -89,9 +89,45 @@ int sys_kcmd(const char *line) {
     return ret;
 }
 
+int sys_open(const char *name) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_OPEN), "b"(name)
+                      : "memory");
+    return ret;
+}
+
+int sys_read(int fd, void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_READ), "b"(fd), "c"(buf), "d"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_write(int fd, const void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WRITE_FD), "b"(fd), "c"(buf), "d"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_close(int fd) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CLOSE), "b"(fd)
+                      : "memory");
+    return ret;
+}
+
 /* ---------- Output --------------------------------------------------- */
 
-void putchar(char c) { sys_write(c); }
+void putchar(char c) { sys_putchar(c); }
 void puts(const char *s) { sys_write_str(s); }
 
 static void put_dec_signed(int32_t n) {

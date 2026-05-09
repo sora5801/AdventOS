@@ -4,6 +4,7 @@
 #include "pit.h"
 #include "rtc.h"
 #include "shell.h"
+#include "fs.h"
 #include "string.h"
 
 #define USER_STR_MAX 256
@@ -93,6 +94,73 @@ void syscall_dispatch(struct registers *r) {
             for (i = 0; i < (int)sizeof(buf) - 1 && p[i]; i++) buf[i] = p[i];
             buf[i] = 0;
             kshell_run_line(buf);
+            ret = 0;
+            break;
+        }
+        case SYS_OPEN: {
+            const char *uname = (const char *)(uintptr_t)a;
+            char name[FS_NAME_MAX + 1];
+            int  i;
+            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
+            name[i] = 0;
+
+            int fs_idx = fs_open(name);
+            if (fs_idx < 0) { ret = -1; break; }
+
+            struct task *t = task_current();
+            int fd;
+            for (fd = 3; fd < TASK_MAX_FDS; fd++) {
+                if (t->fds[fd].kind == FD_FREE) break;
+            }
+            if (fd == TASK_MAX_FDS) { ret = -1; break; }
+
+            t->fds[fd].kind   = FD_FS;
+            t->fds[fd].fs_idx = fs_idx;
+            t->fds[fd].offset = 0;
+            ret = fd;
+            break;
+        }
+        case SYS_READ: {
+            int   fd  = (int)a;
+            char *buf = (char *)(uintptr_t)b;
+            int   n   = (int)c;
+
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)        { ret = -1; break; }
+            int kind = t->fds[fd].kind;
+            if (kind == FD_FREE)                     { ret = -1; break; }
+
+            if (kind == FD_STDIN) {
+                ret = kshell_read_line(buf, n);
+            } else if (kind == FD_FS) {
+                int rd = fs_read(t->fds[fd].fs_idx,
+                                 t->fds[fd].offset, buf, (uint32_t)n);
+                if (rd > 0) t->fds[fd].offset += (uint32_t)rd;
+                ret = rd;
+            } else {
+                ret = -1;
+            }
+            break;
+        }
+        case SYS_WRITE_FD: {
+            int         fd  = (int)a;
+            const char *buf = (const char *)(uintptr_t)b;
+            int         n   = (int)c;
+
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind != FD_STDOUT)         { ret = -1; break; }
+
+            for (int i = 0; i < n; i++) kputc(buf[i]);
+            ret = n;
+            break;
+        }
+        case SYS_CLOSE: {
+            int fd = (int)a;
+            struct task *t = task_current();
+            if (fd < 3 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind == FD_FREE)           { ret = -1; break; }
+            t->fds[fd].kind = FD_FREE;
             ret = 0;
             break;
         }

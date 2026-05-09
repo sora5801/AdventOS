@@ -1,0 +1,5 @@
+Hello from a text file on AdventFS.
+This was read by cat.elf via SYS_OPEN, SYS_READ, and SYS_CLOSE,
+and written to stdout by SYS_WRITE_FD with fd=1.
+Each call is a real ring 3 -> ring 0 -> ring 3 round trip through
+the IDT[0x80] gate the kernel installed back in session 5.

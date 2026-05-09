@@ -682,29 +682,48 @@ static void cmd_cat(const char *arg) {
 }
 
 static void cmd_exec(const char *arg) {
-    if (!*arg) { kputs("Usage: exec <name>\n"); return; }
-    int fd = fs_open(arg);
-    if (fd < 0) { kprintf("exec: %s: not found\n", arg); return; }
+    if (!*arg) { kputs("Usage: exec <name> [args...]\n"); return; }
+
+    /* Tokenize on spaces — argv[0] = program name. */
+    char buf[256];
+    size_t len = 0;
+    while (arg[len] && len < sizeof(buf) - 1) { buf[len] = arg[len]; len++; }
+    buf[len] = 0;
+
+    const char *argv[16];
+    int    argc = 0;
+    char  *p = buf;
+    while (*p && argc < 16) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) { *p = 0; p++; }
+    }
+    if (argc == 0) { kputs("exec: no program\n"); return; }
+
+    int fd = fs_open(argv[0]);
+    if (fd < 0) { kprintf("exec: %s: not found\n", argv[0]); return; }
 
     struct elf_load_result r;
     int err = elf_load(fd, &r);
     if (err != 0) {
-        kprintf("exec: %s: elf_load failed (code %d)\n", arg, err);
+        kprintf("exec: %s: elf_load failed (code %d)\n", argv[0], err);
         return;
     }
 
-    struct task *t = task_create_user(r.entry, r.user_esp, r.cr3, arg);
+    /* Pre-fill argv onto the user stack and shift user_esp accordingly. */
+    elf_setup_args(&r, argc, argv);
+
+    struct task *t = task_create_user(r.entry, r.user_esp, r.cr3, argv[0]);
     if (!t) {
         kputs("exec: task_create_user failed\n");
         paging_destroy_user_pd((uint32_t *)(uintptr_t)r.cr3);
         return;
     }
-    kprintf("exec: pid=%u  cr3=0x%08x  entry=0x%08x  esp=0x%08x  (loaded %s)\n",
-            (unsigned)t->id,
-            (unsigned)r.cr3,
-            (unsigned)r.entry,
-            (unsigned)r.user_esp,
-            arg);
+    kprintf("exec: pid=%u  argc=%d  entry=0x%08x  esp=0x%08x  (%s)\n",
+            (unsigned)t->id, argc,
+            (unsigned)r.entry, (unsigned)r.user_esp, argv[0]);
 }
 
 static void cmd_userprog(void) {

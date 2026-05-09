@@ -189,6 +189,10 @@ void kmain(uint32_t boot_drive) {
     if (fd >= 0) {
         struct elf_load_result r;
         if (elf_load(fd, &r) == 0) {
+            /* sh.elf is a libuser program; _start expects argc/argv on
+             * the stack even when there's nothing meaningful to pass. */
+            const char *sh_argv[] = { "sh" };
+            elf_setup_args(&r, 1, sh_argv);
             struct task *t = task_create_user(r.entry, r.user_esp,
                                               r.cr3, "sh");
             if (t) {

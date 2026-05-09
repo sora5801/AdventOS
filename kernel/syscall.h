@@ -14,6 +14,10 @@
 #define SYS_TIME       7   /* (eax=7)                 -> UNIX epoch in eax      */
 #define SYS_READ_LINE  8   /* (eax=8, ebx=buf, ecx=n) -> read a line, len in eax*/
 #define SYS_KCMD       9   /* (eax=9, ebx=ptr)        -> run kernel command     */
+#define SYS_OPEN       10  /* (eax=10, ebx=name)         -> fd or -1            */
+#define SYS_READ       11  /* (eax=11, ebx=fd, ecx=buf, edx=n) -> bytes or 0/-1 */
+#define SYS_WRITE_FD   12  /* (eax=12, ebx=fd, ecx=buf, edx=n) -> bytes or -1   */
+#define SYS_CLOSE      13  /* (eax=13, ebx=fd)           -> 0 or -1             */
 
 void syscall_dispatch(struct registers *r);
 

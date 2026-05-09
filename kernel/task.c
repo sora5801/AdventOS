@@ -99,6 +99,12 @@ struct task *task_create(task_fn entry, const char *name) {
     t->kernel_stack_top = (uint32_t)top;
     t->is_user = 0;
 
+    /* Pre-wire fd 0/1/2 to stdin/stdout/stderr. */
+    for (int i = 0; i < TASK_MAX_FDS; i++) t->fds[i].kind = FD_FREE;
+    t->fds[0].kind = FD_STDIN;
+    t->fds[1].kind = FD_STDOUT;
+    t->fds[2].kind = FD_STDOUT;
+
     /* Splice into the round-robin list right after current. */
     __asm__ volatile ("cli");
     t->next = g_current->next;

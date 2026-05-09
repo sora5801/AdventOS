@@ -32,6 +32,14 @@ USER_PROGRAMS = [
     ('hello.elf', 'user/_obj/hello.bin'),
     ('count.elf', 'user/_obj/count.bin'),
     ('sh.elf',    'user/_obj/sh.bin'),
+    ('cat.elf',   'user/_obj/cat.bin'),
+    ('echo.elf',  'user/_obj/echo.bin'),
+]
+
+# Raw data files — go on the FS as-is, no ELF wrapper. cat.elf reads
+# them via SYS_OPEN/READ.
+DATA_FILES = [
+    ('hello.txt', 'fs/hello.txt'),
 ]
 
 def make_elf(code, entry_va):
@@ -88,10 +96,18 @@ def pad_to_sector(data):
     return data
 
 def build():
-    # Read each user binary and wrap it in ELF.
     files = []
     file_blobs = []
     next_sector = 1
+
+    def add(fs_name, blob, raw_size):
+        nonlocal next_sector
+        padded = pad_to_sector(blob)
+        files.append((fs_name, next_sector, raw_size))
+        file_blobs.append(padded)
+        next_sector += len(padded) // SECTOR_SIZE
+
+    # ELF-wrapped user programs.
     for fs_name, bin_path in USER_PROGRAMS:
         if not os.path.exists(bin_path):
             print(f"mkfs: {bin_path} not found — build user programs first",
@@ -99,10 +115,15 @@ def build():
             sys.exit(1)
         raw = open(bin_path, 'rb').read()
         elf = make_elf(raw, USER_VA)
-        padded = pad_to_sector(elf)
-        files.append((fs_name, next_sector, len(elf)))
-        file_blobs.append(padded)
-        next_sector += len(padded) // SECTOR_SIZE
+        add(fs_name, elf, len(elf))
+
+    # Raw text/data files (no ELF wrapper).
+    for fs_name, src_path in DATA_FILES:
+        if not os.path.exists(src_path):
+            print(f"mkfs: {src_path} not found", file=sys.stderr)
+            sys.exit(1)
+        raw = open(src_path, 'rb').read()
+        add(fs_name, raw, len(raw))
 
     # Pack the superblock to match `struct fs_super` exactly.
     sb  = b'ADVENTFS'

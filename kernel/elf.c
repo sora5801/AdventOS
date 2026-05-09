@@ -127,8 +127,54 @@ int elf_load(int fs_idx, struct elf_load_result *out) {
         return -301;
     }
 
-    out->entry    = eh.entry;
-    out->cr3      = (uint32_t)(uintptr_t)user_pd;
-    out->user_esp = USER_STACK_VA + PAGE_SIZE;
+    out->entry      = eh.entry;
+    out->cr3        = (uint32_t)(uintptr_t)user_pd;
+    out->user_esp   = USER_STACK_VA + PAGE_SIZE;
+    out->stack_phys = (uint32_t)(uintptr_t)stack_page;
+    out->stack_size = PAGE_SIZE;
     return 0;
+}
+
+void elf_setup_args(struct elf_load_result *r,
+                    int argc, const char *const *argv) {
+    uint8_t *kbase = (uint8_t *)(uintptr_t)r->stack_phys;
+    uint32_t cur_off = r->stack_size;
+    uint32_t cur_va  = USER_STACK_VA + r->stack_size;
+
+    uint32_t str_va[16];
+    if (argc > 16) argc = 16;
+
+    /* 1. Strings, in reverse so argv[0]'s string ends up lowest. */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = 0;
+        while (argv[i][len]) len++;
+        len++;                              /* + NUL */
+        cur_off -= (uint32_t)len;
+        cur_va  -= (uint32_t)len;
+        for (size_t j = 0; j < len; j++) kbase[cur_off + j] = (uint8_t)argv[i][j];
+        str_va[i] = cur_va;
+    }
+
+    /* 2. Align down to 4 bytes for the pointer table. */
+    cur_off &= ~3u;
+    cur_va  &= ~3u;
+
+    /* 3. argv terminator (NULL). */
+    cur_off -= 4;
+    cur_va  -= 4;
+    *(uint32_t *)(kbase + cur_off) = 0;
+
+    /* 4. argv[argc-1] ... argv[0]. */
+    for (int i = argc - 1; i >= 0; i--) {
+        cur_off -= 4;
+        cur_va  -= 4;
+        *(uint32_t *)(kbase + cur_off) = str_va[i];
+    }
+
+    /* 5. argc. */
+    cur_off -= 4;
+    cur_va  -= 4;
+    *(uint32_t *)(kbase + cur_off) = (uint32_t)argc;
+
+    r->user_esp = cur_va;
 }

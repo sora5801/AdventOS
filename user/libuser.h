@@ -36,8 +36,16 @@ typedef unsigned int  size_t;
 #define SYS_TIME       7
 #define SYS_READ_LINE  8
 #define SYS_KCMD       9
+#define SYS_OPEN       10
+#define SYS_READ       11
+#define SYS_WRITE_FD   12
+#define SYS_CLOSE      13
 
-int      sys_write(char c);
+/* Single-char console write. The fd-aware variant (`sys_write` below)
+ * is what new programs should call; this wraps the legacy SYS_WRITE
+ * syscall and is kept so libuser putchar() and the in-tree
+ * .up1/.up2 asm programs keep working. */
+int      sys_putchar(char c);
 int      sys_getpid(void);
 void     sys_exit(int code) __attribute__((noreturn));
 void     sys_yield(void);
@@ -46,6 +54,14 @@ void     sys_sleep_ms(uint32_t ms);
 uint32_t sys_time(void);
 int      sys_read_line(char *buf, int cap);
 int      sys_kcmd(const char *line);
+
+/* Unix-flavored fd operations. fd 0/1/2 are pre-wired in the kernel
+ * to stdin/stdout/stderr; sys_open returns a fresh descriptor for
+ * filesystem files. */
+int      sys_open (const char *name);
+int      sys_read (int fd, void *buf, int n);
+int      sys_write(int fd, const void *buf, int n);
+int      sys_close(int fd);
 
 void     putchar(char c);
 void     puts(const char *s);

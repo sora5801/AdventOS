@@ -14,14 +14,25 @@
 .global _start
 
 _start:
-    /* mingw32 PE: C symbols get a leading underscore, so `int main(void)`
-     * is `_main`, `void sys_exit(int)` is `_sys_exit`. Stack arrives at
-     * user_esp = USER_STACK_VA + 4 KiB (16-byte aligned).  call → ESP%16
-     * = 12 inside the callee, the i386 SysV ABI invariant. */
+    /*
+     * Stack on entry from the kernel:
+     *   [esp+0]            argc
+     *   [esp+4]            argv[0]   (pointer to NUL-terminated string)
+     *   [esp+8]            argv[1]
+     *   ...
+     *   [esp+4*(argc+1)]   NULL terminator
+     *   ...               (argv strings further up)
+     *
+     * We convert that layout into a cdecl call:  main(argc, argv).
+     */
+    movl    (%esp), %eax            /* argc            */
+    leal    4(%esp), %ebx           /* argv (= &esp[1]) */
+    pushl   %ebx                    /* arg 2: argv     */
+    pushl   %eax                    /* arg 1: argc     */
     call    _main
 
-    /* push EAX (= main's return value) and call sys_exit(code) */
-    push    %eax
+    /* main returned; call sys_exit(main's return value). EAX has it. */
+    pushl   %eax
     call    _sys_exit
 
     /* sys_exit is __attribute__((noreturn)); guard anyway */

@@ -6,6 +6,23 @@
 #define TASK_NAME_MAX  16
 #define TASK_MAX       16
 #define TASK_STACK_SZ  0x4000     /* 16 KiB per kernel task */
+#define TASK_MAX_FDS   8
+
+/* Per-process file descriptor entry. fd 0/1/2 are wired up to console
+ * stdin/stdout/stderr at task_create time; fd 3+ hold filesystem-backed
+ * handles obtained via SYS_OPEN. */
+enum {
+    FD_FREE   = 0,
+    FD_STDIN,
+    FD_STDOUT,
+    FD_FS,
+};
+
+struct task_fd {
+    int      kind;
+    int      fs_idx;       /* used iff kind == FD_FS */
+    uint32_t offset;       /* used iff kind == FD_FS */
+};
 
 enum {
     TASK_STATE_UNUSED  = 0,
@@ -36,6 +53,10 @@ struct task {
     /* Used by mutex/wait-queue code. A task may be on at most one
      * wait queue at a time, so a single-link pointer is enough. */
     struct task  *wait_next;
+
+    /* Open file descriptors. Slots 0/1/2 are pre-wired to stdin/
+     * stdout/stderr; slot 3+ are available for SYS_OPEN. */
+    struct task_fd fds[TASK_MAX_FDS];
 };
 
 typedef void (*task_fn)(void);
