@@ -6,20 +6,60 @@
 static struct fs_super g_super;
 static int             g_initialized;
 
-/* Next free sector RELATIVE to FS_DISK_OFFSET_SECTORS. Sector 0 of
- * the FS area holds the superblock; sectors 1..N-1 hold file data;
- * sectors N..end are free. fs_init computes this by walking the
- * file table; fs_write_all bumps it on every save. We don't (yet)
- * have a free-sector bitmap, so a saved-then-saved-again file leaks
- * its previous on-disk range — fine for a demo OS, painful for a
- * production one. */
-static uint32_t        g_high_water;
-
 /* The disk we live on. We don't have a partition table — the boot
  * sector + kernel image live before the FS area, so the disk's total
  * sector count minus FS_DISK_OFFSET_SECTORS is what we have to spend.
  * Hardcode a generous cap; QEMU images we boot from are well over this. */
 #define FS_DISK_TOTAL_SECTORS   1024u    /* 512 KiB of FS area */
+#define FS_BITMAP_BYTES         ((FS_DISK_TOTAL_SECTORS + 7) / 8)
+
+/* Free-sector bitmap (session 23). 1 bit per sector relative to
+ * FS_DISK_OFFSET_SECTORS; bit set => allocated. Sector 0 (the
+ * superblock) is permanently allocated. The bitmap is in-RAM only —
+ * recomputed at mount by walking the superblock — so we never have
+ * to keep an on-disk copy in sync. */
+static uint8_t g_bitmap[FS_BITMAP_BYTES];
+
+static inline int bitmap_get(uint32_t s) {
+    if (s >= FS_DISK_TOTAL_SECTORS) return 1;     /* off-disk = used */
+    return (g_bitmap[s >> 3] >> (s & 7)) & 1;
+}
+static inline void bitmap_set(uint32_t s) {
+    if (s < FS_DISK_TOTAL_SECTORS) g_bitmap[s >> 3] |= (uint8_t)(1u << (s & 7));
+}
+static inline void bitmap_clear(uint32_t s) {
+    if (s < FS_DISK_TOTAL_SECTORS) g_bitmap[s >> 3] &= (uint8_t)~(1u << (s & 7));
+}
+
+/* First-fit allocator. Find the lowest run of `n` contiguous free
+ * sectors and mark them used. Returns the start sector or -1 on
+ * out-of-disk. Sector 0 is skipped (superblock). */
+static int bitmap_alloc_run(uint32_t n) {
+    if (n == 0) n = 1;
+    uint32_t run_start = 0;
+    uint32_t run_len   = 0;
+    for (uint32_t s = 1; s < FS_DISK_TOTAL_SECTORS; s++) {
+        if (!bitmap_get(s)) {
+            if (run_len == 0) run_start = s;
+            run_len++;
+            if (run_len >= n) {
+                for (uint32_t k = 0; k < n; k++) bitmap_set(run_start + k);
+                return (int)run_start;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+    return -1;
+}
+
+/* Mark the run [start, start+n) as free. */
+static void bitmap_free_run(uint32_t start, uint32_t n) {
+    if (start == 0) return;       /* never free the superblock */
+    for (uint32_t k = 0; k < n; k++) {
+        if (start + k < FS_DISK_TOTAL_SECTORS) bitmap_clear(start + k);
+    }
+}
 
 void fs_init(void) {
     /* Read superblock from sector 0 of FS area. */
@@ -41,20 +81,23 @@ void fs_init(void) {
         g_super.file_count = FS_MAX_FILES;
     }
 
-    /* Compute the high-water mark by walking files. Sector 0 is the
-     * superblock; the smallest file_run end sector +1 is where free
-     * space starts. */
-    g_high_water = 1;
+    /* Reconstruct the bitmap by walking files. Sector 0 is permanently
+     * allocated (superblock); each file's contiguous run is too. */
+    for (uint32_t i = 0; i < FS_BITMAP_BYTES; i++) g_bitmap[i] = 0;
+    bitmap_set(0);
     for (uint32_t i = 0; i < g_super.file_count; i++) {
         struct fs_entry *e = &g_super.files[i];
-        uint32_t end = e->start_sector + (e->size + 511) / 512;
-        if (end > g_high_water) g_high_water = end;
+        if (e->size == 0) continue;
+        uint32_t n = (e->size + 511) / 512;
+        for (uint32_t s = 0; s < n; s++) {
+            bitmap_set(e->start_sector + s);
+        }
     }
 
     g_initialized = 1;
-    kprintf("fs: AdventFS mounted, %u files (free sec %u..%u)\n",
+    kprintf("fs: AdventFS mounted, %u files, %u/%u sectors free\n",
             (unsigned)g_super.file_count,
-            (unsigned)g_high_water,
+            (unsigned)fs_free_sectors(),
             (unsigned)FS_DISK_TOTAL_SECTORS);
 }
 
@@ -120,13 +163,15 @@ int fs_count(void) {
 
 uint32_t fs_free_sectors(void) {
     if (!g_initialized) return 0;
-    if (g_high_water >= FS_DISK_TOTAL_SECTORS) return 0;
-    return FS_DISK_TOTAL_SECTORS - g_high_water;
+    uint32_t free = 0;
+    for (uint32_t s = 0; s < FS_DISK_TOTAL_SECTORS; s++) {
+        if (!bitmap_get(s)) free++;
+    }
+    return free;
 }
 
 /* Persist g_super back to LBA FS_DISK_OFFSET_SECTORS. The struct is
- * packed and sized to fit a 512-byte sector by construction (8 magic
- * + 4 file_count + 16 entries × 24 bytes = 396 bytes). */
+ * packed and sized to fit a 512-byte sector by construction. */
 static int fs_write_super(void) {
     uint8_t sec[512];
     for (int i = 0; i < 512; i++) sec[i] = 0;
@@ -164,17 +209,24 @@ int fs_write_all(const char *name, const void *data, uint32_t size) {
     int idx = find_or_create_entry(name);
     if (idx < 0) return -1;
 
+    /* Snapshot the existing range so we can free it AFTER the new
+     * write commits. allocate-first keeps the file readable through
+     * the old entry if the new write fails halfway. */
+    uint32_t old_start = g_super.files[idx].start_sector;
+    uint32_t old_size  = g_super.files[idx].size;
+    uint32_t old_n     = old_size ? (old_size + 511) / 512 : 0;
+
     uint32_t needed = (size + 511) / 512;
     if (needed == 0) needed = 1;            /* always allocate at least one sector */
 
-    if (g_high_water + needed > FS_DISK_TOTAL_SECTORS) {
-        return -1;                          /* out of disk */
+    int new_start = bitmap_alloc_run(needed);
+    if (new_start < 0) {
+        return -1;                          /* out of contiguous space */
     }
 
-    uint32_t new_start = g_high_water;
-    g_high_water += needed;
-
-    /* Write the data. Last sector is zero-padded to 512 bytes. */
+    /* Write the data. Last sector is zero-padded to 512 bytes. If a
+     * sector write fails, roll back the bitmap and leave the entry
+     * pointing at its prior contents. */
     const uint8_t *src = (const uint8_t *)data;
     uint8_t buf[512];
     for (uint32_t s = 0; s < needed; s++) {
@@ -184,14 +236,19 @@ int fs_write_all(const char *name, const void *data, uint32_t size) {
         for (int i = 0; i < 512; i++) buf[i] = 0;
         if (take > 0) memcpy(buf, src + off, take);
 
-        if (ata_write_sector(FS_DISK_OFFSET_SECTORS + new_start + s, buf) != 0) {
+        if (ata_write_sector(FS_DISK_OFFSET_SECTORS + (uint32_t)new_start + s,
+                             buf) != 0) {
+            bitmap_free_run((uint32_t)new_start, needed);
             return -1;
         }
     }
 
-    /* Update the file table entry, then push the superblock out. */
-    g_super.files[idx].start_sector = new_start;
+    /* Commit: point the entry at the new range, free the old range
+     * (if there was one), then push the superblock out. */
+    g_super.files[idx].start_sector = (uint32_t)new_start;
     g_super.files[idx].size         = size;
+
+    if (old_n > 0) bitmap_free_run(old_start, old_n);
 
     if (fs_write_super() != 0) return -1;
     return 0;

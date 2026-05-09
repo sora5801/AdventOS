@@ -546,6 +546,10 @@ void syscall_dispatch(struct registers *r) {
             ret = (int32_t)tty_get_fg_pgrp();
             break;
         }
+        case SYS_FS_FREE_SECTORS: {
+            ret = (int32_t)fs_free_sectors();
+            break;
+        }
         case SYS_DNS_RESOLVE: {
             const char *uname = (const char *)(uintptr_t)a;
             uint8_t    *uout  = (uint8_t *)(uintptr_t)b;

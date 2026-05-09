@@ -67,6 +67,7 @@ typedef unsigned int   size_t;
 #define SYS_TCSETPGRP    37
 #define SYS_TCGETPGRP    38
 #define SYS_DNS_RESOLVE  39
+#define SYS_FS_FREE_SECTORS 40
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -209,6 +210,11 @@ int      tcgetpgrp(int fd);
  * buffer at `ip`. Returns 0 on success, -1 on timeout / parse fail
  * / DNS not configured. */
 int      sys_dns_resolve(const char *name, unsigned char ip[4]);
+
+/* Free sectors remaining in the AdventFS area. Reads the kernel's
+ * bitmap directly — useful for tests that want to verify rewrites
+ * actually reuse old sectors instead of leaking them. */
+uint32_t sys_fs_free_sectors(void);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

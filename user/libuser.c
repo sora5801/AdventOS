@@ -327,6 +327,15 @@ int sys_dns_resolve(const char *name, unsigned char ip[4]) {
     return ret;
 }
 
+uint32_t sys_fs_free_sectors(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FS_FREE_SECTORS)
+                      : "memory");
+    return (uint32_t)ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

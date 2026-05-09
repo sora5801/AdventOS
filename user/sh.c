@@ -737,6 +737,30 @@ static void selftest(void) {
         sys_sleep_ms(150);
     }
 
+    puts("[t14] fs free-sector bitmap: rewrites reuse sectors\n");
+    {
+        /* Without the bitmap (sessions 19-22), every fs_write_all
+         * leaked the file's previous sector run. After 11 rewrites
+         * of a 1-sector file you'd have spent 11 sectors total. With
+         * the bitmap, the old run is freed before the new one is
+         * committed, so net usage stays at 1. */
+        const char *data = "rewrite test\n";
+        uint32_t before = sys_fs_free_sectors();
+        printf("  free at start: %u\n", before);
+
+        sys_fs_write("reuse.txt", data, (uint32_t)strlen(data));
+        uint32_t after_first = sys_fs_free_sectors();
+        printf("  after  1 write : %u  (delta %u)\n",
+               after_first, before - after_first);
+
+        for (int i = 0; i < 10; i++) {
+            sys_fs_write("reuse.txt", data, (uint32_t)strlen(data));
+        }
+        uint32_t after_eleven = sys_fs_free_sectors();
+        printf("  after 11 writes: %u  (delta %u — should equal first delta)\n",
+               after_eleven, before - after_eleven);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
