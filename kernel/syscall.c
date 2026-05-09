@@ -20,6 +20,7 @@
 #include "vfs.h"
 #include "procfs.h"
 #include "lapic.h"
+#include "vbe.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -494,6 +495,30 @@ void syscall_dispatch(struct registers *r) {
         }
         case SYS_GETCPU: {
             ret = (int32_t)lapic_id();
+            break;
+        }
+        case SYS_FBINFO: {
+            /* Report VBE/fbcon status to userspace. ebx is a writable
+             * uint32_t out[4]; we fill it with width/height/bpp/pitch
+             * if fbcon is enabled. Return value is the enabled flag.
+             * Cheap user-pointer sanity check: must be non-NULL and
+             * lie below KERNEL_BASE. */
+            uint32_t *uout = (uint32_t *)(uintptr_t)a;
+            if (!uout || (uintptr_t)uout >= 0xC0000000u) {
+                ret = -1;
+                break;
+            }
+            const struct vbe_state *v = vbe_state();
+            if (!v->enabled) {
+                uout[0] = uout[1] = uout[2] = uout[3] = 0;
+                ret = 0;
+            } else {
+                uout[0] = v->width;
+                uout[1] = v->height;
+                uout[2] = v->bpp;
+                uout[3] = v->pitch;
+                ret = 1;
+            }
             break;
         }
         case SYS_KILL: {

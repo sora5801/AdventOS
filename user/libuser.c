@@ -210,6 +210,15 @@ int sys_getcpu(void) {
     return ret;
 }
 
+int sys_fbinfo(unsigned int out[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FBINFO), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

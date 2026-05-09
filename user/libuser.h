@@ -79,6 +79,7 @@ typedef unsigned int   size_t;
 #define SYS_CONNECT      49
 #define SYS_WAIT_NB      50
 #define SYS_GETCPU       51
+#define SYS_FBINFO       52
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -165,6 +166,7 @@ int      sys_wait_nb(int *exit_code);
  * syscall, which is also the CPU the task is running on at this
  * instant. Useful for proving that work has migrated to an AP. */
 int      sys_getcpu(void);
+int      sys_fbinfo(unsigned int out[4]);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

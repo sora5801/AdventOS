@@ -38,6 +38,8 @@
 #include "tty.h"
 #include "elf.h"
 #include "shell.h"
+#include "vbe.h"
+#include "fbcon.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
  * so you can see the scheduler interleaving them in real time without
@@ -115,6 +117,14 @@ void kmain(uint32_t boot_drive) {
     memmap_init();
     kprintf("%u entries\n", (unsigned)memmap_count());
 
+    /* Capture the bootloader's VBE summary BEFORE pmm_init / paging_init
+     * touch low memory. The bootloader stashes 12 bytes at physical
+     * 0x9100; once paging_init starts allocating page tables out of the
+     * PMM, that region gets reused. We snapshot now and the actual
+     * paging_map of the framebuffer happens later (vbe_init), after the
+     * PD exists. */
+    vbe_capture_bootinfo();
+
     kputs("[boot] initializing PMM... ");
     pmm_init();
     kprintf("%u/%u pages free (%u KB)\n",
@@ -147,6 +157,14 @@ void kmain(uint32_t boot_drive) {
     } else {
         kputs("FAILED\n");
     }
+
+    /* Bring up the framebuffer console — has to happen after paging is
+     * on (we identity-map the FB pages into the kernel PD). The serial
+     * + VGA-text sinks remain active in parallel; fbcon_init does
+     * nothing if the bootloader couldn't set a graphics mode. */
+    kputs("[boot] reading VBE summary from bootloader... ");
+    vbe_init();
+    fbcon_init();
 
     kputs("[boot] initializing ATA driver... ");
     ata_init();

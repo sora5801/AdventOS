@@ -85,6 +85,86 @@ e820_skip:
 e820_done:
     movl    %ebp, 0x8000                 /* store final count */
 
+    /*
+     * VBE mode-set. Switch into mode 0x118 (1024x768x24bpp linear FB)
+     * via int 0x10 AX=0x4F02. First call AX=0x4F01 to ask the BIOS
+     * for the ModeInfoBlock (256 bytes at 0x9000); we copy a few
+     * fields out into a kernel-friendly summary at 0x9100:
+     *   0x9100  uint32_t  fb_phys
+     *   0x9104  uint16_t  width
+     *   0x9106  uint16_t  height
+     *   0x9108  uint16_t  pitch          (bytes per scanline)
+     *   0x910A  uint8_t   bpp
+     *   0x910B  uint8_t   ok flag (0=fall back to text mode)
+     *
+     * Important: int 0x10 (and int 0x15 we used earlier for E820)
+     * is allowed to clobber DS/ES per the BIOS-int contract on some
+     * real-hardware BIOSes. The IBM-PC convention preserves them
+     * but it's not promised. We re-zero ES (and re-set DI) before
+     * EACH call, and before any post-call absolute-address read we
+     * re-zero DS so the disp16 addressing modes we use here resolve
+     * to physical addresses we expect.
+     *
+     * If anything fails, ok stays 0 and the kernel keeps using VGA
+     * text mode at 0xB8000 — no graphics, but the system still boots.
+     */
+    xor     %ax, %ax
+    mov     %ax, %ds                     /* explicit DS = 0 for our writes */
+    mov     %ax, %es                     /* ES:DI buffer in segment 0     */
+    movb    $0, 0x910B                   /* ok = 0 by default              */
+
+    /* Pre-zero the 256-byte ModeInfoBlock at 0x9000. If the BIOS
+     * silently refuses to write the block but returns AX=0x004F
+     * (some VGABIOS quirk), we'll still read all-zeros and the
+     * kernel's plausibility check will reject it cleanly. */
+    push    %di
+    mov     $0x9000, %di
+    xor     %ax, %ax
+    mov     $128, %cx                    /* 128 words = 256 bytes */
+    rep stosw
+    pop     %di
+
+    /* AX=0x4F01, CX=mode, ES:DI=info-block buffer. */
+    mov     $0x9000, %di
+    mov     $0x118, %cx
+    mov     $0x4F01, %ax
+    int     $0x10
+    /* Restore segment registers — the BIOS may have touched them. */
+    push    %ax
+    xor     %ax, %ax
+    mov     %ax, %ds
+    mov     %ax, %es
+    pop     %ax
+    cmp     $0x004F, %ax
+    jne     vbe_skip
+
+    /* ModeInfoBlock fields (VBE 2.0 spec):
+     *   +0x10 w pitch   +0x12 w width   +0x14 w height
+     *   +0x19 b bpp     +0x28 d fb_phys */
+    mov     0x9010, %ax
+    mov     %ax, 0x9108
+    mov     0x9012, %ax
+    mov     %ax, 0x9104
+    mov     0x9014, %ax
+    mov     %ax, 0x9106
+    mov     0x9019, %al
+    mov     %al, 0x910A
+    mov     0x9028, %eax
+    mov     %eax, 0x9100
+
+    /* Set the mode with linear-FB bit (BX bit 14 = 0x4000). */
+    mov     $(0x118 | 0x4000), %bx
+    mov     $0x4F02, %ax
+    int     $0x10
+    push    %ax
+    xor     %ax, %ax
+    mov     %ax, %ds
+    pop     %ax
+    cmp     $0x004F, %ax
+    jne     vbe_skip
+    movb    $1, 0x910B                   /* ok = 1 */
+vbe_skip:
+
     /* Disable interrupts and prepare for protected mode */
     cli
 

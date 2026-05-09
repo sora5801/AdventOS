@@ -475,6 +475,30 @@ static void selftest(void) {
         }
     }
 
+    puts("[t23] VBE/fbcon: sys_fbinfo reports framebuffer geometry\n");
+    {
+        unsigned int info[4] = {0};
+        int on = sys_fbinfo(info);
+        if (on > 0) {
+            printf("  fbcon enabled: %ux%u %u-bpp pitch=%u\n",
+                   info[0], info[1], info[2], info[3]);
+            printf("  glyph cells (8x8 font): %ux%u\n",
+                   info[0] / 8, info[1] / 8);
+            /* Generate output that the kernel renders to the FB. The
+             * kprintf path teed into fbcon_putc; if the framebuffer
+             * is alive, this line ALSO appeared on the QEMU display.
+             * (Headless can't see it, but a screenshot via QMP's
+             * screendump will catch the painted pixels — that's how
+             * we verify in CI.) */
+            puts("  framebuffer-backed kprintf is live "
+                 "(this line is also painted to the FB)\n");
+        } else if (on == 0) {
+            puts("  fbcon disabled (kernel fell back to VGA text mode)\n");
+        } else {
+            puts("  sys_fbinfo failed (bad pointer?)\n");
+        }
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

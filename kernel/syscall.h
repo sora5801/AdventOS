@@ -56,6 +56,8 @@
 #define SYS_CONNECT      49 /* (eax=49, ebx=fd, ecx=ip[4], edx=port)     -> 0 or -1     */
 #define SYS_WAIT_NB      50 /* (eax=50, ebx=&exit_code) -> pid or 0 (no zombie ready) or -1 (no children) */
 #define SYS_GETCPU       51 /* (eax=51) -> LAPIC ID of the CPU handling this syscall (= the running CPU) */
+#define SYS_FBINFO       52 /* (eax=52, ebx=uint32_t out[4]) -> 1 if fbcon enabled, 0 otherwise.
+                              When enabled, fills out[]: width, height, bpp, pitch. */
 
 void syscall_dispatch(struct registers *r);
 

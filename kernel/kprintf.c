@@ -1,11 +1,22 @@
 #include "kprintf.h"
 #include "vga.h"
 #include "serial.h"
+#include "fbcon.h"
 #include "string.h"
 
 void kputc(char c) {
+    /* Three sinks in parallel:
+     *  - serial: always on; needed for the host side to see early-boot
+     *    panics before VGA is reachable, and for the test harness
+     *  - VGA text: works from boot, ignored after VBE switch (the
+     *    framebuffer overlays the text-mode 0xB8000 region but a stray
+     *    text-mode write costs nothing)
+     *  - fbcon: silent until fbcon_init() runs, then paints into the
+     *    VBE linear FB
+     * Cost in the disabled state is one branch each. */
     vga_putc(c);
     serial_putc(c);
+    fbcon_putc(c);
 }
 
 void kputs(const char *s) {
