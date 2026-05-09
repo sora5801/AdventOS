@@ -6,10 +6,15 @@
 #include "ip.h"
 
 /*
- * Minimum-viable TCP for server-side use. Single concurrent connection
- * per listener. No retransmission, no congestion control, fixed window.
- * Enough to serve one HTTP/1.0 request and close cleanly over loopback
- * / SLIRP.
+ * Minimum-viable TCP. Supports both passive (LISTEN) and active
+ * (CONNECT) opens against a small pool of TCBs. Each TCB carries
+ * its own connection state machine, user_data pointer, and
+ * callbacks. tcp_rx demultiplexes by 4-tuple (or by dst_port +
+ * LISTEN state for SYNs).
+ *
+ * No retransmission, no congestion control, fixed window. Enough
+ * to drive multiple short-lived HTTP / IRC / nc-style connections
+ * over loopback or SLIRP at a time.
  */
 
 #define TCP_FIN  0x01
@@ -21,9 +26,17 @@
 #define TCP_RX_BUF 2048
 #define TCP_TX_BUF 2048
 
+/* Pool size — bumped from 1 in session 29. Each listener occupies
+ * one slot; each established connection occupies one. With 6 we can
+ * run httpd + ircd as listeners (2), plus an active outbound client
+ * + its server-side conn (2), plus a host-side curl connecting
+ * concurrently (2). Five would normally be enough but tight. */
+#define TCP_MAX_TCBS 6
+
 enum {
     TCP_CLOSED = 0,
     TCP_LISTEN,
+    TCP_SYN_SENT,        /* outbound: SYN sent, waiting for SYN-ACK */
     TCP_SYN_RCVD,
     TCP_ESTABLISHED,
     TCP_FIN_WAIT_1,
@@ -46,12 +59,14 @@ struct tcp_hdr {
 } __attribute__((packed));
 
 struct tcb;
-typedef void (*tcp_connect_cb)(struct tcb *t);                          /* fires when SYN_RCVD -> ESTABLISHED */
+typedef void (*tcp_connect_cb)(struct tcb *t);                          /* fires when state -> ESTABLISHED */
 typedef void (*tcp_recv_cb)   (struct tcb *t, const char *data, int len);
 typedef void (*tcp_close_cb)  (struct tcb *t);
 
 struct tcb {
+    int            in_use;
     int            state;
+    int            is_listener;       /* 1 if originally a passive open */
     uint16_t       local_port;
     struct ip_addr remote_ip;
     uint16_t       remote_port;
@@ -67,34 +82,43 @@ struct tcb {
     tcp_connect_cb on_connect;
     tcp_recv_cb    on_recv;
     tcp_close_cb   on_close;
+    void          *user_data;          /* opaque cookie for the app */
 
-    /* Inbound bytes are passed straight to on_recv; we don't actually
-     * buffer them. tx_buf is used for queued sends. */
+    /* Inbound bytes go straight to on_recv; we don't buffer them.
+     * tx_buf is reserved for queued sends. */
     char           tx_buf[TCP_TX_BUF];
     int            tx_len;
 };
 
 void tcp_init(void);
 
-/* Bind a single listener at `port`. `on_connect` fires the moment the
- * 3-way handshake completes; `on_recv` fires for each data segment;
- * `on_close` fires on connection teardown (either side). */
-int  tcp_listen(uint16_t port,
-                tcp_connect_cb on_connect,
-                tcp_recv_cb    on_recv,
-                tcp_close_cb   on_close);
+/* Bind a passive listener at `port`. on_connect fires (with a freshly
+ * allocated conn TCB) the moment the 3-way handshake completes; the
+ * listener TCB stays in LISTEN so subsequent SYNs spawn new conns.
+ *
+ * Returns the listener TCB or NULL on out-of-tcb. */
+struct tcb *tcp_listen(uint16_t port,
+                       tcp_connect_cb on_connect,
+                       tcp_recv_cb    on_recv,
+                       tcp_close_cb   on_close,
+                       void          *user_data);
 
-/* Send up to `len` bytes on an established connection. */
-int  tcp_send(struct tcb *t, const void *data, int len);
+/* Active open: pick an ephemeral local port, allocate a TCB, send
+ * SYN to (remote_ip, remote_port). Transitions through SYN_SENT;
+ * on_connect fires when the SYN-ACK completes the handshake.
+ *
+ * Returns the conn TCB or NULL on out-of-tcb / send failure. The
+ * caller can poll tcp_state_of() to wait for ESTABLISHED. */
+struct tcb *tcp_connect(const struct ip_addr *remote_ip,
+                        uint16_t              remote_port,
+                        tcp_connect_cb        on_connect,
+                        tcp_recv_cb           on_recv,
+                        tcp_close_cb          on_close,
+                        void                 *user_data);
 
-/* Initiate close (send FIN + ACK). */
+int  tcp_send (struct tcb *t, const void *data, int len);
 int  tcp_close(struct tcb *t);
-
-/* Helpers for layers that don't have their own TCB pointer. We only
- * have one TCB total in this minimal stack. */
-int  tcp_send_active (const void *data, int len);
-int  tcp_close_active(void);
-int  tcp_active_state(void);
+int  tcp_state_of(const struct tcb *t);
 
 /* Called by ip_rx when protocol == 6. */
 void tcp_rx(const struct ip_hdr *iph, const void *seg, int len);

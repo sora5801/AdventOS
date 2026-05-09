@@ -76,6 +76,7 @@ typedef unsigned int   size_t;
 #define SYS_READDIR      46
 #define SYS_BCACHE_SYNC  47
 #define SYS_BCACHE_STATS 48
+#define SYS_CONNECT      49
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -136,6 +137,9 @@ int      sys_socket(void);
 int      sys_bind  (int fd, int port);
 int      sys_listen(int fd, int backlog);
 int      sys_accept(int fd);
+/* Active open. ip is 4 bytes in network order; port is host order.
+ * Blocks until ESTABLISHED. Returns 0 on success, -1 on failure. */
+int      sys_connect(int fd, const unsigned char ip[4], int port);
 
 /* Process primitives. fork() returns the child pid in the parent and
  * 0 in the child. exec() never returns on success — it replaces the

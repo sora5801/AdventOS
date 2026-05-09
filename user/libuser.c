@@ -152,6 +152,15 @@ int sys_accept(int fd) {
     return ret;
 }
 
+int sys_connect(int fd, const unsigned char ip[4], int port) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CONNECT), "b"(fd), "c"(ip), "d"(port)
+                      : "memory");
+    return ret;
+}
+
 int sys_fork(void) {
     int ret;
     /* The kernel synthesizes the child's stack so its first user

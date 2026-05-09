@@ -31,9 +31,9 @@
  */
 
 #define FS_DISK_OFFSET_SECTORS  200u
-#define FS_SUPER_SECTORS        3u    /* superblock = 1 header + 2 entry sectors */
+#define FS_SUPER_SECTORS        5u    /* superblock = 1 header + 4 entry sectors */
 #define FS_NAME_MAX             16
-#define FS_MAX_FILES            32    /* bumped from 16 in session 26 (coreutils) */
+#define FS_MAX_FILES            64    /* bumped from 32 in session 29 (network apps) */
 #define FS_ENTRY_SIZE           32
 #define FS_MAGIC                "ADVENTFS"
 

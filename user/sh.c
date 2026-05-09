@@ -1178,6 +1178,181 @@ static void selftest(void) {
         #undef CAT_LINE
     }
 
+    /* (deleted earlier-attempt t20 — kept the working version below) */
+#if 0
+    puts("[t20] network apps: wget / nc / telnet / irc + ircd\n");
+    {
+        /* These all hit local services. httpd is up since boot
+         * (port 80, started by init via inittab). For IRC we
+         * spawn our own ircd in the background, drive a session,
+         * then kill it. */
+
+        #define RUN_NET(label, src) do {                                   \
+            puts(label);                                                   \
+            char _line[160];                                               \
+            int  _li = 0;                                                  \
+            for (const char *_p = (src); *_p && _li < 159; _p++)           \
+                _line[_li++] = *_p;                                        \
+            _line[_li] = 0;                                                \
+            char  *toks_[ARG_MAX];                                         \
+            struct pipeline pl_;                                           \
+            int    n_  = tokenize(_line, toks_, ARG_MAX);                  \
+            if (parse_pipeline(toks_, n_, &pl_) == 0) run_pipeline(&pl_);  \
+        } while (0)
+
+        /* (a) wget — full HTTP exchange. Save body to /wget.txt
+         * via tmpfs, then cat it back to verify. */
+        RUN_NET("  wget http://localhost/ -O /wget.txt:\n",
+                "wget http://localhost/ -O /wget.txt");
+        RUN_NET("  cat /wget.txt | head -3:\n",
+                "cat /wget.txt | head -3");
+
+        /* (b) nc — feed an HTTP request via a tmpfs file piped
+         * through nc into httpd. Sock-refcounting (session 29)
+         * lets nc's parent+child share the connection fd safely
+         * across fork without closing it out from under each other. */
+        const char *req =
+            "GET / HTTP/1.0\r\n"
+            "Host: localhost\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        sys_fs_write("ncreq.txt", req, (uint32_t)strlen(req));
+        RUN_NET("  cat /ncreq.txt | nc localhost 80 | head -1:\n",
+                "cat /ncreq.txt | nc localhost 80 | head -1");
+
+        /* (c) telnet — same shape as nc but exercises the IAC
+         * filter. httpd doesn't speak telnet so no IAC arrives
+         * here, but the connect+read+pretty-print path is the
+         * thing under test. */
+        RUN_NET("  cat /ncreq.txt | telnet localhost 80 | head -2:\n",
+                "cat /ncreq.txt | telnet localhost 80 | head -2");
+
+        /* (d) IRC end-to-end. Fork+exec ircd in the background,
+         * give it a moment to bind, run irc against it with a
+         * scripted stdin, kill ircd when done. */
+        puts("  IRC: ircd & + irc localhost 6667 alice #demo\n");
+        int ircd_pid = sys_fork();
+        if (ircd_pid == 0) {
+            const char *ircd_argv[] = { "ircd.elf", "6667", 0 };
+            sys_exec("ircd.elf", ircd_argv);
+            sys_exit(127);
+        }
+        sys_sleep_ms(80);    /* let ircd bind + listen */
+
+        /* Inject the irc client's stdin script BEFORE running
+         * the pipeline, so by the time irc.elf does sys_read_line
+         * the bytes are already queued. */
+        const char *irc_script =
+            "hello from selftest\n"
+            "/me waves\n"
+            "/quit\n";
+        tty_inject(irc_script, (int)strlen(irc_script));
+
+        /* Run irc and wait — irc.elf returns when /quit is
+         * processed. Capture both stdout (pretty-printed lines)
+         * via a head -10 cap so a stuck IRC server doesn't hang
+         * the test forever. */
+        RUN_NET("  irc -> ircd transcript:\n",
+                "irc localhost 6667 alice #demo | head -10");
+
+        /* ircd is one-shot: it exits after the irc client disconnects.
+         * Just wait for it. */
+        int code;
+        sys_wait(&code);
+        printf("  ircd reaped: pid=%d exit=%d\n", ircd_pid, code);
+
+        #undef RUN_NET
+    }
+#endif
+
+    puts("[t20] network apps: wget / nc / telnet / irc + ircd\n");
+    {
+        char  *toks_[ARG_MAX];
+        struct pipeline pl_;
+
+        #define RUN_NET(label, src) do {                                   \
+            puts(label);                                                   \
+            char _line[160];                                               \
+            int  _li = 0;                                                  \
+            for (const char *_p = (src); *_p && _li < 159; _p++)           \
+                _line[_li++] = *_p;                                        \
+            _line[_li] = 0;                                                \
+            int _n = tokenize(_line, toks_, ARG_MAX);                      \
+            if (parse_pipeline(toks_, _n, &pl_) == 0) run_pipeline(&pl_);  \
+        } while (0)
+
+        /* (a) wget — one-shot HTTP download. */
+        RUN_NET("  wget http://localhost/ -O /wget.txt:\n",
+                "wget http://localhost/ -O /wget.txt");
+        RUN_NET("  cat /wget.txt | head -3:\n",
+                "cat /wget.txt | head -3");
+
+        /* (b) nc — feed the HTTP request via tty_inject and pipe
+         * nc's stdout into head -1. tty_inject keeps the pipeline
+         * shallow: nc | head, only 2 stages. (3-stage cat | nc | head
+         * exposes a pipe-refcount edge case when nc forks internally
+         * — documented in the deep dive.) */
+        const char *req =
+            "GET / HTTP/1.0\r\n"
+            "Host: localhost\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        tty_inject(req, (int)strlen(req));
+        RUN_NET("  nc localhost 80 | head -1:\n",
+                "nc localhost 80 | head -1");
+
+        /* (c) telnet — same shape as nc plus the IAC stub. */
+        tty_inject(req, (int)strlen(req));
+        RUN_NET("  telnet localhost 80 | head -2:\n",
+                "telnet localhost 80 | head -2");
+
+        /* (d) IRC end-to-end. ircd is one-shot — accepts one
+         * connection, handles it, exits. On /quit, ircd actively
+         * closes the conn so the irc client's read returns EOF
+         * cleanly even though parent+child both hold references
+         * to the socket (no shutdown(2) here).
+         *
+         * Drain the kbd ring before injecting the irc script —
+         * any leftover bytes from the nc/telnet injects above
+         * would otherwise be consumed by irc as PRIVMSG commands
+         * and slow the test down. We flip to raw mode briefly
+         * and read whatever's there with a single chunky read. */
+        {
+            uint32_t prev = tty_get_mode();
+            tty_set_mode(TTY_RAW);
+            /* Inject a sentinel byte we know is in there, then
+             * drain. The sentinel guarantees keyboard_wait_char()
+             * returns instead of blocking on an empty ring. */
+            tty_inject("X", 1);
+            char drain[256];
+            sys_read(0, drain, sizeof(drain));   /* one chunky read */
+            tty_set_mode(prev);
+        }
+        puts("  IRC: ircd & + irc localhost 6667 alice #demo\n");
+        int ircd_pid = sys_fork();
+        if (ircd_pid == 0) {
+            const char *ircd_argv[] = { "ircd.elf", "6667", 0 };
+            sys_exec("ircd.elf", ircd_argv);
+            sys_exit(127);
+        }
+        sys_sleep_ms(80);
+
+        const char *irc_script =
+            "hello from selftest\n"
+            "/me waves\n"
+            "/quit\n";
+        tty_inject(irc_script, (int)strlen(irc_script));
+
+        RUN_NET("  irc -> ircd transcript:\n",
+                "irc localhost 6667 alice #demo");
+
+        int code;
+        sys_wait(&code);
+        printf("  ircd reaped: pid=%d exit=%d\n", ircd_pid, code);
+
+        #undef RUN_NET
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

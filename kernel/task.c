@@ -457,6 +457,7 @@ struct task *task_fork(struct registers *parent_regs) {
             case FD_PIPE_R: pipe_inc_read (parent->fds[i].obj_idx); break;
             case FD_PIPE_W: pipe_inc_write(parent->fds[i].obj_idx); break;
             case FD_TMPFS:  tmpfs_inc_ref (parent->fds[i].obj_idx); break;
+            case FD_SOCK:   sock_inc_ref  (parent->fds[i].obj_idx); break;
             default: break;
         }
     }

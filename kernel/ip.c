@@ -29,9 +29,56 @@ uint16_t ip_checksum(const void *data, uint32_t len) {
 
 static uint16_t g_ip_id;        /* monotonically increasing for outbound */
 
+/* Loopback short-circuit (session 29). If `dst` is 127.0.0.0/8 or
+ * our own IP, deliver the packet locally — synthesize an ip_hdr
+ * and dispatch to the right protocol's rx handler — instead of
+ * pushing it through the NIC. SLIRP does not loopback packets
+ * sent to the guest's own assigned IP, so without this nc /
+ * wget / irc-client-against-localhost-server scenarios fail.
+ *
+ * The dispatch is bounded-depth (TCP handshake = 3-4 levels of
+ * recursion); we cli around it so a real-NIC packet IRQ doesn't
+ * race the loopback handler on g_tcbs. */
+static int try_loopback(const struct ip_addr *dst, uint8_t proto,
+                        const void *payload, uint32_t len) {
+    int is_lo = (dst->b[0] == 127);
+    int is_us = we_have_ip() &&
+                dst->b[0] == g_my_ip.b[0] &&
+                dst->b[1] == g_my_ip.b[1] &&
+                dst->b[2] == g_my_ip.b[2] &&
+                dst->b[3] == g_my_ip.b[3];
+    if (!is_lo && !is_us) return 0;
+
+    struct ip_hdr lhdr;
+    lhdr.ver_ihl    = 0x45;
+    lhdr.tos        = 0;
+    lhdr.total_len  = htons((uint16_t)(sizeof(lhdr) + len));
+    lhdr.id         = 0;
+    lhdr.flags_frag = 0;
+    lhdr.ttl        = 64;
+    lhdr.proto      = proto;
+    lhdr.csum       = 0;
+    /* Fill src as `dst` so the receiver sees self-addressed
+     * packets symmetrically. */
+    lhdr.src        = *dst;
+    lhdr.dst        = *dst;
+
+    uint32_t flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) :: "memory");
+    switch (proto) {
+        case IP_PROTO_TCP: tcp_rx(&lhdr, payload, (int)len); break;
+        case IP_PROTO_UDP: udp_rx(&lhdr, payload, (int)len); break;
+        default: break;
+    }
+    __asm__ volatile ("pushl %0; popfl" :: "r"(flags) : "memory", "cc");
+    return 1;
+}
+
 int ip_send(const struct ip_addr *dst, uint8_t proto,
             const void *payload, uint32_t len) {
     if (len > 1500 - sizeof(struct ip_hdr)) return -1;
+
+    if (try_loopback(dst, proto, payload, len)) return 0;
 
     struct mac_addr mac;
     if (is_ip_broadcast(dst)) {

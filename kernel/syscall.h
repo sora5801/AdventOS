@@ -53,6 +53,7 @@
 #define SYS_READDIR      46 /* (eax=46, ebx=dir_path, ecx=&iter, edx=name_buf16) -> idx or -1 */
 #define SYS_BCACHE_SYNC  47 /* (eax=47)                                  -> blocks flushed */
 #define SYS_BCACHE_STATS 48 /* (eax=48, ebx=uint32_t out[5])             -> 0 or -1     */
+#define SYS_CONNECT      49 /* (eax=49, ebx=fd, ecx=ip[4], edx=port)     -> 0 or -1     */
 
 void syscall_dispatch(struct registers *r);
 

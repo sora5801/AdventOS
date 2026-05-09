@@ -6,27 +6,32 @@
 
 static struct sock g_socks[SOCK_MAX];
 
-/* Indices of "the" listener and "the" connection. Only one of each
- * exists at a time given the single-TCB underlying TCP. */
-static int g_listen_idx = -1;
-static int g_conn_idx   = -1;
-
 void sock_init(void) {
-    for (int i = 0; i < SOCK_MAX; i++) g_socks[i].state = SOCK_FREE;
-    g_listen_idx = -1;
-    g_conn_idx   = -1;
+    for (int i = 0; i < SOCK_MAX; i++) {
+        memset(&g_socks[i], 0, sizeof(g_socks[i]));
+        g_socks[i].state        = SOCK_FREE;
+        g_socks[i].pending_conn = -1;
+    }
 }
 
 int sock_create(void) {
     for (int i = 0; i < SOCK_MAX; i++) {
         if (g_socks[i].state == SOCK_FREE) {
             memset(&g_socks[i], 0, sizeof(g_socks[i]));
-            g_socks[i].state = SOCK_NEW;
+            g_socks[i].state        = SOCK_NEW;
+            g_socks[i].refcount     = 1;
             g_socks[i].pending_conn = -1;
+            g_socks[i].tcb          = 0;
             return i;
         }
     }
     return -1;
+}
+
+void sock_inc_ref(int idx) {
+    if (idx < 0 || idx >= SOCK_MAX) return;
+    if (g_socks[idx].state == SOCK_FREE) return;
+    g_socks[idx].refcount++;
 }
 
 int sock_bind(int idx, uint16_t port) {
@@ -36,38 +41,68 @@ int sock_bind(int idx, uint16_t port) {
     return 0;
 }
 
+/* Find the sock owning `t` via t->user_data. Returns -1 if none. */
+static int sock_for_tcb(struct tcb *t) {
+    if (!t || !t->user_data) return -1;
+    int idx = (int)(uintptr_t)t->user_data - 1;     /* +1 encoding */
+    if (idx < 0 || idx >= SOCK_MAX) return -1;
+    if (g_socks[idx].state == SOCK_FREE) return -1;
+    return idx;
+}
+
 /* ---- TCP callbacks ------------------------------------------------- */
 
-/* Fires (in IRQ context) the moment SYN_RCVD -> ESTABLISHED. We
- * synthesize a fresh connection sock and stash its index on the
- * listener; sock_accept() will pull it back out. */
+/* Fires (in IRQ context) the moment a TCB transitions to ESTABLISHED.
+ * For a connected sock this just flips its state. For a listener-
+ * spawned conn TCB, we synthesize a fresh conn sock and stash it on
+ * the listener so sock_accept() can pull it back out. */
 static void on_connect(struct tcb *t) {
-    (void)t;
-    if (g_listen_idx < 0) return;
-    struct sock *l = &g_socks[g_listen_idx];
-    if (l->pending_conn >= 0) return;          /* listener already has one queued */
+    int sidx = sock_for_tcb(t);
+    if (sidx < 0) return;
+    struct sock *s = &g_socks[sidx];
+
+    /* Active connect path: the calling task is in sock_connect, sock
+     * is CONNECTING. We can't compare s->tcb == t because sock_connect
+     * sets s->tcb AFTER tcp_connect returns — but the loopback fires
+     * on_connect DURING tcp_connect, before s->tcb has been written.
+     * State alone is enough to discriminate from the listener path. */
+    if (s->state == SOCK_CONNECTING) {
+        s->state = SOCK_CONNECTED;
+        s->tcb   = t;       /* publish in case sock_connect hasn't yet */
+        return;
+    }
+
+    /* Listener path: this conn TCB was spawned by an inbound SYN
+     * landing on a listener. Create a fresh conn sock for it. */
+    struct sock *l = s;
+    if (l->state != SOCK_LISTEN) return;
 
     int conn = -1;
     for (int i = 0; i < SOCK_MAX; i++) {
         if (g_socks[i].state == SOCK_FREE) { conn = i; break; }
     }
-    if (conn < 0) return;                       /* no free slot, drop */
+    if (conn < 0) return;        /* no free slot — drop the conn */
 
     memset(&g_socks[conn], 0, sizeof(g_socks[conn]));
-    g_socks[conn].state         = SOCK_CONNECTED;
-    g_socks[conn].pending_conn  = -1;
-    g_socks[conn].peer_closed   = 0;
+    g_socks[conn].state        = SOCK_CONNECTED;
+    g_socks[conn].refcount     = 1;
+    g_socks[conn].pending_conn = -1;
+    g_socks[conn].tcb          = t;
+    g_socks[conn].peer_closed  = 0;
+
+    /* Re-target the conn TCB's user_data at the new conn sock so
+     * subsequent on_recv / on_close land on the right ring. */
+    t->user_data = (void *)(uintptr_t)(conn + 1);
 
     l->pending_conn = conn;
-    g_conn_idx      = conn;
 }
 
 /* Fires per data segment (IRQ context). Pushes bytes into the conn
  * sock's RX ring; drops the rest on overflow. */
 static void on_recv(struct tcb *t, const char *data, int len) {
-    (void)t;
-    if (g_conn_idx < 0) return;
-    struct sock *s = &g_socks[g_conn_idx];
+    int sidx = sock_for_tcb(t);
+    if (sidx < 0) return;
+    struct sock *s = &g_socks[sidx];
 
     for (int i = 0; i < len; i++) {
         uint32_t next = (s->rx_head + 1) % SOCK_RX_BUF;
@@ -78,9 +113,9 @@ static void on_recv(struct tcb *t, const char *data, int len) {
 }
 
 static void on_close(struct tcb *t) {
-    (void)t;
-    if (g_conn_idx < 0) return;
-    g_socks[g_conn_idx].peer_closed = 1;
+    int sidx = sock_for_tcb(t);
+    if (sidx < 0) return;
+    g_socks[sidx].peer_closed = 1;
 }
 
 /* ---- Public ops ---------------------------------------------------- */
@@ -90,17 +125,21 @@ int sock_listen(int idx) {
     if (g_socks[idx].state != SOCK_NEW) return -1;
     g_socks[idx].state        = SOCK_LISTEN;
     g_socks[idx].pending_conn = -1;
-    g_listen_idx              = idx;
-    return tcp_listen(g_socks[idx].port, on_connect, on_recv, on_close);
+    /* user_data is sock_idx + 1 so 0 is reserved for "no callback". */
+    void *ud = (void *)(uintptr_t)(idx + 1);
+    g_socks[idx].tcb = tcp_listen(g_socks[idx].port,
+                                  on_connect, on_recv, on_close, ud);
+    if (!g_socks[idx].tcb) {
+        g_socks[idx].state = SOCK_NEW;
+        return -1;
+    }
+    return 0;
 }
 
 int sock_accept(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     if (g_socks[idx].state != SOCK_LISTEN) return -1;
 
-    /* Block until a connection is queued (set by on_connect). The
-     * TCP rx path is IRQ-driven so we don't have to do anything else
-     * here — just yield until our flag flips. */
     while (g_socks[idx].pending_conn < 0) {
         task_yield();
     }
@@ -109,10 +148,51 @@ int sock_accept(int idx) {
     return conn;
 }
 
+int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
+    if (idx < 0 || idx >= SOCK_MAX) return -1;
+    if (g_socks[idx].state != SOCK_NEW) return -1;
+    if (!dst) return -1;
+
+    struct ip_addr remote;
+    for (int i = 0; i < 4; i++) remote.b[i] = dst[i];
+
+    g_socks[idx].state        = SOCK_CONNECTING;
+    g_socks[idx].pending_conn = -1;
+    g_socks[idx].peer_closed  = 0;
+    g_socks[idx].rx_head      = 0;
+    g_socks[idx].rx_tail      = 0;
+
+    void *ud = (void *)(uintptr_t)(idx + 1);
+    struct tcb *t = tcp_connect(&remote, port,
+                                on_connect, on_recv, on_close, ud);
+    if (!t) {
+        g_socks[idx].state = SOCK_NEW;
+        return -1;
+    }
+    g_socks[idx].tcb = t;
+
+    /* Block until ESTABLISHED, dropped, or timed out. We give it
+     * ~5 seconds at 10ms/yield resolution before giving up. */
+    int spins = 0;
+    while (g_socks[idx].state == SOCK_CONNECTING && spins < 500) {
+        task_yield();
+        spins++;
+        /* If the TCB got released (peer RST etc.) we won't see
+         * a state change from on_connect — detect via tcb state. */
+        if (tcp_state_of(t) == TCP_CLOSED) break;
+    }
+    if (g_socks[idx].state != SOCK_CONNECTED) {
+        g_socks[idx].state = SOCK_NEW;
+        g_socks[idx].tcb   = 0;
+        return -1;
+    }
+    return 0;
+}
+
 int sock_read(int idx, void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     struct sock *s = &g_socks[idx];
-    if (s->state != SOCK_CONNECTED) return -1;
+    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) return -1;
 
     /* Block until some data has arrived OR the peer has closed and
      * the buffer is drained. */
@@ -133,22 +213,32 @@ int sock_write(int idx, const void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     struct sock *s = &g_socks[idx];
     if (s->state != SOCK_CONNECTED) return -1;
-    return tcp_send_active(buf, n);
+    if (!s->tcb) return -1;
+    return tcp_send(s->tcb, buf, n);
 }
 
 int sock_close(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     struct sock *s = &g_socks[idx];
+    if (s->state == SOCK_FREE) return -1;
 
-    if (s->state == SOCK_CONNECTED) {
-        tcp_close_active();
-        if (idx == g_conn_idx) g_conn_idx = -1;
-    } else if (s->state == SOCK_LISTEN) {
-        if (idx == g_listen_idx) g_listen_idx = -1;
-        /* TCP listener stays alive (back_to_listen re-arms it); we
-         * just stop tracking it here. The next handshake will fire
-         * on_connect with g_listen_idx == -1 and be silently dropped. */
+    /* Refcount: an fd close decrements; only when it hits zero do
+     * we tear down the underlying TCB and free the slot. fork()
+     * inheritance bumps the count via sock_inc_ref. Without this
+     * a forked child closing its copy of the fd would yank the
+     * socket out from under the parent — exactly what nc/wget/irc
+     * need to avoid since they fork for full duplex. */
+    if (s->refcount > 1) {
+        s->refcount--;
+        return 0;
     }
-    s->state = SOCK_FREE;
+    if (s->tcb) {
+        tcp_close(s->tcb);
+        /* tcp_close may have released the tcb; don't deref. */
+        s->tcb = 0;
+    }
+    s->state        = SOCK_FREE;
+    s->refcount     = 0;
+    s->pending_conn = -1;
     return 0;
 }

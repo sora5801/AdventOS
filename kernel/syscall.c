@@ -312,6 +312,19 @@ void syscall_dispatch(struct registers *r) {
             ret = sock_listen(t->fds[fd].obj_idx);
             break;
         }
+        case SYS_CONNECT: {
+            int            fd   = (int)a;
+            const uint8_t *uip  = (const uint8_t *)(uintptr_t)b;
+            int            port = (int)c;
+            struct task   *t    = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
+            if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
+            if (!uip)                                 { ret = -1; break; }
+            uint8_t ip[4];
+            for (int i = 0; i < 4; i++) ip[i] = uip[i];
+            ret = sock_connect(t->fds[fd].obj_idx, ip, (uint16_t)port);
+            break;
+        }
         case SYS_ACCEPT: {
             int fd = (int)a;
             struct task *t = task_current();
