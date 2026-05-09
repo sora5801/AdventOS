@@ -8,6 +8,7 @@
 #include "sock.h"
 #include "pipe.h"
 #include "tmpfs.h"
+#include "signal.h"
 #include "string.h"
 #include "kmalloc.h"
 
@@ -435,6 +436,26 @@ void syscall_dispatch(struct registers *r) {
             ret = pid;
             break;
         }
+        case SYS_KILL: {
+            ret = signal_send((uint32_t)a, (int)b);
+            break;
+        }
+        case SYS_SIGACTION: {
+            void *prev = signal_install((int)a, (void *)(uintptr_t)b,
+                                        (void *)(uintptr_t)c);
+            ret = (int32_t)(uintptr_t)prev;
+            break;
+        }
+        case SYS_SIGRETURN: {
+            /* Restores the pre-signal register frame onto our `r`.
+             * The dispatcher tail's `r->eax = ret` would clobber the
+             * eax we just restored, so early-return here and skip
+             * both the eax write AND the signal-delivery hook
+             * (we just FINISHED a delivery; recursing would be
+             * incorrect). */
+            signal_sigreturn(r);
+            return;
+        }
         default:
             kprintf("[unknown syscall %u from pid %u]\n",
                     (unsigned)num, (unsigned)task_current()->id);
@@ -444,4 +465,12 @@ void syscall_dispatch(struct registers *r) {
 
     /* Stash return value where iret will restore it as EAX. */
     r->eax = (uint32_t)ret;
+
+    /* Signal delivery happens at the very tail of the syscall, just
+     * before isr_common_stub's iret. If a signal is pending, this
+     * mutates r->eip / r->useresp so the iret enters the user
+     * handler instead of returning to the post-INT $0x80 instruction.
+     * The handler eventually trampolines into SYS_SIGRETURN, which
+     * restores the original frame. */
+    signal_check_and_deliver(r);
 }

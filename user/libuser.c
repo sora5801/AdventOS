@@ -210,6 +210,59 @@ int sys_open_w(const char *name) {
     return ret;
 }
 
+int sys_kill(int pid, int sig) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_KILL), "b"(pid), "c"(sig)
+                      : "memory");
+    return ret;
+}
+
+/*
+ * Sigreturn trampoline. The kernel pushes (low to high on user stack):
+ *   [trampoline_addr]   ← handler's "return address"
+ *   [sig_num]           ← handler's arg
+ *   [sigcontext: 64B]
+ * before iretting into the user handler. When the handler ret's, ESP
+ * lands at sig_num (handler popped trampoline_addr); we add 4 to skip
+ * past sig_num so SIGRETURN sees ESP pointing exactly at sigcontext.
+ */
+/* Defined in asm so we control the exact instruction sequence. The
+ * C-visible name is `sigreturn_tramp`; mingw32 prepends an underscore
+ * to map C symbols to asm symbols, so the asm label is `_sigreturn_tramp`.
+ */
+__asm__ (
+    ".global _sigreturn_tramp        \n"
+    "_sigreturn_tramp:               \n"
+    "    add    $4, %esp             \n"
+    "    mov    $26, %eax            \n"   /* SYS_SIGRETURN */
+    "    int    $0x80                \n"
+    /* Should never return — sigreturn restores the saved frame and
+     * irets to the pre-signal EIP/ESP. Loop just in case something
+     * goes wrong. */
+    "1:  hlt                         \n"
+    "    jmp 1b                      \n"
+);
+
+extern void sigreturn_tramp(void);   /* implemented above in asm */
+
+sighandler_t sigaction(int sig, sighandler_t handler) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SIGACTION), "b"(sig),
+                        "c"(handler), "d"(sigreturn_tramp)
+                      : "memory");
+    return (sighandler_t)(uint32_t)ret;
+}
+
+sighandler_t signal(int sig, sighandler_t handler) {
+    /* POSIX `signal()` is just a thin wrapper. Kept separate so user
+     * code can use either name. */
+    return sigaction(sig, handler);
+}
+
 /* ---------- Output --------------------------------------------------- */
 
 /*

@@ -2,6 +2,7 @@
 #include "kprintf.h"
 #include "pic.h"
 #include "syscall.h"
+#include "signal.h"
 #include "../include/io.h"
 
 static const char *exception_names[32] = {
@@ -88,4 +89,10 @@ void irq_handler(struct registers *r) {
         pic_send_eoi(irq);
         if (irq_handlers[irq]) irq_handlers[irq](r);
     }
+
+    /* If we're about to iret back to ring 3, this is a chance to
+     * deliver any signals that piled up while the user task was
+     * preempted. signal_check_and_deliver checks (r->cs & 3) == 3
+     * itself, so kernel-mode preemption is a no-op. */
+    signal_check_and_deliver(r);
 }

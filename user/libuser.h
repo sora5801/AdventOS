@@ -50,6 +50,31 @@ typedef unsigned int  size_t;
 #define SYS_PIPE       21
 #define SYS_DUP2       22
 #define SYS_OPEN_W     23
+#define SYS_KILL       24
+#define SYS_SIGACTION  25
+#define SYS_SIGRETURN  26
+
+/* Signal numbers — must match kernel/signal.h exactly. */
+#define SIGHUP      1
+#define SIGINT      2
+#define SIGQUIT     3
+#define SIGILL      4
+#define SIGABRT     6
+#define SIGFPE      8
+#define SIGKILL     9
+#define SIGUSR1    10
+#define SIGSEGV    11
+#define SIGUSR2    12
+#define SIGPIPE    13
+#define SIGALRM    14
+#define SIGTERM    15
+#define SIGCHLD    17
+
+typedef void (*sighandler_t)(int);
+
+#define SIG_DFL    ((sighandler_t)0)
+#define SIG_IGN    ((sighandler_t)1)
+#define SIG_ERR    ((sighandler_t)-1)
 
 /* Single-char console write. The fd-aware variant (`sys_write` below)
  * is what new programs should call; this wraps the legacy SYS_WRITE
@@ -96,6 +121,16 @@ int      sys_wait (int *exit_code);
 int      sys_pipe   (int fds[2]);
 int      sys_dup2   (int oldfd, int newfd);
 int      sys_open_w (const char *name);
+
+/* Signals.
+ *   kill(pid, sig)            queues sig in pid's pending set
+ *   sigaction(sig, h)         installs h (or SIG_DFL/SIG_IGN); returns previous
+ *   signal(sig, h)            POSIX-flavored alias for sigaction()
+ * The libuser-internal _sigreturn_tramp symbol is passed to the kernel
+ * automatically; user code never sees it. */
+int          sys_kill (int pid, int sig);
+sighandler_t sigaction(int sig, sighandler_t handler);
+sighandler_t signal   (int sig, sighandler_t handler);
 
 void     putchar(char c);
 void     puts(const char *s);

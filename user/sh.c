@@ -372,7 +372,50 @@ static void selftest(void) {
         }
     }
 
+    puts("[t6] signals: SIGUSR1 from child to parent\n");
+    {
+        /* Parent installs handler, forks. Child waits a tick, sends
+         * SIGUSR1 back to parent, exits. Parent's yield-loop syscall
+         * returns; signal_check_and_deliver fires the handler at the
+         * iret-to-ring-3 boundary; handler sets g_got_sig; parent
+         * sees the flag and waits for child. */
+        extern volatile int g_got_sig;
+        extern void on_sigusr1(int);
+        signal(SIGUSR1, on_sigusr1);
+
+        int parent_pid = sys_getpid();
+        int pid = sys_fork();
+        if (pid == 0) {
+            sys_sleep_ms(50);
+            sys_kill(parent_pid, SIGUSR1);
+            sys_exit(0);
+        }
+
+        /* Block (yield-spinning) until handler flips the flag. Use
+         * sys_yield rather than sys_sleep_ms so the syscall returns
+         * promptly and signal delivery has a chance to fire. */
+        int spins = 0;
+        while (g_got_sig == 0 && spins < 1000) {
+            sys_yield();
+            spins++;
+        }
+        printf("  parent: got_sig=%d  (spun %d times)\n", g_got_sig, spins);
+
+        int code = 0;
+        sys_wait(&code);
+        printf("  child reaped, exit=%d\n", code);
+    }
+
     puts("=== selftest done ===\n\n");
+}
+
+/* Signal handler + flag for the t6 test. The handler prints (so we
+ * see it run from inside the signal context) and sets a volatile
+ * flag the parent's main path polls. */
+volatile int g_got_sig = 0;
+void on_sigusr1(int sig) {
+    puts("  handler: caught signal in ring 3\n");
+    g_got_sig = sig;
 }
 
 /* ---- main loop ----------------------------------------------------- */

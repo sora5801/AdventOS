@@ -11,6 +11,7 @@
 #include "sock.h"
 #include "pipe.h"
 #include "tmpfs.h"
+#include "signal.h"
 #include "../include/io.h"
 
 extern void task_switch(uint32_t *old_esp, uint32_t new_esp);
@@ -115,6 +116,9 @@ struct task *task_create(task_fn entry, const char *name) {
     t->fds[0].kind = FD_STDIN;
     t->fds[1].kind = FD_STDOUT;
     t->fds[2].kind = FD_STDOUT;
+
+    /* Signal table: all SIG_DFL, no pending, no mask, no trampoline yet. */
+    signal_init_task(t);
 
     /* Splice into the round-robin list right after current. */
     __asm__ volatile ("cli");
@@ -434,6 +438,16 @@ struct task *task_fork(struct registers *parent_regs) {
         }
     }
 
+    /* 5b. Inherit signal handler table + mask + trampoline. POSIX
+     *     spec: pending set is NOT inherited (the child starts with
+     *     no pending signals). signal_init_task already zeroed all
+     *     of the child's signal state in its memset path; we now
+     *     overlay the handlers + mask + trampoline from the parent. */
+    for (int i = 0; i < NSIG; i++) child->sig_handlers[i] = parent->sig_handlers[i];
+    child->sig_mask  = parent->sig_mask;
+    child->sig_tramp = parent->sig_tramp;
+    child->sig_pending = 0;
+
     /* 6. Splice into the round-robin ring. */
     __asm__ volatile ("cli");
     child->next       = parent->next;
@@ -485,6 +499,12 @@ int task_exec_inplace(struct registers *r,
 
     /* Now safe to free the old PD — nothing references its mappings. */
     paging_destroy_user_pd((uint32_t *)(uintptr_t)old_cr3);
+
+    /* Reset signal handlers per POSIX exec semantics: SIG_DFL takes
+     * over for any caught signal; SIG_IGN survives. The trampoline
+     * VA is in the OLD address space and the new ELF will install
+     * its own when it calls signal() — clear it. */
+    signal_reset_on_exec(t);
 
     /* Rewrite the iret frame so the syscall return jumps into the
      * freshly-loaded program at its entry point with the new ESP. */

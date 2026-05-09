@@ -74,6 +74,17 @@ struct task {
      * sys_wait when the task is in TASK_STATE_ZOMBIE. */
     uint32_t      parent_id;
     int           exit_code;
+
+    /* Signals (session 16). sig_pending is a bitmap of queued signals
+     * (bit N set => SIG_N pending). sig_mask is the blocked-set —
+     * pending signals in the masked set are deferred. sig_handlers[i]
+     * is a user-VA function pointer (or SIG_DFL / SIG_IGN). sig_tramp
+     * is the VA of the libuser sigreturn trampoline; the kernel
+     * pushes it as the handler's return address. */
+    uint32_t      sig_pending;
+    uint32_t      sig_mask;
+    void         *sig_handlers[32];   /* NSIG */
+    void         *sig_tramp;
 };
 
 typedef void (*task_fn)(void);

@@ -28,6 +28,9 @@
 #define SYS_PIPE       21  /* (eax=21, ebx=&fds[2])      -> 0 / -1; fds[0]=read end fds[1]=write end */
 #define SYS_DUP2       22  /* (eax=22, ebx=oldfd, ecx=newfd) -> newfd or -1 */
 #define SYS_OPEN_W     23  /* (eax=23, ebx=name)         -> tmpfs fd (truncated) or -1 */
+#define SYS_KILL       24  /* (eax=24, ebx=pid, ecx=sig) -> 0 or -1 */
+#define SYS_SIGACTION  25  /* (eax=25, ebx=sig, ecx=handler, edx=tramp) -> previous handler */
+#define SYS_SIGRETURN  26  /* (eax=26)                   -> never returns to caller; restores ctx */
 
 void syscall_dispatch(struct registers *r);
 
