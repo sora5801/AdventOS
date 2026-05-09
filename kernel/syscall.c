@@ -20,6 +20,7 @@
 #include "vfs.h"
 #include "procfs.h"
 #include "lapic.h"
+#include "smp.h"
 #include "vbe.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
@@ -495,6 +496,26 @@ void syscall_dispatch(struct registers *r) {
         }
         case SYS_GETCPU: {
             ret = (int32_t)lapic_id();
+            break;
+        }
+        case SYS_SMP_STATS: {
+            /* Layout of out[8]:
+             *   out[0..3]  = LAPIC-timer tick count for cpu 0..3
+             *   out[4..7]  = non-idle dispatch count for cpu 0..3
+             * Returns N (number of valid CPUs). Used by [t22] to
+             * verify APs are actually scheduling work. */
+            uint32_t *uout = (uint32_t *)(uintptr_t)a;
+            if (!uout || (uintptr_t)uout >= 0xC0000000u) { ret = -1; break; }
+            extern volatile uint32_t g_lapic_tick_count[8];
+            extern volatile uint32_t g_cpu_dispatch[8];
+            int n = smp_cpu_count();
+            if (n > 4) n = 4;
+            for (int i = 0; i < n; i++) {
+                uout[i]     = g_lapic_tick_count[i];
+                uout[i + 4] = g_cpu_dispatch[i];
+            }
+            for (int i = n; i < 4; i++) { uout[i] = 0; uout[i + 4] = 0; }
+            ret = n;
             break;
         }
         case SYS_FBINFO: {

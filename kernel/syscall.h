@@ -58,6 +58,9 @@
 #define SYS_GETCPU       51 /* (eax=51) -> LAPIC ID of the CPU handling this syscall (= the running CPU) */
 #define SYS_FBINFO       52 /* (eax=52, ebx=uint32_t out[4]) -> 1 if fbcon enabled, 0 otherwise.
                               When enabled, fills out[]: width, height, bpp, pitch. */
+#define SYS_SMP_STATS    53 /* (eax=53, ebx=uint32_t out[8]) -> N CPUs.
+                              Fills out[i] with LAPIC-timer tick count on CPU i.
+                              Lets [t22] verify APs are actually scheduling. */
 
 void syscall_dispatch(struct registers *r);
 

@@ -35,6 +35,9 @@ extern void isr30(void); extern void isr31(void);
 /* Syscall stub */
 extern void isr128(void);
 
+/* LAPIC timer (per-CPU preemption tick) — vector 0x40 */
+extern void lapic_timer_stub(void);
+
 /* IRQ stubs */
 extern void irq0(void);  extern void irq1(void);  extern void irq2(void);
 extern void irq3(void);  extern void irq4(void);  extern void irq5(void);
@@ -112,6 +115,10 @@ void idt_init(void) {
      * (gate.dpl >= cpl check: 3 >= 3). 0xEE = present + DPL=3 + 32-bit
      * interrupt gate. */
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);
+
+    /* LAPIC timer — fires per-CPU on every AP and (after BSP enables
+     * its own LAPIC timer) the BSP too. DPL=0; ring 3 can't trigger. */
+    idt_set_gate(0x40, (uint32_t)lapic_timer_stub, 0x08, 0x8E);
 
     idt_flush((uint32_t)(uintptr_t)&idtr);
 }

@@ -110,14 +110,36 @@ void ap_entry(uint32_t my_id) {
     lapic_enable();
     me->lapic_id = lapic_id();
 
-    /* Mark online so the BSP's wait_for_ap_online polling sees us. */
+    /* Build the per-CPU idle TCB. Our current kernel stack (the one
+     * the trampoline allocated and we're standing on) becomes the
+     * idle task's stack. From here on, schedule() can switch FROM
+     * us TO a runnable task; when nothing is runnable, schedule()
+     * picks us back up and we return to the hlt loop. */
+    extern struct task *task_init_ap_idle(uint32_t cpu_id, uint32_t kstop, void *kbase);
+    struct task *idle = task_init_ap_idle(my_id, me->kernel_stack_top, me->idle_stack);
+    me->idle    = idle;
+    me->current = idle;
+
+    /* Start the per-CPU LAPIC timer. The handler at IDT 0x40 calls
+     * schedule() on every fire — that's how we get preempted out of
+     * the idle hlt below. 10_000_000 LAPIC clocks ≈ 10ms on QEMU. */
+    lapic_timer_init(10000000u);
+
+    /* Mark online so the BSP's wait_for_ap_online polling sees us.
+     * MUST come AFTER our scheduler state is set up — the BSP may
+     * spawn user tasks immediately on seeing us online and we need
+     * to be in a state that can accept being scheduled out. */
     __atomic_store_n(&me->online, 1, __ATOMIC_RELEASE);
 
-    kprintf("[smp] AP%u online (apic_id=%u)\n",
+    kprintf("[smp] AP%u online (apic_id=%u, lapic-timer @ vec 0x40)\n",
             (unsigned)my_id, (unsigned)me->lapic_id);
 
-    /* Halt loop: the scheduler is BSP-only for now. Future work:
-     * have the AP enter schedule() and pick from the run queue. */
+    /* Idle loop: enable interrupts and hlt. Each LAPIC-timer tick
+     * preempts us into schedule(); if a real task is READY,
+     * schedule() picks it and we don't return here until that task
+     * yields back to idle. If nothing is READY, schedule() picks
+     * idle (us) and we resume right at the next iteration — back
+     * into hlt to save power. */
     for (;;) {
         __asm__ volatile ("sti; hlt");
     }

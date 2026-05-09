@@ -36,6 +36,7 @@ struct cpu_local {
     uint32_t      kernel_stack_top;  /* loaded into TSS.esp0 on syscall */
     void         *idle_stack;        /* bottom of kernel stack alloc */
     struct task  *current;           /* task running on THIS cpu */
+    struct task  *idle;              /* fallback "idle" TCB for this cpu */
     struct tss    tss;               /* per-CPU TSS, GDT entry per cpu */
     uint16_t      tss_selector;      /* GDT selector for the above */
 };

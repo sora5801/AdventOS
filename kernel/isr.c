@@ -4,6 +4,9 @@
 #include "syscall.h"
 #include "signal.h"
 #include "mmap.h"
+#include "lapic.h"
+#include "task.h"
+#include "smp.h"
 #include "../include/io.h"
 
 static const char *exception_names[32] = {
@@ -109,5 +112,40 @@ void irq_handler(struct registers *r) {
      * deliver any signals that piled up while the user task was
      * preempted. signal_check_and_deliver checks (r->cs & 3) == 3
      * itself, so kernel-mode preemption is a no-op. */
+    signal_check_and_deliver(r);
+}
+
+/*
+ * LAPIC-timer ISR. Fires on EVERY CPU independently — the LAPIC is
+ * per-CPU silicon, so each call is on the local CPU's stack with
+ * the local CPU's register state. EOI goes to the LAPIC, not the
+ * PIC; signal delivery + schedule() then runs as for the PIT path.
+ *
+ * Like the PIT handler, the EOI is sent BEFORE schedule() because
+ * schedule() may context-switch and never return — a deferred EOI
+ * would mute further timer ticks on this CPU.
+ */
+volatile uint32_t g_lapic_tick_count[8];
+volatile uint32_t g_cpu_dispatch[8];
+
+void lapic_irq_handler(struct registers *r) {
+    lapic_eoi();
+
+    /* Per-CPU tick counter for diagnostics. Read by `tasks` shell
+     * command and the SMP selftest. */
+    extern volatile int g_smp_ready;
+    if (g_smp_ready) {
+        struct cpu_local *cpu = cpu_local();
+        if (cpu->cpu_id < 8) g_lapic_tick_count[cpu->cpu_id]++;
+    }
+
+    /* Round-robin preemption on every CPU. The schedule() call
+     * itself takes the global scheduler lock so concurrent ticks
+     * on different CPUs serialize cleanly. */
+    schedule();
+
+    /* Same signal-delivery hook as the PIT path — fires only when
+     * we're returning to ring 3 (signal_check_and_deliver gates on
+     * (r->cs & 3) == 3 itself). */
     signal_check_and_deliver(r);
 }

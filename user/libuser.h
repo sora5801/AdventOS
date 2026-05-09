@@ -80,6 +80,7 @@ typedef unsigned int   size_t;
 #define SYS_WAIT_NB      50
 #define SYS_GETCPU       51
 #define SYS_FBINFO       52
+#define SYS_SMP_STATS    53
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -167,6 +168,7 @@ int      sys_wait_nb(int *exit_code);
  * instant. Useful for proving that work has migrated to an AP. */
 int      sys_getcpu(void);
 int      sys_fbinfo(unsigned int out[4]);
+int      sys_smp_stats(unsigned int out[8]);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

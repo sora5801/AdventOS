@@ -117,3 +117,27 @@ void lapic_send_fixed(uint32_t dest_apic_id, uint8_t vector) {
                 vector);
     lapic_ipi_wait();
 }
+
+/* Per-CPU periodic timer. Each CPU programs its own LAPIC timer to
+ * fire at `vector = LAPIC_TIMER_VECTOR` (0x40) every `initial_count`
+ * LAPIC bus clocks. The handler (kernel/isr.c) calls schedule() then
+ * lapic_eoi().
+ *
+ * Reasonable default: initial_count = 10_000_000. On QEMU that's
+ * roughly 10ms (the LAPIC bus clock isn't precisely modelled). The
+ * exact frequency isn't critical — frequent enough for responsive
+ * preemption but not so frequent the IRQ handler dominates the CPU. */
+void lapic_timer_init(uint32_t initial_count) {
+    /* Set divider FIRST. Some CPUs latch the LVT entry's vector at
+     * the moment LVT is written; if we wrote LVT before the divider
+     * the first tick could fire with a stale period. */
+    lapic_write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDER);
+    lapic_write(LAPIC_REG_LVT_TIMER,
+                LAPIC_TIMER_PERIODIC | LAPIC_TIMER_VECTOR);
+    lapic_write(LAPIC_REG_TIMER_INIT, initial_count);
+}
+
+void lapic_timer_stop(void) {
+    lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_TIMER_MASK);
+    lapic_write(LAPIC_REG_TIMER_INIT, 0);
+}

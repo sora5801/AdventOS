@@ -212,6 +212,12 @@ void kmain(uint32_t boot_drive) {
     kputs("[boot] starting SMP\n");
     smp_init();
 
+    /* Tell the task layer the LAPIC + per-CPU table are alive. From
+     * this point on, schedule() / tss_set_kernel_stack / cpu_current
+     * can all dispatch via cpu_local() (= LAPIC ID lookup). Before
+     * this flag flips, those paths short-circuit to BSP-only access. */
+    task_smp_ready();
+
     /* NIC IRQs need to be live before init can succeed (the link-up
      * pre-fills the MAC via PIO, but later RX is IRQ-driven). */
     kputs("[boot] starting network stack\n");

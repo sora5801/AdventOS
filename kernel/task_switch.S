@@ -45,9 +45,17 @@ _task_switch:
  * that task_switch's `ret` jumps here, and the iret frame at the top
  * of that stack matches what the parent's syscall entry pushed (with
  * EAX zeroed so fork() returns 0 in the child).
+ *
+ * The forked child also needs to release the scheduler lock that the
+ * dispatching schedule() acquired — same reason as new-kernel-task
+ * trampoline below: the child's first execution doesn't go through
+ * the C `spin_unlock` after task_switch in schedule(). We piggy-back
+ * a `call _post_switch_finalize` at the top before the iret-frame
+ * unwind so the lock drops cleanly.
  */
 .global _fork_child_return
 _fork_child_return:
+    call    _post_switch_finalize  /* release g_sched_lock */
     pop     %eax                /* saved DS                          */
     mov     %ax, %ds
     mov     %ax, %es
@@ -57,3 +65,21 @@ _fork_child_return:
     popa                        /* restores all GP regs (eax = 0)    */
     add     $8, %esp            /* skip int_no + err_code            */
     iret                        /* back to ring 3 at parent's EIP    */
+
+/*
+ * Trampoline for kernel tasks created via task_create(). The
+ * synthesized stack puts THIS function as task_switch's `ret`
+ * target, with the real entry pointer pushed below — so this
+ * function needs to release the scheduler lock then `ret` (which
+ * pops the real entry off the stack and jumps to it).
+ *
+ * A fresh task's first scheduling can't fall through to the
+ * `spin_unlock` after task_switch in schedule() — the C control
+ * flow lands here in the trampoline instead. Without releasing
+ * the lock, all subsequent schedule() calls anywhere in the
+ * system would spin forever.
+ */
+.global _task_entry_trampoline
+_task_entry_trampoline:
+    call    _post_switch_finalize
+    ret                              /* pops real entry, jumps */

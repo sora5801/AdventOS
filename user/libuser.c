@@ -219,6 +219,15 @@ int sys_fbinfo(unsigned int out[4]) {
     return ret;
 }
 
+int sys_smp_stats(unsigned int out[8]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SMP_STATS), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

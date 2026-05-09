@@ -12,6 +12,8 @@
 #include "pipe.h"
 #include "tmpfs.h"
 #include "signal.h"
+#include "smp.h"
+#include "spinlock.h"
 #include "../include/io.h"
 
 /* fs.h has FS_DIR_ROOT but `task.h` can't include `fs.h` cleanly
@@ -20,12 +22,53 @@
 
 extern void task_switch(uint32_t *old_esp, uint32_t new_esp);
 extern void fork_child_return(void);     /* asm trampoline in task_switch.S */
+extern void task_entry_trampoline(void); /* asm trampoline in task_switch.S */
+
+/* Called from the trampolines above (task_entry_trampoline and
+ * fork_child_return) — releases the scheduler lock the dispatching
+ * schedule() acquired. Without this, a brand-new task would never
+ * release the lock and the system would freeze on the next schedule. */
+void post_switch_finalize(void);
 
 static struct task g_tasks[TASK_MAX];
-static struct task *g_current;
 static uint32_t     g_next_id      = 1;
 static uint32_t     g_kernel_cr3;
 static uint32_t     g_init_pid     = 0;     /* set after init.elf is spawned */
+
+/* SMP scheduler lock. Protects g_tasks[], the t->next ring, every
+ * t->state transition, and cpu_local()->current writes. Held across
+ * task_switch — see schedule()'s commentary for why that's correct
+ * (and why it's the only design that doesn't race the prev->esp
+ * save against another CPU dispatching prev). */
+static spinlock_t g_sched_lock = SPINLOCK_INIT;
+
+/* Convenience accessor — resolves the calling CPU's "current task"
+ * via cpu_local(). Falls back to g_tasks[0] before SMP is up so
+ * task.c works during the early-boot single-threaded window.
+ *
+ * IMPORTANT: cpu_local() reads LAPIC MMIO. If we're called BEFORE
+ * lapic_init mapped the page, that's a fault. The g_smp_ready flag
+ * (set by smp_init after lapic_init runs) gates which path we take.
+ * Pre-SMP, we just return g_tasks[0] (the BSP idle / kmain). */
+/* Non-static so tss.c can read it — same lazy dispatch trick. */
+volatile int g_smp_ready;
+void task_smp_ready(void) { g_smp_ready = 1; }
+
+void post_switch_finalize(void) {
+    /* Counterpart to schedule()'s spin_lock(&g_sched_lock). The
+     * lock is held across task_switch as a hand-off; whichever code
+     * path the new context lands in (this trampoline for new tasks,
+     * fork_child_return for fork children, the spin_unlock after
+     * task_switch for resumed tasks) is responsible for dropping it.
+     * If it's already 0, spin_unlock is a no-op other than restoring
+     * IF — harmless. */
+    spin_unlock(&g_sched_lock);
+}
+static inline struct task *cpu_current(void) {
+    if (!g_smp_ready) return &g_tasks[0];
+    struct cpu_local *c = cpu_local();
+    return c->current ? c->current : &g_tasks[0];
+}
 
 /* Forward decl — defined further down. */
 static void user_entry_stub(void);
@@ -47,20 +90,81 @@ void task_init(void) {
 
     /* Slot 0 is the bootstrapping thread (kmain). Its register state
      * is already live; we only need the TCB fields populated so the
-     * first task_switch can save into it. */
+     * first task_switch can save into it.
+     *
+     * NOT is_idle. We want BSP's kmain to participate in the regular
+     * round-robin so the boot sequence (which runs as kmain) gets
+     * preempted out and back in cleanly. cpu_pin = 0 ensures only the
+     * BSP picks it — APs would crash trying to use BSP's boot stack. */
     g_tasks[0].id          = 0;
     g_tasks[0].state       = TASK_STATE_RUNNING;
     g_tasks[0].next        = &g_tasks[0];
     g_tasks[0].switches_in = 1;
     g_tasks[0].cr3         = g_kernel_cr3;
     g_tasks[0].cwd_dir     = TASK_CWD_ROOT;
+    g_tasks[0].cpu         = 0;        /* BSP is logical CPU 0 */
+    g_tasks[0].cpu_pin     = 0;        /* BSP-only: shares boot stack */
+    g_tasks[0].is_idle     = 0;
     strncpy(g_tasks[0].name, "kmain", TASK_NAME_MAX - 1);
 
-    g_current = &g_tasks[0];
+    /* Bind to BSP's per-CPU current pointer via cpu_at(0). We can't
+     * use cpu_local() here — task_init runs BEFORE smp_init and the
+     * LAPIC MMIO isn't mapped yet, so reading the LAPIC ID register
+     * would page-fault. cpu_at(0) is a plain array index with no
+     * MMIO access. After smp_init runs, task_smp_ready() flips the
+     * flag and cpu_local() becomes safe to use. */
+    struct cpu_local *bsp = cpu_at(0);
+    if (bsp) bsp->current = &g_tasks[0];
+}
+
+/* Allocate a per-CPU idle TCB for the given CPU (other than the BSP,
+ * whose idle is g_tasks[0] above). The caller is the AP itself,
+ * running on its initial trampoline-provided kernel stack — that
+ * stack BECOMES the idle task's stack. The CPU's `idle_stack`
+ * (allocated in smp_init) IS the kernel stack we're standing on,
+ * so we use it as the TCB's stack_base too. */
+struct task *task_init_ap_idle(uint32_t cpu_id, uint32_t kernel_stack_top,
+                               void *kernel_stack_base) {
+    /* Find a free slot. AP idles permanently occupy a slot — they're
+     * never reaped. */
+    int slot = -1;
+    spin_lock(&g_sched_lock);
+    for (int i = 1; i < TASK_MAX; i++) {
+        if (g_tasks[i].state == TASK_STATE_UNUSED) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        spin_unlock(&g_sched_lock);
+        return NULL;
+    }
+
+    struct task *t = &g_tasks[slot];
+    memset(t, 0, sizeof(*t));
+    t->id               = 0;             /* idle tasks aren't pids the user sees */
+    t->state            = TASK_STATE_RUNNING;  /* AP starts running idle  */
+    t->cpu              = (int)cpu_id;
+    t->cpu_pin          = (int)cpu_id;   /* AP idle is pinned to its CPU */
+    t->is_idle          = 1;
+    t->cr3              = g_kernel_cr3;
+    t->kernel_stack_top = kernel_stack_top;
+    t->stack_base       = kernel_stack_base;
+    t->cwd_dir          = TASK_CWD_ROOT;
+    t->switches_in      = 1;
+    /* Ringless: idle tasks aren't on the round-robin chain. They're
+     * picked only when the chain has nothing READY for this CPU. */
+    t->next             = NULL;
+    t->name[0] = 'i'; t->name[1] = 'd'; t->name[2] = 'l'; t->name[3] = 'e';
+    t->name[4] = (char)('0' + cpu_id); t->name[5] = 0;
+
+    spin_unlock(&g_sched_lock);
+    return t;
 }
 
 struct task *task_create(task_fn entry, const char *name) {
     /* Find a free slot. */
+    spin_lock(&g_sched_lock);
     int idx = -1;
     for (int i = 1; i < TASK_MAX; i++) {
         if (g_tasks[i].state == TASK_STATE_UNUSED ||
@@ -69,15 +173,33 @@ struct task *task_create(task_fn entry, const char *name) {
             break;
         }
     }
-    if (idx < 0) return NULL;
+    if (idx < 0) { spin_unlock(&g_sched_lock); return NULL; }
+
+    /* Reserve the slot before dropping the lock so a concurrent
+     * task_create on another CPU can't pick the same one. We mark
+     * it READY but un-rung — the splice happens after kmalloc/etc
+     * succeeds. */
+    g_tasks[idx].state = TASK_STATE_READY;
+    g_tasks[idx].next  = NULL;
+    spin_unlock(&g_sched_lock);
 
     void *stack = kmalloc(TASK_STACK_SZ);
-    if (!stack) return NULL;
+    if (!stack) {
+        spin_lock(&g_sched_lock);
+        g_tasks[idx].state = TASK_STATE_UNUSED;
+        spin_unlock(&g_sched_lock);
+        return NULL;
+    }
 
     struct task *t = &g_tasks[idx];
+    /* Don't memset — that'd zero the state we just claimed. Hand-init
+     * each field instead so the slot stays "claimed" throughout. */
+    int reserved_state = t->state;
     memset(t, 0, sizeof(*t));
+    t->state      = reserved_state;
     t->id         = g_next_id++;
-    t->state      = TASK_STATE_READY;
+    t->cpu        = -1;
+    t->cpu_pin    = -1;             /* any CPU may run this task */
     t->stack_base = stack;
     if (name) {
         strncpy(t->name, name, TASK_NAME_MAX - 1);
@@ -87,26 +209,39 @@ struct task *task_create(task_fn entry, const char *name) {
     /* Synthesize the initial stack frame. task_switch's pop sequence
      * will pull these values out:
      *
-     *   higher addr ─┬───────────────────────────┐
-     *                │ 0      (fake return EIP)  │  <- entry must not return
-     *                │ entry  (real return EIP)  │  <- popped by `ret`
-     *                │ EFLAGS (IF set)           │  <- popfl
-     *                │ EBP                       │
-     *                │ EBX                       │
-     *                │ ESI                       │
-     *                │ EDI                       │  <- task->esp
-     *   lower addr  ─┴───────────────────────────┘
+     *   higher addr ─┬─────────────────────────────────────┐
+     *                │ 0          (fake return EIP)        │  <- entry must not return
+     *                │ entry      (popped by trampoline's  │
+     *                │             `ret`; jumps to real    │
+     *                │             entry function)         │
+     *                │ trampoline (popped by task_switch's │
+     *                │             `ret`; releases the     │
+     *                │             scheduler lock first)   │
+     *                │ EFLAGS (IF set)                     │  <- popfl
+     *                │ EBP                                  │
+     *                │ EBX                                  │
+     *                │ ESI                                  │
+     *                │ EDI                                  │  <- task->esp
+     *   lower addr  ─┴─────────────────────────────────────┘
+     *
+     * The extra trampoline indirection is what makes SMP scheduling
+     * work: a freshly-scheduled new task can't fall through to the
+     * spin_unlock() at the end of schedule() because it's never been
+     * inside schedule() — it boots straight into `entry`. Without
+     * the trampoline releasing the lock, the very next schedule
+     * anywhere in the system would spin forever.
      */
     uintptr_t  top = (uintptr_t)stack + TASK_STACK_SZ;
     uint32_t  *sp  = (uint32_t *)top;
 
-    *--sp = 0;                          /* if entry returns -> #PF on 0 */
-    *--sp = (uint32_t)(uintptr_t)entry; /* `ret` target                 */
-    *--sp = 0x202;                      /* EFLAGS: reserved bit + IF=1  */
-    *--sp = 0;                          /* EBP                           */
-    *--sp = 0;                          /* EBX                           */
-    *--sp = 0;                          /* ESI                           */
-    *--sp = 0;                          /* EDI                           */
+    *--sp = 0;                                          /* if entry returns -> #PF on 0 */
+    *--sp = (uint32_t)(uintptr_t)entry;                 /* trampoline's ret target      */
+    *--sp = (uint32_t)(uintptr_t)&task_entry_trampoline;/* task_switch ret target       */
+    *--sp = 0x202;                                      /* EFLAGS: reserved bit + IF=1  */
+    *--sp = 0;                                          /* EBP                           */
+    *--sp = 0;                                          /* EBX                           */
+    *--sp = 0;                                          /* ESI                           */
+    *--sp = 0;                                          /* EDI                           */
 
     t->esp = (uint32_t)(uintptr_t)sp;
     t->cr3 = g_kernel_cr3;
@@ -138,11 +273,13 @@ struct task *task_create(task_fn entry, const char *name) {
     /* cwd defaults to / (session 25). */
     t->cwd_dir = TASK_CWD_ROOT;
 
-    /* Splice into the round-robin list right after current. */
-    __asm__ volatile ("cli");
-    t->next = g_current->next;
-    g_current->next = t;
-    __asm__ volatile ("sti");
+    /* Splice into the round-robin list right after current.
+     * The list is shared across CPUs; protect with the scheduler lock. */
+    spin_lock(&g_sched_lock);
+    struct task *cur = cpu_current();
+    t->next = cur->next ? cur->next : cur;
+    cur->next = t;
+    spin_unlock(&g_sched_lock);
 
     return t;
 }
@@ -161,6 +298,14 @@ struct task *task_create_user(uint32_t user_eip, uint32_t user_esp,
     t->user_eip = user_eip;
     t->user_esp = user_esp;
     t->is_user  = 1;
+    /* SMP scope of session 33: APs run KERNEL-ONLY tasks. User tasks
+     * stay pinned to the BSP because the syscall surface (fs.c,
+     * bcache, kmalloc, paging_destroy_user_pd, …) is not yet
+     * SMP-safe. The page-fault races we hit when AP picked up a
+     * forked user task were rooted in unsynchronized fs / elf-loader
+     * state. A future session will add per-subsystem locks (or a Big
+     * Kernel Lock around syscall_dispatch) and lift this pin. */
+    t->cpu_pin  = 0;
     return t;
 }
 
@@ -170,7 +315,7 @@ struct task *task_create_user(uint32_t user_eip, uint32_t user_esp,
  * preemptions resume the task via the normal ISR-iret path instead.
  */
 static void user_entry_stub(void) {
-    struct task *t = g_current;
+    struct task *t = cpu_current();
     tss_set_kernel_stack(t->kernel_stack_top);
 
     /* Selectors with RPL=3:  0x18|3 = 0x1B (user code), 0x20|3 = 0x23 (user data).
@@ -196,54 +341,132 @@ static void user_entry_stub(void) {
     __builtin_unreachable();
 }
 
+/* Tasks pinned to a different CPU can't be picked by us. */
+static inline int pickable_by(const struct task *t, int my_cpu) {
+    if (t->state != TASK_STATE_READY) return 0;
+    if (t->cpu_pin != -1 && t->cpu_pin != my_cpu) return 0;
+    return 1;
+}
+
+/* Walk the round-robin ring starting after `from`, return the first
+ * task whose state == TASK_STATE_READY AND whose cpu_pin admits this
+ * CPU. If nothing is found, returns NULL — caller falls back to the
+ * per-CPU idle task.
+ *
+ * Caller MUST hold g_sched_lock — we read state and ring pointers
+ * that other CPUs can mutate.
+ *
+ * Tasks marked TASK_STATE_RUNNING are skipped (already in flight).
+ * Idle tasks (is_idle) aren't on the ring at all.
+ *
+ * `from` may be NULL (AP idle yielding) or any task in the ring. We
+ * always start from `from->next` if available so different CPUs
+ * make progress through different parts of the ring. */
+static struct task *pick_next_ready(struct task *from, int my_cpu) {
+    struct task *start = (from && from->next) ? from->next : NULL;
+    if (!start) {
+        /* No ring entry to anchor on (e.g., AP idle yielding). Scan
+         * all slots for a runnable + pickable task. */
+        for (int i = 0; i < TASK_MAX; i++) {
+            if (pickable_by(&g_tasks[i], my_cpu)) return &g_tasks[i];
+        }
+        return NULL;
+    }
+    struct task *t = start;
+    int safety = TASK_MAX * 2;
+    do {
+        if (pickable_by(t, my_cpu)) return t;
+        t = t->next ? t->next : start;
+        if (!--safety) break;
+    } while (t != start);
+    if (pickable_by(start, my_cpu)) return start;
+    return NULL;
+}
+
 void schedule(void) {
-    if (!g_current) return;
+    /* Take the global scheduler lock. spin_lock cli's first, so we're
+     * race-free against IRQs on this CPU and against schedule() on
+     * other CPUs. The lock is HELD across task_switch (see commentary
+     * below) — we don't drop it until after the switch completes from
+     * the perspective of the *incoming* task. */
+    spin_lock(&g_sched_lock);
 
-    __asm__ volatile ("cli");
+    /* cpu_local() reads LAPIC MMIO, which isn't mapped pre-SMP. Use
+     * the array-index variant cpu_at(0) until smp_init has flipped
+     * task_smp_ready. */
+    struct cpu_local *cpu  = g_smp_ready ? cpu_local() : cpu_at(0);
+    struct task      *prev = cpu->current ? cpu->current : &g_tasks[0];
 
-    /* Pick the next runnable task. Skip anything that isn't currently
-     * runnable: DEAD, ZOMBIE (exited), BLOCKED (mutex), BLOCKED_ON_CHILD
-     * (in sys_wait), STOPPED (job control — until SIGCONT). */
-    struct task *next = g_current->next;
-    int safety = TASK_MAX;
-    while (next != g_current
-           && (next->state == TASK_STATE_DEAD              ||
-               next->state == TASK_STATE_ZOMBIE            ||
-               next->state == TASK_STATE_BLOCKED           ||
-               next->state == TASK_STATE_BLOCKED_ON_CHILD  ||
-               next->state == TASK_STATE_STOPPED)
-           && safety--) {
-        next = next->next;
+    /* If prev is RUNNING (the normal case), demote to READY so other
+     * CPUs are free to dispatch it. Idle tasks are special: they're
+     * not on the ring and don't get demoted — they stay RUNNING on
+     * "their" CPU and we just leave them alone if there's no work.
+     *
+     * BLOCKED / ZOMBIE / DEAD / STOPPED / BLOCKED_ON_CHILD: someone
+     * else (sys_exit, mutex_lock, etc.) already set the right state;
+     * we leave it alone and just yield. */
+    if (prev->state == TASK_STATE_RUNNING && !prev->is_idle) {
+        prev->state = TASK_STATE_READY;
+        prev->cpu   = -1;
     }
 
-    if (next == g_current) {
-        __asm__ volatile ("sti");
+    struct task *next = pick_next_ready(prev->is_idle ? NULL : prev,
+                                        (int)cpu->cpu_id);
+
+    /* Fall back to this CPU's idle task if no real work is available.
+     * The BSP's idle is g_tasks[0]; APs install their own via
+     * task_init_ap_idle. cpu->idle == NULL would mean a setup bug. */
+    if (!next) {
+        next = (struct task *)cpu->idle;
+        if (!next) next = &g_tasks[0];   /* last-ditch fallback */
+    }
+
+    if (next == prev) {
+        /* Nothing to do — drop lock and return. The popfl in
+         * spin_unlock restores IF if prev had it set at acquire. */
+        spin_unlock(&g_sched_lock);
         return;
     }
 
-    struct task *prev = g_current;
-    if (prev->state == TASK_STATE_RUNNING) prev->state = TASK_STATE_READY;
-    next->state = TASK_STATE_RUNNING;
+    next->state       = TASK_STATE_RUNNING;
+    next->cpu         = (int)cpu->cpu_id;
     next->switches_in++;
-    g_current = next;
+    cpu->current      = next;
 
-    /* TSS.esp0 must point at the incoming task's kernel stack so any
-     * future ring-3 -> ring-0 entry (syscall or interrupt) lands on
-     * the right per-task kernel stack. */
+    /* Diagnostic counter: how many times each CPU has dispatched a
+     * non-idle task. Read via SYS_SMP_STATS / shown in [t22]. */
+    extern volatile uint32_t g_cpu_dispatch[8];
+    if (!next->is_idle && cpu->cpu_id < 8) g_cpu_dispatch[cpu->cpu_id]++;
+
+    /* Per-CPU TSS.esp0 update so any ring-3 -> ring-0 transition that
+     * happens AFTER this switch (syscall, page fault, IRQ) lands on
+     * the incoming task's kernel stack. tss_set_kernel_stack reads
+     * cpu_local() to find the right TSS. */
     if (next->kernel_stack_top) {
         tss_set_kernel_stack(next->kernel_stack_top);
     }
 
-    /* Switch address space if needed. Kernel mappings are mirrored in
-     * every PD so kernel code/stacks stay reachable across the swap. */
+    /* Switch address space if needed. Kernel mappings are mirrored
+     * across every PD so the kernel stack we're standing on stays
+     * reachable across the CR3 write. */
     if (next->cr3 && next->cr3 != prev->cr3) {
         write_cr3(next->cr3);
     }
 
+    /* Hand-off the lock across task_switch. The lock stays HELD; when
+     * the incoming task (`next`) eventually returns from its own past
+     * task_switch call site below, IT will spin_unlock. This is the
+     * piece that makes the whole "set prev->state = READY before
+     * task_switch" pattern safe — no other CPU can inspect prev or
+     * dispatch it while we still own the lock, so prev->esp is
+     * guaranteed to be saved by task_switch.S before any CPU resumes
+     * prev. (See docs/33-ap-scheduling.md §"the lock-handoff trick".) */
     task_switch(&prev->esp, next->esp);
 
-    /* When this task is later resumed, control returns here. */
-    __asm__ volatile ("sti");
+    /* Resumed here LATER, on whichever CPU now runs prev. The lock
+     * is still owned (at the level of the global flag); release it
+     * to let the rest of the kernel run normally on this CPU. */
+    spin_unlock(&g_sched_lock);
 }
 
 void task_yield(void) {
@@ -251,7 +474,7 @@ void task_yield(void) {
 }
 
 struct task *task_current(void) {
-    return g_current;
+    return cpu_current();
 }
 
 struct task *task_at(uint32_t slot) {
@@ -292,17 +515,30 @@ static void task_reaper(void) {
 
         for (int i = 1; i < TASK_MAX; i++) {
             struct task *t = &g_tasks[i];
-            if (t == g_current)              continue;
+            /* Skip the per-CPU current of any CPU — pulling the rug
+             * out from under a running task is fatal. The is_idle
+             * check is for the BSP idle (g_tasks[0]) which never
+             * goes DEAD anyway but is a defensive belt-and-suspenders. */
+            if (t->is_idle)                  continue;
             if (t->state != TASK_STATE_DEAD) continue;
             if (t->stack_base == NULL)       continue;  /* already reaped */
 
-            /* Splice the dead task out of the round-robin ring. */
-            __asm__ volatile ("cli");
+            int still_running = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                struct cpu_local *cl = cpu_at(c);
+                if (cl && cl->current == t) { still_running = 1; break; }
+            }
+            if (still_running) continue;
+
+            /* Splice the dead task out of the round-robin ring under
+             * the scheduler lock — other CPUs may be walking it via
+             * pick_next_ready right now. */
+            spin_lock(&g_sched_lock);
             struct task *p = t->next;
             int safety = TASK_MAX * 2;
             while (p && p != t && p->next != t && safety--) p = p->next;
             if (p && p->next == t) p->next = t->next;
-            __asm__ volatile ("sti");
+            spin_unlock(&g_sched_lock);
 
             uint32_t reaped_id   = t->id;
             int      reaped_user = t->is_user;
@@ -408,7 +644,7 @@ static uint32_t synth_fork_child_stack(void *stack_base,
 }
 
 struct task *task_fork(struct registers *parent_regs) {
-    struct task *parent = g_current;
+    struct task *parent = cpu_current();
     if (!parent->is_user) return NULL;                  /* only ring-3 tasks fork */
 
     /* 1. New TCB + kernel stack. */
@@ -435,6 +671,8 @@ struct task *task_fork(struct registers *parent_regs) {
     memset(child, 0, sizeof(*child));
     child->id               = g_next_id++;
     child->state            = TASK_STATE_READY;
+    child->cpu              = -1;
+    child->cpu_pin          = 0;           /* user tasks stay on BSP — see task_create_user */
     child->stack_base       = kstack;
     child->esp              = child_esp;
     child->cr3              = (uint32_t)(uintptr_t)child_pd;
@@ -493,11 +731,12 @@ struct task *task_fork(struct registers *parent_regs) {
     child->pgid = parent->pgid;
     child->sid  = parent->sid;
 
-    /* 6. Splice into the round-robin ring. */
-    __asm__ volatile ("cli");
+    /* 6. Splice into the round-robin ring under the scheduler lock —
+     * APs may be picking from the ring concurrently. */
+    spin_lock(&g_sched_lock);
     child->next       = parent->next;
     parent->next      = child;
-    __asm__ volatile ("sti");
+    spin_unlock(&g_sched_lock);
 
     return child;
 }
@@ -506,7 +745,7 @@ int task_exec_inplace(struct registers *r,
                       const char *path,
                       int argc,
                       const char *const *argv_strs) {
-    struct task *t = g_current;
+    struct task *t = cpu_current();
     if (!t->is_user) return -1;
 
     /* Open + load the new ELF FIRST, into a fresh PD. If anything
@@ -596,7 +835,7 @@ static void close_all_fds(struct task *t) {
 }
 
 void task_exit_current(int exit_code) {
-    struct task *t = g_current;
+    struct task *t = cpu_current();
     t->exit_code = exit_code;
 
     /* Close everything we still have open. Critical for pipes:
@@ -682,12 +921,12 @@ static uint32_t reap_one_zombie_of(struct task *parent, int *out_code) {
         /* Unsplice from the round-robin ring atomically vs the
          * scheduler. Safe because c is ZOMBIE — it's not running and
          * won't be picked. */
-        __asm__ volatile ("cli");
+        spin_lock(&g_sched_lock);
         struct task *p = c->next;
         int safety = TASK_MAX * 2;
         while (p && p != c && p->next != c && safety--) p = p->next;
         if (p && p->next == c) p->next = c->next;
-        __asm__ volatile ("sti");
+        spin_unlock(&g_sched_lock);
 
         /* Free the child's address space + kernel stack. We're on the
          * parent's kernel stack; the parent's CR3 is loaded; the
@@ -730,7 +969,7 @@ static int has_any_live_or_zombie_child(struct task *parent) {
 }
 
 int task_wait_current(int *out_code) {
-    struct task *t = g_current;
+    struct task *t = cpu_current();
     for (;;) {
         uint32_t pid = reap_one_zombie_of(t, out_code);
         if (pid != 0) return (int)pid;
@@ -745,7 +984,7 @@ int task_wait_current(int *out_code) {
 }
 
 int task_waitpid_nb_current(int *out_code) {
-    struct task *t = g_current;
+    struct task *t = cpu_current();
     uint32_t pid = reap_one_zombie_of(t, out_code);
     if (pid != 0) return (int)pid;
     if (!has_any_live_or_zombie_child(t)) return -1;

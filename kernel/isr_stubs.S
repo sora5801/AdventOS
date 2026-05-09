@@ -88,6 +88,17 @@ _isr128:
     push    $128
     jmp     isr_common_stub
 
+/* LAPIC timer (IDT vector 0x40 = 64). Reuses the irq_common_stub
+ * but the C handler EOIs the LAPIC instead of the legacy 8259 PIC.
+ * Each CPU's LAPIC fires this independently — APs use it as their
+ * preemption tick. */
+.global _lapic_timer_stub
+_lapic_timer_stub:
+    cli
+    push    $0
+    push    $0x40
+    jmp     lapic_irq_common_stub
+
 /* Hardware IRQs, remapped to vectors 32..47 */
 IRQ 0,  32
 IRQ 1,  33
@@ -152,6 +163,37 @@ irq_common_stub:
 
     push    %esp
     call    _irq_handler
+    add     $4, %esp
+
+    pop     %eax
+    mov     %ax, %ds
+    mov     %ax, %es
+    mov     %ax, %fs
+    mov     %ax, %gs
+
+    popa
+    add     $8, %esp
+    iret
+
+/* Like irq_common_stub but routes to _lapic_irq_handler — that
+ * function sends EOI to the LAPIC (not the PIC) and dispatches to
+ * the LAPIC-timer scheduler-tick. Same cpu_local indirection as
+ * the regular IRQ path; works on BSP and APs identically. */
+lapic_irq_common_stub:
+    pusha
+
+    xor     %eax, %eax
+    mov     %ds,  %ax
+    push    %eax
+
+    mov     $0x10, %ax
+    mov     %ax, %ds
+    mov     %ax, %es
+    mov     %ax, %fs
+    mov     %ax, %gs
+
+    push    %esp
+    call    _lapic_irq_handler
     add     $4, %esp
 
     pop     %eax

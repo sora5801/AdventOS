@@ -70,6 +70,21 @@ struct task {
      * wait queue at a time, so a single-link pointer is enough. */
     struct task  *wait_next;
 
+    /* SMP scheduling. cpu is the LOGICAL CPU id this task is currently
+     * running on (== cpu_local()->cpu_id of the dispatching CPU), or
+     * -1 if not RUNNING anywhere. The scheduler skips tasks with
+     * state == TASK_STATE_RUNNING when picking a next task — those are
+     * already in flight on some CPU and shouldn't be double-dispatched.
+     *
+     * cpu_pin: -1 = any CPU (default for user tasks). Otherwise
+     * pin-to-CPU id; only that CPU may pick this task. Used for the
+     * BSP's bootstrap thread (slot 0) — its kernel stack is the boot
+     * stack, which is BSP-only — and for each AP's idle task (which
+     * runs on the AP's own kernel stack the trampoline allocated). */
+    int           cpu;
+    int           cpu_pin;
+    int           is_idle;            /* 1 if this is a per-CPU idle task (off-ring fallback) */
+
     /* Open file descriptors. Slots 0/1/2 are pre-wired to stdin/
      * stdout/stderr; slot 3+ are available for SYS_OPEN. */
     struct task_fd fds[TASK_MAX_FDS];
@@ -142,6 +157,19 @@ typedef void (*task_fn)(void);
 
 void           task_init(void);
 struct task   *task_create(task_fn entry, const char *name);
+
+/* Build the per-CPU idle task for an application processor. Called
+ * from ap_entry once the AP has its kernel stack + LAPIC + TSS. The
+ * resulting TCB is marked is_idle (off the round-robin ring), bound
+ * to the supplied CPU id, and immediately returned as RUNNING — so
+ * the AP is "running idle" by the time it enables interrupts. */
+struct task   *task_init_ap_idle(uint32_t cpu_id, uint32_t kernel_stack_top,
+                                 void *kernel_stack_base);
+
+/* Called once from kmain after smp_init has mapped the LAPIC and
+ * populated the per-CPU table. From this point on, scheduler hot
+ * paths can safely call cpu_local() (which reads LAPIC MMIO). */
+void           task_smp_ready(void);
 
 /* Spawn a ring-3 task. The caller has already mapped user_eip and the
  * stack page in the supplied page directory. */

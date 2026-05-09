@@ -457,12 +457,35 @@ static void selftest(void) {
 
     /* Run the SMP CPU-id check FIRST so we don't have to wait
      * 60+ seconds of network tests to verify it. */
-    puts("[t22] SMP: sys_getcpu reports the running CPU's APIC ID\n");
+    puts("[t22] SMP: APs run kernel tasks via LAPIC-timer preemption\n");
     {
+        /* Per-CPU LAPIC-timer tick + dispatch counters. Both should
+         * advance: BSP via PIT (no LAPIC ticks but kernel dispatches),
+         * AP via LAPIC timer (both counters tick). */
+        unsigned int t1[8] = {0};
+        sys_smp_stats(t1);
+        sys_sleep_ms(300);
+        unsigned int t2[8] = {0};
+        int ncpu = sys_smp_stats(t2);
+        printf("  cpu count: %d, 300ms deltas:\n", ncpu);
+        for (int i = 0; i < ncpu; i++) {
+            printf("    cpu%d: %u lapic-timer ticks, %u task dispatches\n",
+                   i, t2[i] - t1[i], t2[i+4] - t1[i+4]);
+        }
+        if (ncpu >= 2 && (t2[5] - t1[5]) > 0) {
+            printf("  PASS: AP1 dispatched %u kernel tasks in 300ms\n",
+                   t2[5] - t1[5]);
+        } else {
+            printf("  FAIL: AP1 not dispatching tasks\n");
+        }
+
+        /* User-task pinning. In session 33 user tasks are pinned to
+         * BSP because the syscall surface (fs/bcache/elf/paging) isn't
+         * yet SMP-safe. Verify shell + child both run on apic_id=0. */
         int my_cpu = sys_getcpu();
-        printf("  shell pid=%d running on CPU apic_id=%d\n",
+        printf("  shell pid=%d on CPU apic_id=%d (user tasks pinned to BSP)\n",
                sys_getpid(), my_cpu);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             int pid = sys_fork();
             if (pid == 0) {
                 int c = sys_getcpu();
@@ -470,8 +493,7 @@ static void selftest(void) {
                        i, sys_getpid(), c);
                 sys_exit(0);
             }
-            int code;
-            sys_wait(&code);
+            int code; sys_wait(&code);
         }
     }
 

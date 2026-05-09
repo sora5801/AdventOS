@@ -42,6 +42,9 @@
 #define LAPIC_REG_LVT_LINT0  0x350
 #define LAPIC_REG_LVT_LINT1  0x360
 #define LAPIC_REG_LVT_ERROR  0x370
+#define LAPIC_REG_TIMER_INIT 0x380   /* initial count for one-shot/periodic */
+#define LAPIC_REG_TIMER_CUR  0x390   /* current count */
+#define LAPIC_REG_TIMER_DIV  0x3E0   /* divide configuration */
 
 /* Spurious vector register flags. Bit 8 = enable LAPIC. */
 #define LAPIC_SVR_ENABLE     0x100u
@@ -73,5 +76,19 @@ void     lapic_eoi(void);
 void     lapic_send_init   (uint32_t dest_apic_id);
 void     lapic_send_sipi   (uint32_t dest_apic_id, uint32_t entry_phys);
 void     lapic_send_fixed  (uint32_t dest_apic_id, uint8_t vector);
+
+/* Configure THIS CPU's LAPIC timer to fire at `hz` Hz on the given
+ * IDT vector, in periodic mode. Each CPU calls this on itself.
+ * `count` is the number of LAPIC bus clocks per tick — we don't
+ * calibrate against the PIT (a hard-coded reasonable value works
+ * fine on QEMU); `divisor_cfg` selects the LAPIC's own /16 (=0x3)
+ * vs /1 (=0xB) divider. */
+#define LAPIC_TIMER_VECTOR   0x40
+#define LAPIC_TIMER_DIVIDER  0xB    /* divide by 1: see SDM 10.5.4 */
+#define LAPIC_TIMER_PERIODIC (1u << 17)
+#define LAPIC_TIMER_MASK     (1u << 16)
+
+void     lapic_timer_init  (uint32_t initial_count);
+void     lapic_timer_stop  (void);
 
 #endif
