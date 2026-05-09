@@ -33,6 +33,9 @@
 #define SIGALRM    14
 #define SIGTERM    15
 #define SIGCHLD    17
+#define SIGCONT    18    /* continue if stopped — uncatchable for default; clears stop pendings */
+#define SIGSTOP    19    /* stop, uncatchable */
+#define SIGTSTP    20    /* stop from terminal (Ctrl-Z); catchable */
 
 /* User-facing handler-pointer sentinels. Kept as void* so we can
  * stuff them through the same array slot as real function pointers. */
@@ -56,6 +59,11 @@ void signal_sigreturn(struct registers *r);
 /* SYS_KILL: queue `sig` in `target_pid`'s pending set. Returns 0 on
  * success, -1 on bad pid / bad sig. */
 int  signal_send(uint32_t target_pid, int sig);
+
+/* SYS_KILLPG: broadcast `sig` to every task whose pgid matches.
+ * Returns 0 if at least one delivery happened, -1 if no matches /
+ * bad sig. pgid == 0 is rejected (would hit kernel tasks). */
+int  signal_send_pgrp(uint32_t pgid, int sig);
 
 /* SYS_SIGACTION: install `handler` for `sig` in the calling task.
  * `tramp` is the user-VA of the libuser sigreturn trampoline; it gets

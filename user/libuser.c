@@ -255,6 +255,69 @@ int sys_fs_write(const char *name, const void *data, uint32_t n) {
     return ret;
 }
 
+int setpgid(int pid, int pgid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SETPGID), "b"(pid), "c"(pgid)
+                      : "memory");
+    return ret;
+}
+
+int getpgid(int pid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETPGID), "b"(pid)
+                      : "memory");
+    return ret;
+}
+
+int setsid(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SETSID)
+                      : "memory");
+    return ret;
+}
+
+int getsid(int pid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETSID), "b"(pid)
+                      : "memory");
+    return ret;
+}
+
+int killpg(int pgid, int sig) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_KILLPG), "b"(pgid), "c"(sig)
+                      : "memory");
+    return ret;
+}
+
+int tcsetpgrp(int fd, int pgid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TCSETPGRP), "b"(fd), "c"(pgid)
+                      : "memory");
+    return ret;
+}
+
+int tcgetpgrp(int fd) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TCGETPGRP), "b"(fd)
+                      : "memory");
+    return ret;
+}
+
 /*
  * Sigreturn trampoline. The kernel pushes (low to high on user stack):
  *   [trampoline_addr]   ← handler's "return address"

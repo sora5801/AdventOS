@@ -6,7 +6,8 @@
 /* Single global mode for now — there's one console pair across the
  * whole system. A future PTY layer would make this per-tty and
  * reach it via fd 0's underlying tty handle. */
-static volatile uint32_t g_mode = TTY_DEFAULT;
+static volatile uint32_t g_mode    = TTY_DEFAULT;
+static volatile uint32_t g_fg_pgid = 0;          /* set by SYS_TCSETPGRP */
 
 void tty_init(void) {
     g_mode = TTY_DEFAULT;
@@ -54,3 +55,6 @@ int tty_inject(const char *bytes, int n) {
     keyboard_inject(bytes, n);
     return n;
 }
+
+uint32_t tty_get_fg_pgrp(void)        { return g_fg_pgid; }
+void     tty_set_fg_pgrp(uint32_t p)  { g_fg_pgid = p;    }

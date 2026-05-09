@@ -46,4 +46,13 @@ int      tty_read(char *buf, int cap);
  * feed the raw-mode reader without needing real keyboard input. */
 int      tty_inject(const char *bytes, int n);
 
+/* Foreground process group (session 20). The shell calls
+ * tty_set_fg_pgrp(pipeline_pgid) before waiting for a foreground
+ * pipeline so signals from the controlling terminal (Ctrl-C / Ctrl-Z
+ * — ISIG path, deferred) would be routed to the pipeline rather
+ * than the shell. Today only SYS_TCSETPGRP / SYS_TCGETPGRP touch it;
+ * the value defaults to 0 (no foreground pgrp). */
+uint32_t tty_get_fg_pgrp(void);
+void     tty_set_fg_pgrp(uint32_t pgid);
+
 #endif

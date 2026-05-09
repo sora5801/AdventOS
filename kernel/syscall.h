@@ -36,6 +36,13 @@
 #define SYS_TTY_GET_MODE 29 /* (eax=29)                   -> current flags */
 #define SYS_TTY_INJECT   30 /* (eax=30, ebx=ptr, ecx=n)   -> bytes pushed (test helper) */
 #define SYS_FS_WRITE     31 /* (eax=31, ebx=name, ecx=buf, edx=n) -> 0 / -1; persists to disk */
+#define SYS_SETPGID      32 /* (eax=32, ebx=pid, ecx=pgid) -> 0 / -1; pid=0 = self, pgid=0 = pid */
+#define SYS_GETPGID      33 /* (eax=33, ebx=pid)           -> pgid or -1; pid=0 = self */
+#define SYS_SETSID       34 /* (eax=34)                    -> new sid (= pid) or -1 */
+#define SYS_GETSID       35 /* (eax=35, ebx=pid)           -> sid or -1; pid=0 = self */
+#define SYS_KILLPG       36 /* (eax=36, ebx=pgid, ecx=sig) -> 0 / -1 */
+#define SYS_TCSETPGRP    37 /* (eax=37, ebx=fd, ecx=pgid)  -> 0 / -1; sets the foreground pgrp */
+#define SYS_TCGETPGRP    38 /* (eax=38, ebx=fd)            -> current foreground pgrp */
 
 void syscall_dispatch(struct registers *r);
 

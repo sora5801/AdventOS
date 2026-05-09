@@ -59,6 +59,13 @@ typedef unsigned int   size_t;
 #define SYS_TTY_GET_MODE 29
 #define SYS_TTY_INJECT   30
 #define SYS_FS_WRITE     31
+#define SYS_SETPGID      32
+#define SYS_GETPGID      33
+#define SYS_SETSID       34
+#define SYS_GETSID       35
+#define SYS_KILLPG       36
+#define SYS_TCSETPGRP    37
+#define SYS_TCGETPGRP    38
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -81,6 +88,9 @@ typedef unsigned int   size_t;
 #define SIGALRM    14
 #define SIGTERM    15
 #define SIGCHLD    17
+#define SIGCONT    18
+#define SIGSTOP    19
+#define SIGTSTP    20
 
 typedef void (*sighandler_t)(int);
 
@@ -176,6 +186,22 @@ int      tty_inject  (const char *bytes, int n);
  * any prior contents. Returns 0 on success, -1 on out-of-disk or
  * out-of-slot. The new contents survive a reboot. */
 int      sys_fs_write(const char *name, const void *data, uint32_t n);
+
+/* Job control + process groups + sessions (session 20). All of these
+ * mirror their POSIX counterparts; pid==0 means "the calling task"
+ * for the get/set helpers. setsid() makes the caller a session and
+ * pgrp leader (sid = pgid = pid) and returns the new sid.
+ *   killpg(pgid, sig) broadcasts to every task with matching pgid.
+ *   tcsetpgrp(fd, pgid) / tcgetpgrp(fd) set/read the foreground pgrp
+ *   on the controlling tty (we have one tty so fd is ignored).
+ */
+int      setpgid  (int pid, int pgid);
+int      getpgid  (int pid);
+int      setsid   (void);
+int      getsid   (int pid);
+int      killpg   (int pgid, int sig);
+int      tcsetpgrp(int fd, int pgid);
+int      tcgetpgrp(int fd);
 
 /* Diagnostics — read internal allocator state for tests / heap dumps. */
 uint32_t malloc_total(void);     /* bytes managed (g_brk - HEAP_START) */

@@ -41,6 +41,7 @@ enum {
     TASK_STATE_DEAD              = 4,   /* exited and has no waiting parent  */
     TASK_STATE_BLOCKED_ON_CHILD  = 5,   /* in sys_wait, no zombie child yet  */
     TASK_STATE_ZOMBIE            = 6,   /* exited, parent hasn't reaped it   */
+    TASK_STATE_STOPPED           = 7,   /* SIGSTOP/SIGTSTP — paused until SIGCONT */
 };
 
 struct task {
@@ -93,6 +94,14 @@ struct task {
      * at USER_HEAP_START (zero pages mapped) and grows on demand
      * when the user-side malloc calls sys_brk. */
     uint32_t      heap_brk;
+
+    /* Job control (session 20). pgid groups related processes (a
+     * pipeline = one pgrp); sid is the session a pgrp belongs to.
+     * Both default to 0 (no pgrp / kernel task); a user task that
+     * calls setsid() becomes its own session and pgrp leader (pgid
+     * = sid = pid). Children inherit both via fork. */
+    uint32_t      pgid;
+    uint32_t      sid;
 };
 
 #define USER_HEAP_START  0x40200000u

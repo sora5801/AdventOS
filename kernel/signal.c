@@ -22,14 +22,18 @@
  *     the next iret restores the pre-signal context byte-for-byte.
  */
 
-/* Default action for each signal. We only model "TERMINATE" and
- * "IGNORE"; no STOP/CONT plumbing yet. */
-enum { ACT_TERM, ACT_IGN };
+/* Default action for each signal. */
+enum { ACT_TERM, ACT_IGN, ACT_STOP, ACT_CONT };
 
 static int default_action(int sig) {
     switch (sig) {
         case SIGCHLD:
             return ACT_IGN;     /* parents that don't wait shouldn't die */
+        case SIGSTOP:
+        case SIGTSTP:
+            return ACT_STOP;
+        case SIGCONT:
+            return ACT_CONT;    /* default is "no-op past the wakeup" */
         default:
             return ACT_TERM;
     }
@@ -55,8 +59,8 @@ void signal_reset_on_exec(struct task *t) {
 }
 
 void *signal_install(int sig, void *handler, void *tramp) {
-    if (sig < 1 || sig >= NSIG) return (void *)-1;
-    if (sig == SIGKILL)         return (void *)-1;     /* SIGKILL is uncatchable */
+    if (sig < 1 || sig >= NSIG)         return (void *)-1;
+    if (sig == SIGKILL || sig == SIGSTOP) return (void *)-1;  /* uncatchable */
     struct task *t = task_current();
     void *prev = t->sig_handlers[sig];
     t->sig_handlers[sig] = handler;
@@ -75,8 +79,38 @@ int signal_send(uint32_t target_pid, int sig) {
     }
     if (!t) return -1;
 
+    /* SIGCONT clears any pending stop and (if currently STOPPED)
+     * wakes the task so it gets scheduled again. The handler / default
+     * action runs when the task next iret's to ring 3. */
+    if (sig == SIGCONT) {
+        t->sig_pending &= ~((1u << SIGSTOP) | (1u << SIGTSTP));
+        if (t->state == TASK_STATE_STOPPED) {
+            t->state = TASK_STATE_READY;
+        }
+    }
+    /* Conversely, sending a stop clears any pending CONT so the task
+     * doesn't immediately wake itself back up. */
+    if (sig == SIGSTOP || sig == SIGTSTP) {
+        t->sig_pending &= ~(1u << SIGCONT);
+    }
+
     t->sig_pending |= (1u << sig);
     return 0;
+}
+
+int signal_send_pgrp(uint32_t pgid, int sig) {
+    if (sig < 1 || sig >= NSIG) return -1;
+    if (pgid == 0)              return -1;     /* would hit kernel tasks */
+
+    int delivered = 0;
+    for (uint32_t i = 0; i < 16; i++) {
+        struct task *t = task_at(i);
+        if (!t)                        continue;
+        if (t->pgid != pgid)           continue;
+        if (t->state == TASK_STATE_DEAD || t->state == TASK_STATE_ZOMBIE) continue;
+        if (signal_send(t->id, sig) == 0) delivered++;
+    }
+    return delivered > 0 ? 0 : -1;
 }
 
 /* Pick the lowest-numbered deliverable (pending and not masked)
@@ -113,8 +147,19 @@ void signal_check_and_deliver(struct registers *r) {
 
     /* SIG_DFL — apply the default action. */
     if (h == SIG_DFL) {
-        if (default_action(sig) == ACT_IGN) return;
-        /* TERMINATE: behave as if the task called sys_exit(128+sig). */
+        int act = default_action(sig);
+        if (act == ACT_IGN)  return;
+        if (act == ACT_CONT) return;     /* wakeup already happened in signal_send */
+        if (act == ACT_STOP) {
+            extern void schedule(void);
+            t->state = TASK_STATE_STOPPED;
+            schedule();                  /* yield until SIGCONT flips us READY */
+            /* When CONT'd, control resumes here. Fall through to the
+             * iret tail in the calling syscall stub — the task picks
+             * up at the same EIP it was about to return to. */
+            return;
+        }
+        /* ACT_TERM: behave as if the task called sys_exit(128+sig). */
         kprintf("[sig] pid=%u terminated by signal %d\n",
                 (unsigned)t->id, sig);
         extern void task_exit_current(int);

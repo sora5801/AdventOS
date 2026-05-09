@@ -188,14 +188,15 @@ void schedule(void) {
 
     /* Pick the next runnable task. Skip anything that isn't currently
      * runnable: DEAD, ZOMBIE (exited), BLOCKED (mutex), BLOCKED_ON_CHILD
-     * (in sys_wait). */
+     * (in sys_wait), STOPPED (job control — until SIGCONT). */
     struct task *next = g_current->next;
     int safety = TASK_MAX;
     while (next != g_current
            && (next->state == TASK_STATE_DEAD              ||
                next->state == TASK_STATE_ZOMBIE            ||
                next->state == TASK_STATE_BLOCKED           ||
-               next->state == TASK_STATE_BLOCKED_ON_CHILD)
+               next->state == TASK_STATE_BLOCKED_ON_CHILD  ||
+               next->state == TASK_STATE_STOPPED)
            && safety--) {
         next = next->next;
     }
@@ -252,6 +253,7 @@ const char *task_state_name(int s) {
         case TASK_STATE_DEAD:             return "DEAD";
         case TASK_STATE_BLOCKED_ON_CHILD: return "WAIT";
         case TASK_STATE_ZOMBIE:           return "ZOMB";
+        case TASK_STATE_STOPPED:          return "STOP";
         default:                          return "?";
     }
 }
@@ -455,6 +457,12 @@ struct task *task_fork(struct registers *parent_regs) {
      *     duplicated the heap pages — child has its own physical
      *     copies at the same VAs, so its heap_brk is meaningful. */
     child->heap_brk = parent->heap_brk;
+
+    /* 5d. Inherit job-control state (session 20). POSIX: fork
+     *     preserves both pgid and sid. setpgid is used by the
+     *     parent (or child) to put the child into its own pgrp. */
+    child->pgid = parent->pgid;
+    child->sid  = parent->sid;
 
     /* 6. Splice into the round-robin ring. */
     __asm__ volatile ("cli");

@@ -24,6 +24,18 @@ static int alloc_fd(struct task *t) {
     return -1;
 }
 
+/* Resolve a pid to a struct task pointer, or NULL if no live task
+ * matches. pid == 0 means "the calling task". Used by job-control
+ * syscalls (setpgid / getpgid / getsid). */
+static struct task *find_task_by_pid(uint32_t pid) {
+    if (pid == 0) return task_current();
+    for (uint32_t i = 0; i < 16; i++) {
+        struct task *t = task_at(i);
+        if (t && t->id == pid) return t;
+    }
+    return NULL;
+}
+
 /* Drop a per-fd reference to whatever resource backs `e`. Pipes and
  * tmpfs files use proper refcounting; sockets close immediately
  * (refcount discipline is local to sock.c and adequate for our
@@ -482,6 +494,55 @@ void syscall_dispatch(struct registers *r) {
             char buf[256];
             for (int i = 0; i < len; i++) buf[i] = p[i];
             ret = tty_inject(buf, len);
+            break;
+        }
+        case SYS_SETPGID: {
+            uint32_t pid  = (uint32_t)a;
+            uint32_t pgid = (uint32_t)b;
+            struct task *t = find_task_by_pid(pid);
+            if (!t) { ret = -1; break; }
+            /* pgid == 0 means "use pid". Real POSIX has restrictions
+             * (must be in the same session, can't move out of session
+             * leader, etc.) — we don't enforce them. */
+            if (pgid == 0) pgid = t->id;
+            t->pgid = pgid;
+            ret = 0;
+            break;
+        }
+        case SYS_GETPGID: {
+            struct task *t = find_task_by_pid((uint32_t)a);
+            ret = t ? (int32_t)t->pgid : -1;
+            break;
+        }
+        case SYS_SETSID: {
+            /* Self only. Becomes session + pgrp leader (sid = pgid =
+             * pid). POSIX rejects this if the caller is already a
+             * pgrp leader; we don't bother — the only realistic
+             * caller is the shell at startup. */
+            struct task *t = task_current();
+            t->sid  = t->id;
+            t->pgid = t->id;
+            ret = (int32_t)t->sid;
+            break;
+        }
+        case SYS_GETSID: {
+            struct task *t = find_task_by_pid((uint32_t)a);
+            ret = t ? (int32_t)t->sid : -1;
+            break;
+        }
+        case SYS_KILLPG: {
+            ret = signal_send_pgrp((uint32_t)a, (int)b);
+            break;
+        }
+        case SYS_TCSETPGRP: {
+            /* fd in `a` ignored — we have one TTY. */
+            tty_set_fg_pgrp((uint32_t)b);
+            ret = 0;
+            break;
+        }
+        case SYS_TCGETPGRP: {
+            (void)a;
+            ret = (int32_t)tty_get_fg_pgrp();
             break;
         }
         case SYS_FS_WRITE: {
