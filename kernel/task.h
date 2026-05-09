@@ -130,6 +130,13 @@ const char    *task_state_name(int state);
  * UNUSED so it can be reused by a future task_create. */
 void           task_reaper_start(void);
 
+/* Tell the task layer which pid to reparent orphans to (session 22).
+ * kmain calls this right after spawning init.elf. While the value is
+ * 0 — i.e. before init exists — orphans go straight to DEAD as
+ * before, so the kernel reaper can clean them up. */
+void           task_set_init_pid(uint32_t pid);
+uint32_t       task_get_init_pid(void);
+
 /* ---- fork / exec / wait support ----------------------------------- */
 
 struct registers;   /* from isr.h */

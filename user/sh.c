@@ -709,6 +709,34 @@ static void selftest(void) {
         }
     }
 
+    puts("[t13] orphan adoption by init\n");
+    {
+        /* shell -> child -> grandchild.
+         * The child exits BEFORE the grandchild, leaving the
+         * grandchild orphaned. The kernel reparents the grandchild
+         * to init (g_init_pid set in kmain). Init's wait loop reaps
+         * it and prints "init: reaped orphan pid=N code=M" — that
+         * line is the visible proof of the adoption. */
+        int pid = sys_fork();
+        if (pid == 0) {
+            int gc = sys_fork();
+            if (gc == 0) {
+                sys_sleep_ms(80);
+                printf("    [grandchild pid=%d] exiting; should be adopted\n",
+                       sys_getpid());
+                sys_exit(33);
+            }
+            printf("    [child pid=%d] exiting (grandchild still alive)\n",
+                   sys_getpid());
+            sys_exit(7);
+        }
+        int code = 0;
+        int reaped = sys_wait(&code);
+        printf("  shell reaped child pid=%d code=%d\n", reaped, code);
+        puts("  grandchild is now an orphan; init should reap it shortly\n");
+        sys_sleep_ms(150);
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

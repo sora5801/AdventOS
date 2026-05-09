@@ -222,8 +222,27 @@ void kmain(uint32_t boot_drive) {
         }                                                                  \
     } while (0)
 
-    LAUNCH("httpd.elf", "httpd");
-    LAUNCH("sh.elf",    "sh", "selftest");
+    /* Boot policy lives in userspace from session 22 onward: kmain
+     * only spawns init.elf, which reads /inittab and forks the
+     * actual services (httpd, sh, ...). Tell the task layer init's
+     * pid so future orphan reparenting goes there. */
+    {
+        int  _fd = fs_open("init.elf");
+        if (_fd >= 0) {
+            struct elf_load_result _r;
+            if (elf_load(_fd, &_r) == 0) {
+                const char *_argv[] = { "init" };
+                elf_setup_args(&_r, 1, _argv);
+                struct task *_t = task_create_user(_r.entry, _r.user_esp,
+                                                   _r.cr3, "init");
+                if (_t) {
+                    task_set_init_pid(_t->id);
+                    kprintf("[boot] launched init.elf as pid %u\n",
+                            (unsigned)_t->id);
+                }
+            }
+        }
+    }
     kputc('\n');
 
     /* If the shell launched, we expect it to drive the system from

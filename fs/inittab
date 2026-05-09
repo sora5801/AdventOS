@@ -1,0 +1,10 @@
+# AdventOS inittab — services started by init at boot.
+#
+# Format:  <mode> <program> [args...]
+#   once    : run once, don't restart on exit
+#   respawn : restart whenever this exits (dead-job loop guard)
+#
+# Lines starting with `#` and blank lines are ignored.
+
+once httpd.elf
+once sh.elf selftest

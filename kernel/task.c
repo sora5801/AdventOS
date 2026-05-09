@@ -21,6 +21,7 @@ static struct task g_tasks[TASK_MAX];
 static struct task *g_current;
 static uint32_t     g_next_id      = 1;
 static uint32_t     g_kernel_cr3;
+static uint32_t     g_init_pid     = 0;     /* set after init.elf is spawned */
 
 /* Forward decl — defined further down. */
 static void user_entry_stub(void);
@@ -324,6 +325,9 @@ void task_reaper_start(void) {
     task_create(task_reaper, "reaper");
 }
 
+void task_set_init_pid(uint32_t pid) { g_init_pid = pid; }
+uint32_t task_get_init_pid(void)     { return g_init_pid; }
+
 /* -------------------------------------------------------------------- */
 /* fork / exec / wait                                                   */
 /* -------------------------------------------------------------------- */
@@ -569,6 +573,33 @@ void task_exit_current(int exit_code) {
      * its pipe-write end would leave write_refs > 0 forever and the
      * reader on the other side would never see EOF. */
     if (t->is_user) close_all_fds(t);
+
+    /* Reparent any of our surviving children to init (session 22).
+     * Without this, an orphan goes to DEAD and the kernel reaper
+     * frees it, but the user-side semantics of "init reaps everyone"
+     * don't work — there's no parent to wake. With init holding
+     * pid g_init_pid, an orphan becomes init's child and shows up in
+     * init's normal sys_wait loop. We skip if we ARE init (init
+     * dying is its own emergency we don't model). */
+    if (g_init_pid != 0 && t->id != g_init_pid) {
+        for (int i = 0; i < TASK_MAX; i++) {
+            if (g_tasks[i].state == TASK_STATE_UNUSED) continue;
+            if (g_tasks[i].parent_id == t->id) {
+                g_tasks[i].parent_id = g_init_pid;
+                /* If the child has already exited (zombie), and init
+                 * is currently blocked waiting, wake it so the new
+                 * adoption doesn't sit forever. */
+                if (g_tasks[i].state == TASK_STATE_ZOMBIE) {
+                    for (int j = 0; j < TASK_MAX; j++) {
+                        if (g_tasks[j].id == g_init_pid &&
+                            g_tasks[j].state == TASK_STATE_BLOCKED_ON_CHILD) {
+                            g_tasks[j].state = TASK_STATE_READY;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /* If our parent is waiting for any child, wake it. The parent will
      * loop scanning its children for a zombie and harvest us. */

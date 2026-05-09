@@ -36,12 +36,14 @@ USER_PROGRAMS = [
     ('echo.elf',  'user/_obj/echo.bin'),
     ('httpd.elf', 'user/_obj/httpd.bin'),
     ('ed.elf',    'user/_obj/ed.bin'),
+    ('init.elf',  'user/_obj/init.bin'),
 ]
 
 # Raw data files — go on the FS as-is, no ELF wrapper. cat.elf reads
 # them via SYS_OPEN/READ.
 DATA_FILES = [
     ('hello.txt', 'fs/hello.txt'),
+    ('inittab',   'fs/inittab'),
 ]
 
 def make_elf(code, entry_va):
