@@ -23,7 +23,9 @@
 #define TCP_PSH  0x08
 #define TCP_ACK  0x10
 
-#define TCP_RX_BUF 2048
+/* Bumped 2048 → 4096 in session 45 so the advertised TCP window can
+ * hold a real-world TLS 1.3 server flight (cert chain ~2.5 KiB). */
+#define TCP_RX_BUF 4096
 #define TCP_TX_BUF 2048
 
 /* Pool size — bumped to 16 in session 30 for fork-per-conn httpd.

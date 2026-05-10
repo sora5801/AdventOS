@@ -52,7 +52,12 @@
  * our server-side encrypted flight (EncryptedExtensions + Certificate
  * + CertificateVerify + Finished) is ~440 bytes plaintext. 2048
  * leaves headroom and keeps everything in one record per direction. */
-#define TLS_MAX_FRAGMENT      2048
+/* TLS 1.3 caps records at 2^14 plaintext (RFC 8446 §5.1). Real-world
+ * server flights (cert chain + CertificateVerify + Finished) can hit
+ * 3-5 KiB. Old value was 2048; bumped to 6144 to comfortably fit a
+ * single-cert Cloudflare flight (~2.5 KiB) while keeping the static
+ * BSS for TLS recv buffers under control across user programs. */
+#define TLS_MAX_FRAGMENT      6144
 
 struct tls_keys {
     uint8_t key[TLS_AES_KEY_LEN];
@@ -93,6 +98,13 @@ struct tls_conn {
     int            cert_der_len;
     const uint8_t *server_sk;
     int            sig_alg;            /* 0x0807 (default) or 0x0403 */
+
+    /* Client-side SNI (session 45). Set by the caller before
+     * tls_client_handshake_cert when talking to a real-world server
+     * that hosts multiple domains on the same IP — without SNI most
+     * public HTTPS servers either refuse the connection or serve
+     * the wrong vhost's cert. NULL = no SNI extension emitted. */
+    const char    *server_name;
 
     /* Key schedule outputs */
     uint8_t  early_secret      [32];

@@ -17,7 +17,11 @@
  */
 
 #define SOCK_MAX           16     /* bumped to fit fork-per-conn httpd */
-#define SOCK_RX_BUF        2048
+/* Session 45 bump: 2048 → 4096 to give the TLS receive path room for
+ * one real-world server flight (Cloudflare's is ~2.5 KiB). The TCP
+ * window we advertise = this size. Larger values (8K+) blew the
+ * kernel's BSS budget — see kernel bss_end vs heap base in pmm.c. */
+#define SOCK_RX_BUF        4096
 #define SOCK_BACKLOG_MAX   8      /* per-listener accept-queue depth */
 
 enum {

@@ -74,7 +74,7 @@ static int send_encrypted(struct tls_conn *c, struct tls_keys *k,
                           const uint8_t *plaintext, int pt_len) {
     if (pt_len + 1 + TLS_TAG_LEN > TLS_MAX_FRAGMENT + 256) return -1;
 
-    uint8_t buf[TLS_MAX_FRAGMENT + 1];
+    static uint8_t buf[TLS_MAX_FRAGMENT + 1];
     for (int i = 0; i < pt_len; i++) buf[i] = plaintext[i];
     buf[pt_len] = inner_type;
     int inner_len = pt_len + 1;
@@ -285,7 +285,7 @@ int tls_server_handshake_psk(struct tls_conn *c, int fd,
     c->psk_id_len = pidn;
     sha256_init(&c->transcript);
 
-    uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
+    static uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
     int rlen;
     int rt = recv_record(c, 0, recbuf, &rlen);
     if (rt != TLS_REC_HANDSHAKE) return -1;
@@ -378,7 +378,7 @@ int tls_client_handshake_psk(struct tls_conn *c, int fd,
     if (send_record(fd, TLS_REC_HANDSHAKE, ch_msg, ch_len) < 0) return -1;
     sha256_update(&c->transcript, ch_msg, ch_len);
 
-    uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
+    static uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
     int rlen;
     int rt = recv_record(c, 0, recbuf, &rlen);
     if (rt != TLS_REC_HANDSHAKE) return -2;
@@ -564,7 +564,7 @@ int tls_server_handshake_cert(struct tls_conn *c, int fd) {
     sha256_init(&c->transcript);
 
     /* === 1. Receive ClientHello === */
-    uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
+    static uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
     int rlen;
     int rt = recv_record(c, 0, recbuf, &rlen);
     if (rt != TLS_REC_HANDSHAKE) return -1;
@@ -642,7 +642,7 @@ int tls_server_handshake_cert(struct tls_conn *c, int fd) {
     compute_handshake_keys_cert(c);
 
     /* === 5–8. Build encrypted server flight: EE || Cert || CV || Finished === */
-    uint8_t flight[TLS_MAX_FRAGMENT];
+    static uint8_t flight[TLS_MAX_FRAGMENT];
     int foff = 0;
 
     /* EncryptedExtensions: empty extensions list (2B = 0) */
@@ -794,16 +794,21 @@ static int build_clienthello_body(struct tls_conn *c, uint8_t *body) {
     body[o++] = 0x00; body[o++] = 0x02;          /* list len */
     body[o++] = 0x00; body[o++] = 0x1D;          /* x25519 */
 
-    /* signature_algorithms (13): list of sig schemes the client
-     * will accept on the server's cert. Offer both because the OS
-     * ↔ OS demo's server may be configured either way (session 43
-     * switched httpsd to ECDSA for Schannel-compat; the Ed25519
-     * code path still exists for completeness). */
+    /* signature_algorithms (13): list of sig schemes the client will
+     * accept on the server's cert and in CertificateVerify. Real-world
+     * public servers overwhelmingly use ECDSA-P256 or RSA-PSS — so we
+     * offer a wide menu. The server picks one for its CertificateVerify;
+     * since this client doesn't verify the signature anyway (curl -k
+     * semantics), it doesn't matter which one. The list is just
+     * permission for the server to send anything matching. */
     body[o++] = 0x00; body[o++] = 0x0D;
-    body[o++] = 0x00; body[o++] = 0x06;
-    body[o++] = 0x00; body[o++] = 0x04;          /* list len = 4 */
+    body[o++] = 0x00; body[o++] = 12;            /* ext data len */
+    body[o++] = 0x00; body[o++] = 10;            /* list len = 10 (5 schemes) */
     body[o++] = 0x04; body[o++] = 0x03;          /* ecdsa_secp256r1_sha256 */
-    body[o++] = 0x08; body[o++] = 0x07;          /* ed25519 */
+    body[o++] = 0x08; body[o++] = 0x04;          /* rsa_pss_rsae_sha256   */
+    body[o++] = 0x08; body[o++] = 0x05;          /* rsa_pss_rsae_sha384   */
+    body[o++] = 0x08; body[o++] = 0x06;          /* rsa_pss_rsae_sha512   */
+    body[o++] = 0x08; body[o++] = 0x07;          /* ed25519               */
 
     /* key_share (51): one share — group + key.
      *   ext data = 2B shares_len + 36B share = 38 bytes
@@ -814,6 +819,28 @@ static int build_clienthello_body(struct tls_conn *c, uint8_t *body) {
     body[o++] = 0x00; body[o++] = 0x1D;          /* x25519 */
     body[o++] = 0x00; body[o++] = 32;            /* key len */
     for (int i = 0; i < 32; i++) body[o++] = c->client_pub[i];
+
+    /* server_name (0): SNI per RFC 6066 §3.
+     *   ext data = 2B list_len + entries
+     *   entry    = 1B name_type(0=host_name) + 2B name_len + name
+     * Without this, almost every public HTTPS host either refuses
+     * the connection or serves the wrong vhost's certificate. */
+    if (c->server_name && c->server_name[0]) {
+        int sn_len = 0;
+        while (c->server_name[sn_len]) sn_len++;
+        int entry_len = 1 + 2 + sn_len;      /* type + len + name */
+        int list_len  = entry_len;
+        int ext_data  = 2 + list_len;
+        body[o++] = 0x00; body[o++] = 0x00;        /* type = 0 (server_name) */
+        body[o++] = (uint8_t)(ext_data >> 8);
+        body[o++] = (uint8_t) ext_data;
+        body[o++] = (uint8_t)(list_len >> 8);
+        body[o++] = (uint8_t) list_len;
+        body[o++] = 0x00;                          /* name_type = host_name */
+        body[o++] = (uint8_t)(sn_len >> 8);
+        body[o++] = (uint8_t) sn_len;
+        for (int i = 0; i < sn_len; i++) body[o++] = (uint8_t)c->server_name[i];
+    }
 
     int ext_total = o - ext_off - 2;
     body[ext_off    ] = (uint8_t)(ext_total >> 8);
@@ -848,9 +875,15 @@ static int parse_serverhello_extensions(
 }
 
 int tls_client_handshake_cert(struct tls_conn *c, int fd) {
+    /* Save caller-set inputs (so far: SNI) so we can zero the rest
+     * of the struct without losing them. Parallel to what
+     * tls_server_handshake_cert does for cert_der / server_sk. */
+    const char *server_name = c->server_name;
+
     for (int i = 0; i < (int)sizeof(*c); i++) ((uint8_t *)c)[i] = 0;
     c->fd = fd;
     c->is_server = 0;
+    c->server_name = server_name;
     sha256_init(&c->transcript);
 
     /* === 1. Send ClientHello === */
@@ -858,10 +891,13 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
     rand_bytes(c->our_priv, 32);
     x25519(c->client_pub, c->our_priv, x25519_basepoint);
 
-    uint8_t ch_body[256];
+    /* Buffers are 512 instead of 256 because SNI with a long
+     * hostname (and the broader signature_algorithms list) pushes
+     * a real-world ClientHello past the old 256-byte cap. */
+    uint8_t ch_body[512];
     int ch_body_len = build_clienthello_body(c, ch_body);
 
-    uint8_t ch_msg[4 + 256];
+    uint8_t ch_msg[4 + 512];
     int ch_msg_len = hs_pack(ch_msg, TLS_HS_CLIENT_HELLO, ch_body, ch_body_len);
     if (send_record(fd, TLS_REC_HANDSHAKE, ch_msg, ch_msg_len) < 0) return -1;
     sha256_update(&c->transcript, ch_msg, ch_msg_len);
@@ -870,8 +906,14 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
     uint8_t ccs = 0x01;
     if (send_record(fd, TLS_REC_CHANGE_CIPHER, &ccs, 1) < 0) return -2;
 
-    /* === 3. Receive ServerHello === */
-    uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
+    /* === 3. Receive ServerHello ===
+     *
+     * Buffers go in BSS (`static`) rather than on the stack: bumping
+     * TLS_MAX_FRAGMENT to 16 KiB blew past the 16 KiB user task stack
+     * when two buffers were in scope at once. Static is safe because
+     * AdventOS is fork-per-connection — only one handshake at a time
+     * per process — so we don't race ourselves. */
+    static uint8_t recbuf[TLS_MAX_FRAGMENT + 16];
     int rlen;
     int rt = recv_record(c, 0, recbuf, &rlen);
     if (rt != TLS_REC_HANDSHAKE) return -3;
@@ -915,11 +957,11 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
     /* Buffer for handshake message reassembly across records (rare
      * but allowed). For our minimal server flight everything fits
      * in one record though. */
-    uint8_t hs_buf[TLS_MAX_FRAGMENT + 16];
+    static uint8_t hs_buf[TLS_MAX_FRAGMENT + 16];
     int     hs_off = 0;
 
     while (!seen_finished) {
-        uint8_t recbuf2[TLS_MAX_FRAGMENT + 16];
+        static uint8_t recbuf2[TLS_MAX_FRAGMENT + 16];
         int     rlen2;
         int it = recv_record(c, &c->s_hs_keys, recbuf2, &rlen2);
         if (it != TLS_REC_HANDSHAKE) return -12;
@@ -996,7 +1038,7 @@ int tls_send(struct tls_conn *c, const void *data, int n) {
 
 int tls_recv(struct tls_conn *c, void *out, int max_n) {
     struct tls_keys *k = c->is_server ? &c->c_ap_keys : &c->s_ap_keys;
-    uint8_t buf[TLS_MAX_FRAGMENT + 16];
+    static uint8_t buf[TLS_MAX_FRAGMENT + 16];
     /* Loop in case we get post-handshake messages (NewSessionTicket,
      * KeyUpdate, etc.) — we just discard them. */
     for (;;) {

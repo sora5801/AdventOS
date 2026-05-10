@@ -683,6 +683,26 @@ static void selftest(void) {
         int code2 = -1;
         sys_wait(&code2);
         printf("  httpsget exit code = %d\n", code2);
+
+        /* Real-world HTTPS GET (session 45): pull https://1.1.1.1/
+         * through QEMU's SLIRP NAT, exercising the new TLS 1.3 client
+         * SNI + broader sig_algs path against a public server we
+         * don't control. We use Cloudflare's 1.1.1.1 (which serves
+         * a real page over HTTPS) by IP rather than by name so the
+         * test doesn't depend on SLIRP's DNS forwarder.
+         *
+         * Failures (no internet, network blocked) just log a non-zero
+         * rc and selftest continues. */
+        puts("\n  --- real-world HTTPS GET: https://1.1.1.1/ ---\n");
+        int pid3 = sys_fork();
+        if (pid3 == 0) {
+            const char *argv3[] = { "httpsget.elf", "https://1.1.1.1/", 0 };
+            sys_exec("httpsget.elf", argv3);
+            sys_exit(127);
+        }
+        int code3 = -1;
+        sys_wait(&code3);
+        printf("  real-world httpsget exit = %d  (0 = page fetched)\n", code3);
     }
 
     puts("[t28] USB Mass Storage: SCSI READ/WRITE round-trip via blkdev\n");
