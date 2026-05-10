@@ -39,4 +39,24 @@ int x509_build_self_signed_ed25519(
     const char *cn,
     uint8_t *out, int out_cap);
 
+/* Build a self-signed ECDSA-P256 X.509 v3 cert (session 43, RFC 5480).
+ *
+ *   pub : 64-byte uncompressed public key, X(32 BE) || Y(32 BE)
+ *         (no leading 0x04 — this function adds it for the
+ *         X.509 BIT STRING)
+ *   priv: 32-byte ECDSA private scalar
+ *   cn  : subject + issuer common name
+ *   out : caller buffer
+ *
+ * Algorithm OIDs:
+ *   public key   1.2.840.10045.2.1   (ecPublicKey)
+ *   curve params 1.2.840.10045.3.1.7 (prime256v1 / secp256r1)
+ *   signature    1.2.840.10045.4.3.2 (ecdsa-with-SHA256)
+ */
+int x509_build_self_signed_p256(
+    const uint8_t pub[64],
+    const uint8_t priv[32],
+    const char *cn,
+    uint8_t *out, int out_cap);
+
 #endif

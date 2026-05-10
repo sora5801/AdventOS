@@ -45,6 +45,19 @@ static const uint8_t OID_ED25519[] = { 0x2B, 0x65, 0x70 };
 /* 2.5.4.3 — id-at-commonName. */
 static const uint8_t OID_CN[]      = { 0x55, 0x04, 0x03 };
 
+/* 1.2.840.10045.2.1 — ecPublicKey (RFC 5480 §2.1).
+ *   1*40 + 2 = 42 = 0x2A;
+ *   840 = 0x06 0x48 (128 + (8 << 7))   →  bytes 0x86 0x48 in base-128
+ *   10045 = 0xCE 0x3D     →  0xCE | 0x80 = 0xCE..., then 0x3D
+ *   2 = 0x02, 1 = 0x01 */
+static const uint8_t OID_EC_PUBKEY[] = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+
+/* 1.2.840.10045.3.1.7 — prime256v1 / secp256r1 curve identifier. */
+static const uint8_t OID_PRIME256V1[] = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+
+/* 1.2.840.10045.4.3.2 — ecdsa-with-SHA256. */
+static const uint8_t OID_ECDSA_SHA256[] = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
+
 /* ---- Backward DER writer --------------------------------------- */
 
 /* Tracks "how many bytes written from the right edge of buf".
@@ -295,6 +308,139 @@ int x509_build_self_signed_ed25519(
 
     /* Compact: shift the cert bytes from the right edge of `out`
      * down to out[0..len). */
+    int len = w.pos;
+    int src_off = out_cap - len;
+    if (src_off > 0) {
+        for (int i = 0; i < len; i++) out[i] = out[src_off + i];
+    }
+    return len;
+}
+
+/* ---- ECDSA-P256 cert (session 43) ------------------------------ */
+
+/* SubjectPublicKeyInfo for ECDSA-P256 per RFC 5480 §2:
+ *
+ *   SEQUENCE {
+ *     SEQUENCE {
+ *       OID ecPublicKey,
+ *       OID prime256v1            -- the curve parameters, named-curve form
+ *     },
+ *     BIT STRING {
+ *       0x00, 0x04, X(32), Y(32)  -- uncompressed point, RFC 5480 §2.2
+ *     }
+ *   }
+ *
+ * The 0x04 byte is the SEC1 point-format tag for "uncompressed";
+ * X and Y follow as fixed-width big-endian 32-byte fields.
+ */
+static void der_spki_p256(dw_t *w, const uint8_t pub[64]) {
+    int outer = dw_snap(w);
+
+    /* BIT STRING: unused-bits=0, then 0x04 || X || Y (65 bytes). */
+    int bs = dw_snap(w);
+    dw_raw(w, pub + 32, 32);      /* Y */
+    dw_raw(w, pub,      32);      /* X */
+    dw_put(w, 0x04);              /* uncompressed-point tag */
+    dw_put(w, 0x00);              /* BIT STRING unused-bits count */
+    dw_wrap(w, ASN1_BITSTRING, bs);
+
+    /* AlgorithmIdentifier SEQUENCE { OID ecPublicKey, OID prime256v1 } */
+    int alg = dw_snap(w);
+    der_oid(w, OID_PRIME256V1,  sizeof(OID_PRIME256V1));
+    der_oid(w, OID_EC_PUBKEY,   sizeof(OID_EC_PUBKEY));
+    dw_wrap(w, ASN1_SEQUENCE, alg);
+
+    dw_wrap(w, ASN1_SEQUENCE, outer);
+}
+
+/* AlgorithmIdentifier { OID ecdsa-with-SHA256 } for cert sig algs.
+ * RFC 5758 §3.2: no parameters field — same as Ed25519. */
+static void der_alg_ecdsa_sha256(dw_t *w) {
+    int s = dw_snap(w);
+    der_oid(w, OID_ECDSA_SHA256, sizeof(OID_ECDSA_SHA256));
+    dw_wrap(w, ASN1_SEQUENCE, s);
+}
+
+static const uint8_t *build_tbs_p256(dw_t *w, const uint8_t pub[64],
+                                     const char *cn, int *tbs_len)
+{
+    int tbs = dw_snap(w);
+
+    /* extensions [3] EXPLICIT — omit (optional). */
+
+    /* subjectPublicKeyInfo */
+    der_spki_p256(w, pub);
+
+    /* subject Name */
+    der_name_cn(w, cn);
+
+    /* validity 2026..2036 (reuse Ed25519 builder) */
+    der_validity_2026_2036(w);
+
+    /* issuer Name (self-signed) */
+    der_name_cn(w, cn);
+
+    /* signature AlgorithmIdentifier — must match outer one
+     * (RFC 5280 §4.1.1.2). */
+    der_alg_ecdsa_sha256(w);
+
+    /* serialNumber */
+    der_int_u32(w, 1);
+
+    /* version [0] EXPLICIT INTEGER 2 (= v3) */
+    int vc = dw_snap(w);
+    der_int_u32(w, 2);
+    dw_wrap(w, ASN1_CTX0, vc);
+
+    dw_wrap(w, ASN1_SEQUENCE, tbs);
+
+    *tbs_len = w->pos - tbs;
+    return w->buf + (w->cap - w->pos);
+}
+
+int x509_build_self_signed_p256(
+    const uint8_t pub[64],
+    const uint8_t priv[32],
+    const char *cn,
+    uint8_t *out, int out_cap)
+{
+    /* Build TBS in scratch buffer so we can hash + sign it. */
+    uint8_t scratch[X509_MAX_CERT];
+    dw_t s; dw_init(&s, scratch, sizeof(scratch));
+    int tbs_len;
+    const uint8_t *tbs_ptr = build_tbs_p256(&s, pub, cn, &tbs_len);
+    if (s.overflow) return -1;
+
+    /* ECDSA-with-SHA256: hash TBS, sign hash, DER-encode (R, S). */
+    uint8_t hash[32];
+    sha256(tbs_ptr, tbs_len, hash);
+    uint8_t raw_sig[64];
+    if (p256_sign(raw_sig, hash, priv) != 0) return -1;
+    uint8_t der_sig[72];
+    int der_sig_len = p256_sig_to_der(der_sig, sizeof(der_sig), raw_sig);
+    if (der_sig_len < 0) return -1;
+
+    /* Outer Certificate SEQUENCE. */
+    dw_t w; dw_init(&w, out, out_cap);
+    int outer = dw_snap(&w);
+
+    /* signatureValue: BIT STRING { 0x00, DER(r,s) } */
+    int bs = dw_snap(&w);
+    dw_raw(&w, der_sig, der_sig_len);
+    dw_put(&w, 0x00);
+    dw_wrap(&w, ASN1_BITSTRING, bs);
+
+    /* signatureAlgorithm */
+    der_alg_ecdsa_sha256(&w);
+
+    /* tbsCertificate */
+    dw_raw(&w, tbs_ptr, tbs_len);
+
+    dw_wrap(&w, ASN1_SEQUENCE, outer);
+
+    if (w.overflow) return -1;
+
+    /* Compact down to out[0..len). */
     int len = w.pos;
     int src_off = out_cap - len;
     if (src_off > 0) {

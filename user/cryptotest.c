@@ -181,6 +181,59 @@ int main(void) {
         CHECK(v != 0, "Ed25519 reject tampered signature");
     }
 
+    /* ---- ECDSA-P256 (session 43) -------------------------------- */
+    puts("== ECDSA-P256 ==\n");
+    {
+        /* Deterministic keypair from a fixed seed so test results
+         * are reproducible across boots. */
+        const unsigned char seed[32] = {
+            0x33, 0x55, 0x77, 0x99, 0xBB, 0xDD, 0xFF, 0x11,
+            0x22, 0x44, 0x66, 0x88, 0xAA, 0xCC, 0xEE, 0x00,
+            0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78,
+            0x87, 0x96, 0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0,
+        };
+        unsigned char priv[32], pub[64];
+        p256_keypair_from_seed(pub, priv, seed);
+
+        /* Sign a SHA-256 hash, verify with the public key. ECDSA's
+         * `k` comes from rand_bytes, so the signature isn't reproducible
+         * — but verify always succeeds on a valid (R, S). */
+        unsigned char msg[20] = "P256 test message";
+        unsigned char hash[32];
+        sha256(msg, sizeof(msg), hash);
+        unsigned char sig[64];
+        int rc = p256_sign(sig, hash, priv);
+        CHECK(rc == 0, "ECDSA sign succeeded");
+        int v = p256_verify(sig, hash, pub);
+        CHECK(v == 0, "ECDSA verify own signature");
+
+        /* Tamper with the signature — verify must reject. */
+        sig[0] ^= 0x01;
+        v = p256_verify(sig, hash, pub);
+        CHECK(v != 0, "ECDSA reject tampered signature");
+        sig[0] ^= 0x01;     /* restore */
+
+        /* Tamper with the hash — verify must reject. */
+        hash[0] ^= 0x01;
+        v = p256_verify(sig, hash, pub);
+        CHECK(v != 0, "ECDSA reject signature for tampered message");
+        hash[0] ^= 0x01;
+
+        /* DER round-trip: encode (R, S) to DER, decode back, verify
+         * the recovered raw signature still validates. */
+        unsigned char der[80];
+        int dlen = p256_sig_to_der(der, sizeof(der), sig);
+        CHECK(dlen >= 8 && dlen <= 72, "ECDSA DER size in 8..72 bytes");
+        unsigned char sig2[64];
+        int drc = p256_sig_from_der(sig2, der, dlen);
+        CHECK(drc == 0, "ECDSA DER decode");
+        int sigeq = 1;
+        for (int i = 0; i < 64; i++) sigeq &= (sig[i] == sig2[i]);
+        CHECK(sigeq, "ECDSA DER round-trip equals raw R||S");
+        v = p256_verify(sig2, hash, pub);
+        CHECK(v == 0, "ECDSA verify after DER round-trip");
+    }
+
     /* ---- X25519 (RFC 7748 §6.1) -------------------------------- */
     puts("== X25519 ==\n");
     {

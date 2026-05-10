@@ -82,10 +82,17 @@ struct tls_conn {
     const char    *psk_id;
     size_t         psk_id_len;
 
-    /* Certificate (cert-flow only — set by caller before handshake) */
+    /* Certificate (cert-flow only — set by caller before handshake).
+     * sig_alg controls which signature scheme is used in
+     * CertificateVerify and which interpretation of server_sk applies:
+     *
+     *   0x0807 (ed25519)               server_sk = 64-byte expanded sk
+     *   0x0403 (ecdsa_secp256r1_sha256) server_sk = 32-byte P-256 scalar
+     */
     const uint8_t *cert_der;
     int            cert_der_len;
-    const uint8_t *server_sk;          /* 64-byte Ed25519 sk */
+    const uint8_t *server_sk;
+    int            sig_alg;            /* 0x0807 (default) or 0x0403 */
 
     /* Key schedule outputs */
     uint8_t  early_secret      [32];

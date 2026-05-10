@@ -435,9 +435,12 @@ static int rd16(const uint8_t *buf, int off) {
  * Returns 0 on success, negative on malformed / missing.  */
 static int parse_clienthello_extensions(
     const uint8_t *ext, int ext_len,
-    const uint8_t **out_pub)
+    const uint8_t **out_pub,
+    int server_wants_sig_alg,
+    int *out_chosen_sig_alg)
 {
-    int seen_tls13 = 0, seen_ed25519 = 0, seen_x25519_share = 0;
+    int seen_tls13 = 0, seen_match = 0, seen_x25519_share = 0;
+    *out_chosen_sig_alg = 0;
     int o = 0;
     while (o + 4 <= ext_len) {
         int et = rd16(ext, o);
@@ -454,12 +457,20 @@ static int parse_clienthello_extensions(
                 if (rd16(ext, o + 1 + j) == 0x0304) seen_tls13 = 1;
             }
         } else if (et == 0x000D) {
-            /* signature_algorithms: 2B list_len + list of 2B schemes */
+            /* signature_algorithms: 2B list_len + list of 2B schemes.
+             * Match server_wants_sig_alg against the client's offered
+             * list. Server has only one cert kind on hand (whichever
+             * the httpsd configured), so this is "does the client
+             * support the alg of our cert?" — not actual negotiation. */
             if (el < 2) return -4;
             int ll = rd16(ext, o);
             if (ll + 2 > el) return -5;
             for (int j = 0; j + 1 < ll; j += 2) {
-                if (rd16(ext, o + 2 + j) == 0x0807) seen_ed25519 = 1;
+                int sa = rd16(ext, o + 2 + j);
+                if (sa == server_wants_sig_alg) {
+                    seen_match = 1;
+                    *out_chosen_sig_alg = sa;
+                }
             }
         } else if (et == 0x0033) {
             /* key_share: 2B client_shares_len + entries
@@ -485,7 +496,7 @@ static int parse_clienthello_extensions(
         o += el;
     }
     if (!seen_tls13)        return -10;
-    if (!seen_ed25519)      return -11;
+    if (!seen_match)        return -11;
     if (!seen_x25519_share) return -12;
     return 0;
 }
@@ -598,8 +609,12 @@ int tls_server_handshake_cert(struct tls_conn *c, int fd) {
     int ext_len = rd16(recbuf, o); o += 2;
     if (o + ext_len > rlen) return -13;
     const uint8_t *cli_pub = 0;
-    int per = parse_clienthello_extensions(recbuf + o, ext_len, &cli_pub);
+    int chosen_sig = 0;
+    int want_sig = c->sig_alg ? c->sig_alg : 0x0807;   /* default ed25519 */
+    int per = parse_clienthello_extensions(recbuf + o, ext_len, &cli_pub,
+                                           want_sig, &chosen_sig);
     if (per < 0) return -1400 + per;     /* -1401..-1412 — see parser */
+    c->sig_alg = chosen_sig;
     for (int i = 0; i < 32; i++) c->client_pub[i] = cli_pub[i];
 
     /* Update transcript with the full ClientHello message (header + body). */
@@ -665,22 +680,52 @@ int tls_server_handshake_cert(struct tls_conn *c, int fd) {
                       &c->transcript) < 0) return -20;
     }
 
-    /* CertificateVerify: snapshot transcript, sign, append. */
+    /* CertificateVerify: snapshot transcript, sign, append.
+     *
+     * Both supported signature schemes sign the same input — the
+     * 130-byte CV-context construction from RFC 8446 §4.4.3.
+     *
+     *   Ed25519 (0x0807): raw signature is exactly 64 bytes.
+     *   ECDSA-P256 (0x0403): first SHA-256 the 130-byte construction,
+     *                        then sign the hash; the body carries a
+     *                        DER-encoded (R, S) — variable length.
+     */
     {
         struct sha256 t = c->transcript;
         uint8_t th[32];
         sha256_final(&t, th);
         uint8_t to_sign[130];
         build_cv_sign_input(to_sign, th);
-        uint8_t sig[64];
-        ed25519_sign(sig, to_sign, 130, c->server_sk);
 
-        uint8_t cv_body[68];
-        cv_body[0] = 0x08; cv_body[1] = 0x07;        /* alg = ed25519 */
-        cv_body[2] = 0x00; cv_body[3] = 0x40;        /* siglen = 64 */
-        for (int i = 0; i < 64; i++) cv_body[4 + i] = sig[i];
+        uint8_t cv_body[160];     /* enough for ed25519 (68) or ecdsa (~80) */
+        int     cv_body_len = 0;
+
+        if (c->sig_alg == 0x0403) {
+            /* ECDSA-with-SHA256 */
+            uint8_t hash[32];
+            sha256(to_sign, 130, hash);
+            uint8_t rs[64];
+            if (p256_sign(rs, hash, c->server_sk) != 0) return -210;
+            uint8_t der[72];
+            int dlen = p256_sig_to_der(der, sizeof(der), rs);
+            if (dlen < 0) return -211;
+
+            cv_body[0] = 0x04; cv_body[1] = 0x03;            /* alg */
+            cv_body[2] = (uint8_t)(dlen >> 8);               /* siglen hi */
+            cv_body[3] = (uint8_t)dlen;                      /* siglen lo */
+            for (int i = 0; i < dlen; i++) cv_body[4 + i] = der[i];
+            cv_body_len = 4 + dlen;
+        } else {
+            /* Ed25519, the session-39 default. */
+            uint8_t sig[64];
+            ed25519_sign(sig, to_sign, 130, c->server_sk);
+            cv_body[0] = 0x08; cv_body[1] = 0x07;            /* alg */
+            cv_body[2] = 0x00; cv_body[3] = 0x40;            /* siglen = 64 */
+            for (int i = 0; i < 64; i++) cv_body[4 + i] = sig[i];
+            cv_body_len = 68;
+        }
         if (hs_append(flight, sizeof(flight), &foff,
-                      TLS_HS_CERT_VERIFY, cv_body, 68,
+                      TLS_HS_CERT_VERIFY, cv_body, cv_body_len,
                       &c->transcript) < 0) return -21;
     }
 
@@ -749,10 +794,15 @@ static int build_clienthello_body(struct tls_conn *c, uint8_t *body) {
     body[o++] = 0x00; body[o++] = 0x02;          /* list len */
     body[o++] = 0x00; body[o++] = 0x1D;          /* x25519 */
 
-    /* signature_algorithms (13): list of sig schemes */
+    /* signature_algorithms (13): list of sig schemes the client
+     * will accept on the server's cert. Offer both because the OS
+     * ↔ OS demo's server may be configured either way (session 43
+     * switched httpsd to ECDSA for Schannel-compat; the Ed25519
+     * code path still exists for completeness). */
     body[o++] = 0x00; body[o++] = 0x0D;
-    body[o++] = 0x00; body[o++] = 0x04;
-    body[o++] = 0x00; body[o++] = 0x02;          /* list len */
+    body[o++] = 0x00; body[o++] = 0x06;
+    body[o++] = 0x00; body[o++] = 0x04;          /* list len = 4 */
+    body[o++] = 0x04; body[o++] = 0x03;          /* ecdsa_secp256r1_sha256 */
     body[o++] = 0x08; body[o++] = 0x07;          /* ed25519 */
 
     /* key_share (51): one share — group + key.

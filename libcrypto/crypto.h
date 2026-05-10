@@ -16,6 +16,7 @@
  * the libuser ABI. */
 typedef unsigned char       uint8_t;
 typedef unsigned long long  uint64_t;
+typedef long long           int64_t;
 
 /* ---- SHA-256 ----------------------------------------------------- */
 struct sha256 {
@@ -108,5 +109,15 @@ void ed25519_sign(uint8_t sig[64],
 int  ed25519_verify(const uint8_t sig[64],
                     const uint8_t *msg, size_t msg_len,
                     const uint8_t pk[32]);
+
+/* ---- ECDSA over NIST P-256 (secp256r1) ------------------------- */
+/* Closes the session-39 Schannel gap by giving us a signature
+ * scheme every TLS client supports. See libcrypto/p256.h for
+ * details on the wire formats. */
+void p256_keypair_from_seed(uint8_t pub[64], uint8_t priv[32], const uint8_t seed[32]);
+int  p256_sign  (uint8_t sig[64], const uint8_t hash[32], const uint8_t priv[32]);
+int  p256_verify(const uint8_t sig[64], const uint8_t hash[32], const uint8_t pub[64]);
+int  p256_sig_to_der  (uint8_t *out, int out_cap, const uint8_t sig[64]);
+int  p256_sig_from_der(uint8_t sig[64], const uint8_t *der, int der_len);
 
 #endif
