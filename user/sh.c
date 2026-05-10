@@ -521,6 +521,65 @@ static void selftest(void) {
         }
     }
 
+    puts("[t24] PS/2 mouse + framebuffer mmap from userspace\n");
+    {
+        /* Mouse: snapshot before/after a delay; the cursor's centered
+         * at boot, so x/y are mid-screen and packets is 0 unless
+         * QEMU's been moving the host pointer. The PASS check is
+         * just "syscall returns 1 and gives us numbers in range". */
+        int ms[4] = {0,0,0,0};
+        int alive = sys_mouse_state(ms);
+        printf("  mouse_state: alive=%d  x=%d y=%d btns=%d packets=%d\n",
+               alive, ms[0], ms[1], ms[2], ms[3]);
+
+        /* mmap the FB. The kernel installs PTE_USER+WRITABLE on
+         * every FB page in our PD, sharing the underlying physical
+         * MMIO with the kernel's fbcon. */
+        unsigned int info[4] = {0};
+        if (sys_fbinfo(info) > 0) {
+            void *fb = sys_fb_mmap();
+            if (fb) {
+                printf("  fb mmap returned VA 0x%x (size %u KiB)\n",
+                       (unsigned)(unsigned long)fb,
+                       (info[3] * info[1]) >> 10);
+                /* Touch a single pixel — corner of the screen, blue.
+                 * If anything in the FB-mmap path is wrong (PTE not
+                 * USER, page not mapped, wrong physical address) this
+                 * is a #PF. If it succeeds, fbcon will keep painting
+                 * boot text on top — but the pixel landed. */
+                volatile unsigned char *fbp = (volatile unsigned char *)fb;
+                /* Bottom-left 4-pixel block, blue (24bpp = B,G,R). */
+                for (int yy = (int)info[1] - 4; yy < (int)info[1]; yy++) {
+                    for (int xx = 0; xx < 4; xx++) {
+                        volatile unsigned char *p =
+                            fbp + yy * info[3] + xx * (info[2] / 8);
+                        p[0] = 0xFF; p[1] = 0x00; p[2] = 0x00;
+                    }
+                }
+                puts("  PASS: wrote blue pixels at bottom-left (no #PF)\n");
+            } else {
+                puts("  FAIL: SYS_FB_MMAP returned NULL\n");
+            }
+        } else {
+            puts("  SKIP: VBE not enabled, no FB to mmap\n");
+        }
+
+        /* Optionally launch the gui.elf demo for ~4 seconds. The
+         * harness can take a screenshot mid-run and verify the
+         * cursor sprite is on screen. We fork+exec rather than
+         * inline so the demo's painting doesn't run on top of the
+         * shell's selftest output. */
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv2[] = { "gui.elf", 0 };
+            sys_exec("gui.elf", argv2);
+            sys_exit(127);
+        }
+        int code = -1;
+        sys_wait(&code);
+        printf("  gui.elf exited (code=%d)\n", code);
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

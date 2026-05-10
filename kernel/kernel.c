@@ -40,6 +40,7 @@
 #include "shell.h"
 #include "vbe.h"
 #include "fbcon.h"
+#include "mouse.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
  * so you can see the scheduler interleaving them in real time without
@@ -165,6 +166,13 @@ void kmain(uint32_t boot_drive) {
     kputs("[boot] reading VBE summary from bootloader... ");
     vbe_init();
     fbcon_init();
+
+    /* PS/2 mouse — runs the BIOS controller handshake and wires
+     * IRQ12. Done AFTER vbe_init so the cursor-clamp box can read
+     * the actual screen dimensions. If the BIOS doesn't expose a
+     * PS/2 mouse, the driver stays dormant and SYS_MOUSE_STATE
+     * returns the (0,0) initial state. */
+    mouse_init();
 
     kputs("[boot] initializing ATA driver... ");
     ata_init();

@@ -81,6 +81,8 @@ typedef unsigned int   size_t;
 #define SYS_GETCPU       51
 #define SYS_FBINFO       52
 #define SYS_SMP_STATS    53
+#define SYS_MOUSE_STATE  54
+#define SYS_FB_MMAP      55
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -169,6 +171,17 @@ int      sys_wait_nb(int *exit_code);
 int      sys_getcpu(void);
 int      sys_fbinfo(unsigned int out[4]);
 int      sys_smp_stats(unsigned int out[8]);
+
+/* Mouse: fills out[0..3] = x, y, buttons, packets. Returns 1 always
+ * (driver maintains state even with no mouse — initial cursor is
+ * mid-screen, buttons=0). buttons is a bitmask of 0x01=L, 0x02=R,
+ * 0x04=M. */
+int      sys_mouse_state(int out[4]);
+
+/* Map the framebuffer into the calling process's address space.
+ * Returns the user VA (use SYS_FBINFO to learn pitch/bpp/size).
+ * Returns NULL if VBE/fbcon isn't enabled. */
+void    *sys_fb_mmap(void);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

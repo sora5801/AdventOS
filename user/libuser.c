@@ -228,6 +228,24 @@ int sys_smp_stats(unsigned int out[8]) {
     return ret;
 }
 
+int sys_mouse_state(int out[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MOUSE_STATE), "b"(out)
+                      : "memory");
+    return ret;
+}
+
+void *sys_fb_mmap(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FB_MMAP)
+                      : "memory");
+    return (void *)(unsigned long)ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

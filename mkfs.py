@@ -82,6 +82,9 @@ USER_PROGRAMS = [
     ('telnet.elf','user/_obj/telnet.bin',None),
     ('irc.elf',   'user/_obj/irc.bin',   None),
     ('ircd.elf',  'user/_obj/ircd.bin',  None),
+    # GUI demo (session 34) — user-mmaps the framebuffer + polls the
+    # PS/2 mouse to draw a cursor and a few interactive tiles.
+    ('gui.elf',   'user/_obj/gui.bin',   None),
 ]
 
 # (on-disk filename, source path, parent directory name or None for root)

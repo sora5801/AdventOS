@@ -61,6 +61,13 @@
 #define SYS_SMP_STATS    53 /* (eax=53, ebx=uint32_t out[8]) -> N CPUs.
                               Fills out[i] with LAPIC-timer tick count on CPU i.
                               Lets [t22] verify APs are actually scheduling. */
+#define SYS_MOUSE_STATE  54 /* (eax=54, ebx=int32_t out[4]) -> 1 if mouse alive.
+                              Fills out[]: x, y, buttons, packets_count.
+                              Returns 0 if PS/2 mouse not detected. */
+#define SYS_FB_MMAP      55 /* (eax=55) -> user VA mapped to the linear FB,
+                              or 0 if VBE/fbcon disabled. The mapping is
+                              RW user; munmap via SYS_MUNMAP(va, fb_size).
+                              fb_size = pitch * height — read via SYS_FBINFO. */
 
 void syscall_dispatch(struct registers *r);
 
