@@ -50,4 +50,9 @@ void               mouse_get_state(struct mouse_state *out);
  * Doesn't affect button state. */
 void               mouse_set_pos(int32_t x, int32_t y);
 
+/* Apply a delta + new button state. Used by the USB HID boot-mouse
+ * polling task (session 44) so a USB mouse plugged in via a hub
+ * shows up in the same `mouse_state` snapshot sys_mouse_state reads. */
+void               mouse_inject(int32_t dx, int32_t dy, uint32_t buttons);
+
 #endif

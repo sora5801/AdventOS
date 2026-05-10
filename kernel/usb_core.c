@@ -38,6 +38,7 @@ void usb_hid_attach(struct usb_device *d,
                     int ep_max, int ep_interval);
 void usb_msc_attach(struct usb_device *d,
                     int iface_num, int ep_in, int ep_out, int ep_max);
+void usb_hub_attach(struct usb_device *d);
 
 /* Up to 4 simultaneous USB devices total (2 ports × possible
  * future hubs). Plenty for the demo. */
@@ -243,10 +244,10 @@ static struct usb_device *alloc_device(int low_speed) {
     return 0;
 }
 
-static void enumerate_one(int port_idx, int low_speed) {
+void usb_enumerate_default(int low_speed, const char *origin) {
     struct usb_device *d = alloc_device(low_speed);
     if (!d) {
-        kprintf("[usb] no free device slot for port %d\n", port_idx);
+        kprintf("[usb] no free device slot for %s\n", origin);
         return;
     }
 
@@ -255,8 +256,8 @@ static void enumerate_one(int port_idx, int low_speed) {
     uint8_t dd_buf[18];
     int rc = usb_get_descriptor(d, USB_DT_DEVICE, 0, 0, dd_buf, 8);
     if (rc != USB_OK) {
-        kprintf("[usb] port %d: GET_DESCRIPTOR(8B) failed rc=%d\n",
-                port_idx, rc);
+        kprintf("[usb] %s: GET_DESCRIPTOR(8B) failed rc=%d\n",
+                origin, rc);
         d->in_use = 0;
         return;
     }
@@ -267,8 +268,8 @@ static void enumerate_one(int port_idx, int low_speed) {
     uint8_t new_addr = g_next_addr++;
     rc = usb_set_address(d, new_addr);
     if (rc != USB_OK) {
-        kprintf("[usb] port %d: SET_ADDRESS(%d) failed rc=%d\n",
-                port_idx, new_addr, rc);
+        kprintf("[usb] %s: SET_ADDRESS(%d) failed rc=%d\n",
+                origin, new_addr, rc);
         d->in_use = 0;
         return;
     }
@@ -325,7 +326,19 @@ static void enumerate_one(int port_idx, int low_speed) {
         return;
     }
 
-    /* Step 8: bind a class driver. */
+    /* Step 8: bind a class driver.
+     *
+     * Hub class (0x09) is checked first via the device's bDeviceClass
+     * field (it's a device-level class, not an interface-level one
+     * like HID/MSC). For class-9 devices we don't bother parsing the
+     * config for interfaces — the hub class binds to the whole device. */
+    if (dd->bDeviceClass == USB_CLASS_HUB) {
+        kprintf("[usb] addr %d: USB hub\n", d->addr);
+        usb_hub_attach(d);
+        kfree(full_cfg);
+        return;
+    }
+
     int iface, proto, ep, ep_max, ep_int;
     int ep_in, ep_out;
 
@@ -362,7 +375,10 @@ void usb_init(void) {
         if (connected[i]) {
             kprintf("[usb] port %d: %s-speed device attached\n",
                     i + 1, low_speed[i] ? "low" : "full");
-            enumerate_one(i, low_speed[i]);
+            char tag[16];
+            tag[0] = 'p'; tag[1] = 'o'; tag[2] = 'r'; tag[3] = 't';
+            tag[4] = ' '; tag[5] = (char)('0' + i + 1); tag[6] = 0;
+            usb_enumerate_default(low_speed[i], tag);
         } else {
             kprintf("[usb] port %d: no device\n", i + 1);
         }

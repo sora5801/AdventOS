@@ -162,6 +162,28 @@ void mouse_set_pos(int32_t x, int32_t y) {
     g_y = y;
 }
 
+/* USB-HID-boot-mouse path (session 44). The USB driver polls the
+ * interrupt-IN endpoint, decodes the 3-byte boot-mouse report
+ * (buttons, dx, dy), and calls this to update the shared state.
+ * Same clamping logic as the PS/2 IRQ handler — sys_mouse_state
+ * reads g_x / g_y / g_buttons without caring which source produced
+ * them.
+ *
+ * USB HID dy is "up = positive" too (same as PS/2 native), so we
+ * invert here to match the framebuffer's "down = positive" Y axis. */
+void mouse_inject(int32_t dx, int32_t dy, uint32_t buttons) {
+    int32_t nx = g_x + dx;
+    int32_t ny = g_y - dy;
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if (nx > g_screen_w - 1) nx = g_screen_w - 1;
+    if (ny > g_screen_h - 1) ny = g_screen_h - 1;
+    g_x = nx;
+    g_y = ny;
+    g_buttons = buttons & 0x07;
+    g_packets++;
+}
+
 void mouse_init(void) {
     if (g_initialized) return;
 

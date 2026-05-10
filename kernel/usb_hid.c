@@ -27,6 +27,7 @@
 #include "usb_core.h"
 #include "uhci.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "kprintf.h"
 #include "string.h"
 #include "pit.h"
@@ -150,58 +151,133 @@ static void usb_hid_kbd_task(void) {
     }
 }
 
+/* ============================================================
+ * HID boot mouse (session 44)
+ * ============================================================
+ *
+ * Boot-protocol mouse reports are 3 bytes (some devices send 4 with
+ * a wheel byte, which we just ignore):
+ *
+ *   byte 0  : buttons (bit 0 = left, bit 1 = right, bit 2 = middle)
+ *   byte 1  : signed dx (8-bit)
+ *   byte 2  : signed dy (8-bit)
+ *   byte 3? : signed wheel — only present if wMaxPacketSize >= 4
+ *
+ * Unlike the keyboard's level-triggered "currently-down" model, the
+ * mouse report is edge-triggered deltas. Every poll that returns
+ * a report applies its dx/dy to the cursor and overwrites the
+ * button state. NAK polls leave the cursor where it was.
+ */
+
+struct hid_mouse {
+    int                in_use;
+    struct usb_device *dev;
+    int                ep;
+    int                ep_max;
+    int                toggle;
+};
+
+#define MAX_HID_MOUSE 2
+static struct hid_mouse g_mice[MAX_HID_MOUSE];
+
+static void poll_mouse(struct hid_mouse *m) {
+    uint8_t report[8] = {0};
+    int rc = uhci_int_in(m->dev->addr, m->dev->low_speed, m->ep_max,
+                         m->ep, report, m->ep_max < 8 ? m->ep_max : 8,
+                         &m->toggle);
+    if (rc < 3) return;       /* NAK / timeout / runt — try again next tick */
+
+    /* report[0] = buttons, report[1] = dx (signed), report[2] = dy (signed).
+     * `int8_t` cast forces sign extension on the byte. */
+    uint32_t buttons = report[0] & 0x07;
+    int32_t  dx = (int32_t)(int8_t)report[1];
+    int32_t  dy = (int32_t)(int8_t)report[2];
+    mouse_inject(dx, dy, buttons);
+}
+
+static void usb_hid_mouse_task(void) {
+    for (;;) {
+        for (int i = 0; i < MAX_HID_MOUSE; i++) {
+            if (g_mice[i].in_use) poll_mouse(&g_mice[i]);
+        }
+        /* Lower polling cadence than the keyboard. The cursor jitter
+         * from a few skipped frames is invisible at 50 ms — and the
+         * shared single-QH UHCI schedule can't sustain two devices
+         * polling at 10 ms each without starving control transfers. */
+        pit_sleep(50);
+    }
+}
+
 /* Called from usb_core's enumeration once it identifies a HID
- * keyboard interface. */
+ * interface. Routes to keyboard or mouse based on bInterfaceProtocol. */
 void usb_hid_attach(struct usb_device *d,
                     const uint8_t *cfg_buf, int cfg_len,
                     int iface_num, int proto, int ep_addr,
                     int ep_max, int ep_interval)
 {
-    (void)cfg_buf; (void)cfg_len;
-    if (proto != USB_HID_PROTOCOL_KEYBOARD) {
-        kprintf("[usb] HID interface (proto=%d) — only keyboard is wired up "
-                "this session\n", proto);
-        return;
-    }
+    (void)cfg_buf; (void)cfg_len; (void)ep_interval;
 
-    /* Switch to boot protocol so we get the fixed 8-byte format
+    /* Switch to boot protocol so we get the fixed-format reports
      * regardless of what the HID report descriptor would otherwise
-     * mandate. SET_IDLE(0) tells the device "only report on
-     * change", suppressing duplicate idle-timeout reports. */
+     * mandate. SET_IDLE(0) tells the device "only report on change",
+     * suppressing duplicate idle-timeout reports. */
     if (usb_hid_set_protocol(d, iface_num, USB_HID_PROTOCOL_BOOT) != USB_OK) {
         kprintf("[usb] addr %d: SET_PROTOCOL(BOOT) failed\n", d->addr);
         return;
     }
-    /* SET_IDLE may stall on some devices that only support default
-     * idle — that's fine, we treat it as advisory. */
     usb_hid_set_idle(d, iface_num, 0);
 
-    /* Find a free slot. */
-    struct hid_kbd *k = 0;
-    for (int i = 0; i < MAX_HID_KBD; i++) {
-        if (!g_kbds[i].in_use) { k = &g_kbds[i]; break; }
+    if (proto == USB_HID_PROTOCOL_KEYBOARD) {
+        struct hid_kbd *k = 0;
+        for (int i = 0; i < MAX_HID_KBD; i++) {
+            if (!g_kbds[i].in_use) { k = &g_kbds[i]; break; }
+        }
+        if (!k) { kprintf("[usb] no free HID kbd slot\n"); return; }
+        memset(k, 0, sizeof(*k));
+        k->in_use      = 1;
+        k->dev         = d;
+        k->ep          = ep_addr;
+        k->ep_max      = ep_max < 8 ? 8 : ep_max;
+        k->interval_ms = ep_interval > 0 ? ep_interval : 10;
+        k->toggle      = 0;
+        kprintf("[usb] HID keyboard registered (polling starts late)\n");
+        return;
     }
-    if (!k) { kprintf("[usb] no free HID kbd slot\n"); return; }
 
-    memset(k, 0, sizeof(*k));
-    k->in_use      = 1;
-    k->dev         = d;
-    k->ep          = ep_addr;
-    k->ep_max      = ep_max < 8 ? 8 : ep_max;
-    k->interval_ms = ep_interval > 0 ? ep_interval : 10;
-    k->toggle      = 0;
+    if (proto == USB_HID_PROTOCOL_MOUSE) {
+        struct hid_mouse *m = 0;
+        for (int i = 0; i < MAX_HID_MOUSE; i++) {
+            if (!g_mice[i].in_use) { m = &g_mice[i]; break; }
+        }
+        if (!m) { kprintf("[usb] no free HID mouse slot\n"); return; }
+        memset(m, 0, sizeof(*m));
+        m->in_use = 1;
+        m->dev    = d;
+        m->ep     = ep_addr;
+        m->ep_max = ep_max < 3 ? 3 : ep_max;
+        m->toggle = 0;
+        kprintf("[usb] HID mouse registered (polling starts late)\n");
+        return;
+    }
 
-    /* Don't spawn the poll task here — usb_start_polling() (called
-     * at end of kmain) does that, after all other init is done. */
-    kprintf("[usb] HID keyboard registered (polling starts late)\n");
+    kprintf("[usb] HID interface (proto=%d) not recognized\n", proto);
 }
 
 void usb_start_polling(void);    /* fwd-decl, defined below */
 void usb_start_polling(void) {
-    /* Only spawn the task if we actually attached a keyboard. */
-    int any = 0;
-    for (int i = 0; i < MAX_HID_KBD; i++) if (g_kbds[i].in_use) any = 1;
-    if (!any) return;
-    task_make_runnable(task_create(usb_hid_kbd_task, "usb-hid-kbd"));
-    kprintf("[usb] HID keyboard polling task started\n");
+    int kbd_any = 0;
+    for (int i = 0; i < MAX_HID_KBD; i++)
+        if (g_kbds[i].in_use) kbd_any = 1;
+    int mouse_any = 0;
+    for (int i = 0; i < MAX_HID_MOUSE; i++)
+        if (g_mice[i].in_use) mouse_any = 1;
+
+    if (kbd_any) {
+        task_make_runnable(task_create(usb_hid_kbd_task, "usb-hid-kbd"));
+        kprintf("[usb] HID keyboard polling task started\n");
+    }
+    if (mouse_any) {
+        task_make_runnable(task_create(usb_hid_mouse_task, "usb-hid-mouse"));
+        kprintf("[usb] HID mouse polling task started\n");
+    }
 }

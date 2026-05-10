@@ -27,6 +27,7 @@
 #define USB_RECIP_DEVICE        0
 #define USB_RECIP_INTERFACE     1
 #define USB_RECIP_ENDPOINT      2
+#define USB_RECIP_OTHER         3      /* used by hub class for per-port requests */
 
 /* ---- Standard request codes (bRequest) ------------------------- */
 #define USB_REQ_GET_STATUS         0

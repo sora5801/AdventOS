@@ -35,4 +35,17 @@ int usb_set_configuration(struct usb_device *d, uint8_t value);
 int usb_hid_set_protocol(struct usb_device *d, int interface, int protocol);
 int usb_hid_set_idle    (struct usb_device *d, int interface, int duration_4ms);
 
+/* Enumerate a device that's already had its USB port reset and is
+ * speaking at the default address 0. Called twice in this codebase:
+ *
+ *   - From usb_init() for each connected root-hub port (uhci_probe_ports
+ *     does the reset, then this fires).
+ *   - From usb_hub_attach() for each port behind a USB hub once the
+ *     hub driver has done its class-specific port reset.
+ *
+ * `low_speed` is the speed of the freshly-reset device (1 for 1.5 Mbps
+ * low-speed, 0 for 12 Mbps full-speed). `origin` is a human-readable
+ * tag for logging — "port 1" or "hub 2 port 3", etc. */
+void usb_enumerate_default(int low_speed, const char *origin);
+
 #endif
