@@ -638,6 +638,23 @@ static void selftest(void) {
         int code; sys_wait(&code);
     }
 
+    puts("[t27] AC97 audio: play a 4-note arpeggio via sys_audio_play\n");
+    {
+        /* Fork and exec beep with "tune" arg — plays four 200ms
+         * notes (C E G C', a C-major arpeggio). Each note is a
+         * separate sys_audio_play call exercising the queue +
+         * DMA + drain cycle once per call. */
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv2[] = { "beep.elf", "tune", 0 };
+            sys_exec("beep.elf", argv2);
+            sys_exit(127);
+        }
+        int code = -1;
+        sys_wait(&code);
+        printf("  beep.elf tune exited (code=%d) — 0 = AC97 played; -1 = no AC97\n", code);
+    }
+
     puts("[t26] libcrypto: SHA-256 / HMAC / HKDF / AES-GCM / X25519 vectors\n");
     {
         int pid = sys_fork();

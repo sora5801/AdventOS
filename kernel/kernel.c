@@ -42,6 +42,7 @@
 #include "fbcon.h"
 #include "mouse.h"
 #include "dyld.h"
+#include "ac97.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
  * so you can see the scheduler interleaving them in real time without
@@ -237,6 +238,12 @@ void kmain(uint32_t boot_drive) {
 
     /* NIC IRQs need to be live before init can succeed (the link-up
      * pre-fills the MAC via PIO, but later RX is IRQ-driven). */
+    /* AC97 audio. Done after PIT (we use pit_sleep for codec reset
+     * timing) but before user tasks launch. Probes PCI; logs whether
+     * an Intel ICH AC97 codec was found. If absent, audio syscalls
+     * just no-op. */
+    ac97_init();
+
     kputs("[boot] starting network stack\n");
     net_init();
 

@@ -83,6 +83,7 @@ typedef unsigned int   size_t;
 #define SYS_SMP_STATS    53
 #define SYS_MOUSE_STATE  54
 #define SYS_FB_MMAP      55
+#define SYS_AUDIO_PLAY   56
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -182,6 +183,13 @@ int      sys_mouse_state(int out[4]);
  * Returns the user VA (use SYS_FBINFO to learn pitch/bpp/size).
  * Returns NULL if VBE/fbcon isn't enabled. */
 void    *sys_fb_mmap(void);
+
+/* Queue PCM data for playback on the AC97 codec. Format: 16-bit
+ * signed little-endian stereo at 48 kHz. n must be a multiple of
+ * 4 (one stereo sample). Returns bytes accepted, or -1 if no AC97
+ * device. The buffer is COPIED into kernel staging — caller can
+ * reuse on return. */
+int      sys_audio_play(const void *pcm, int n);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

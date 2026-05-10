@@ -85,6 +85,8 @@ USER_PROGRAMS = [
     # GUI demo (session 34) — user-mmaps the framebuffer + polls the
     # PS/2 mouse to draw a cursor and a few interactive tiles.
     ('gui.elf',   'user/_obj/gui.bin',   None),
+    # Session 37: AC97 audio test program — generates PCM tones.
+    ('beep.elf',  'user/_obj/beep.bin',  None),
     # Session 36: TLS 1.3 + HTTPS using libcrypto.
     ('cryptotest.elf', 'user/_obj/cryptotest.bin', None),
     ('httpsd.elf',     'user/_obj/httpsd.bin',     None),

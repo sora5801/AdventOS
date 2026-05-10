@@ -23,6 +23,7 @@
 #include "smp.h"
 #include "vbe.h"
 #include "mouse.h"
+#include "ac97.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -534,6 +535,16 @@ void syscall_dispatch(struct registers *r) {
              * because mouse_init sets x/y to mid-screen. That's fine —
              * the GUI just polls and draws. */
             ret = 1;
+            break;
+        }
+        case SYS_AUDIO_PLAY: {
+            const void *upcm = (const void *)(uintptr_t)a;
+            int         n    = (int)b;
+            if (!upcm || (uintptr_t)upcm >= 0xC0000000u) { ret = -1; break; }
+            if (n <= 0 || n > (1 << 20)) { ret = -1; break; }
+            /* ac97_play copies — userspace ptr deref happens here, in
+             * the active (user) PD context. */
+            ret = ac97_play(upcm, n);
             break;
         }
         case SYS_FB_MMAP: {

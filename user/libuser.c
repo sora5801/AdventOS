@@ -246,6 +246,15 @@ void *sys_fb_mmap(void) {
     return (void *)(unsigned long)ret;
 }
 
+int sys_audio_play(const void *pcm, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_AUDIO_PLAY), "b"(pcm), "c"(n)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

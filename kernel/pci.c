@@ -40,7 +40,9 @@ int pci_find(uint16_t vendor, uint16_t device, struct pci_device *out) {
                     out->vendor_id = vid;
                     out->device_id = did;
                     out->bar0      = pci_config_read32(bus, dev, func, 0x10);
+                    out->bar1      = pci_config_read32(bus, dev, func, 0x14);
                     out->io_base   = (uint16_t)(out->bar0 & ~0x3u);
+                    out->io_base1  = (uint16_t)(out->bar1 & ~0x3u);
                     out->irq_line  = (uint8_t)(pci_config_read32(bus, dev, func, 0x3C) & 0xFF);
 
                     /* Ensure I/O space + bus master are enabled in CMD register. */

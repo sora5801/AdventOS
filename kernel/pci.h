@@ -21,7 +21,10 @@ struct pci_device {
     uint16_t vendor_id;
     uint16_t device_id;
     uint32_t bar0;          /* raw BAR0 contents (low bit = I/O if 1)  */
+    uint32_t bar1;          /* raw BAR1 — AC97 needs both NAM (mixer) +
+                               NABM (bus master) which live in different BARs */
     uint16_t io_base;       /* BAR0 with low 2 bits masked, if I/O BAR */
+    uint16_t io_base1;      /* BAR1 with low 2 bits masked              */
     uint8_t  irq_line;
 };
 

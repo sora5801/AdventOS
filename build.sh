@@ -102,7 +102,7 @@ echo "[5/7] build user programs"
 
 USER_PROGS=(hello count sh cat echo httpd ed init
             wc head tail grep sort uniq tee tr seq date kill ls pwd
-            nc wget telnet irc ircd gui)
+            nc wget telnet irc ircd gui beep)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -159,5 +159,6 @@ echo "OK. Run with:"
 echo "    qemu-system-i386 -drive format=raw,file=os.img -serial stdio -m 32 \\"
 echo "        -smp 2 \\"
 echo "        -netdev user,id=net0,hostfwd=tcp::8080-:80 \\"
-echo "        -device rtl8139,netdev=net0,mac=52:54:00:12:34:56"
+echo "        -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \\"
+echo "        -device AC97 -audiodev sdl,id=snd0"
 echo "Then from the host:  curl http://localhost:8080/"

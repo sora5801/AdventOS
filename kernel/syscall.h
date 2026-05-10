@@ -68,6 +68,12 @@
                               or 0 if VBE/fbcon disabled. The mapping is
                               RW user; munmap via SYS_MUNMAP(va, fb_size).
                               fb_size = pitch * height — read via SYS_FBINFO. */
+#define SYS_AUDIO_PLAY   56 /* (eax=56, ebx=ptr, ecx=n_bytes) -> bytes accepted,
+                              or -1 if no AC97 codec. n_bytes must be a
+                              multiple of 4 (one stereo 16-bit sample). PCM
+                              format: 16-bit signed little-endian stereo
+                              at 48 kHz. Buffer is COPIED into kernel
+                              staging — caller can reuse on return. */
 
 void syscall_dispatch(struct registers *r);
 
