@@ -3,6 +3,17 @@
 #include "serial.h"
 #include "fbcon.h"
 #include "string.h"
+#include "spinlock.h"
+
+/* Serializer for the three console sinks. Without this, two CPUs
+ * calling kprintf concurrently produce byte-by-byte interleaved
+ * output ("init: stinit: exec failed" instead of "init: started"
+ * + "init: exec failed"). The lock is held only across the single-
+ * char write to all three sinks; the rest of kvprintf's format
+ * parsing runs without it (each char is independently atomic on
+ * the consumer side, and reordering of independent prints is
+ * tolerable — what we prevent is char-stream tearing). */
+static spinlock_t g_kputc_lock = SPINLOCK_INIT;
 
 void kputc(char c) {
     /* Three sinks in parallel:
@@ -14,13 +25,23 @@ void kputc(char c) {
      *  - fbcon: silent until fbcon_init() runs, then paints into the
      *    VBE linear FB
      * Cost in the disabled state is one branch each. */
+    spin_lock(&g_kputc_lock);
     vga_putc(c);
     serial_putc(c);
     fbcon_putc(c);
+    spin_unlock(&g_kputc_lock);
 }
 
+/* Higher-level lock so a multi-line kputs / kvprintf appears
+ * atomically rather than interleaving char-by-char with another
+ * CPU's. The per-char g_kputc_lock above protects only single-byte
+ * sink writes; this one keeps related characters together. */
+static spinlock_t g_kvprintf_lock = SPINLOCK_INIT;
+
 void kputs(const char *s) {
+    spin_lock(&g_kvprintf_lock);
     while (*s) kputc(*s++);
+    spin_unlock(&g_kvprintf_lock);
 }
 
 static void put_dec(int32_t n) {
@@ -55,6 +76,7 @@ static void put_hex(uint32_t u, int width, int upper) {
 }
 
 void kvprintf(const char *fmt, va_list args) {
+    spin_lock(&g_kvprintf_lock);
     while (*fmt) {
         if (*fmt != '%') { kputc(*fmt++); continue; }
         fmt++;
@@ -123,6 +145,7 @@ void kvprintf(const char *fmt, va_list args) {
         }
         if (*fmt) fmt++;
     }
+    spin_unlock(&g_kvprintf_lock);
 }
 
 void kprintf(const char *fmt, ...) {

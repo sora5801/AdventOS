@@ -176,10 +176,12 @@ struct task *task_create(task_fn entry, const char *name) {
     if (idx < 0) { spin_unlock(&g_sched_lock); return NULL; }
 
     /* Reserve the slot before dropping the lock so a concurrent
-     * task_create on another CPU can't pick the same one. We mark
-     * it READY but un-rung — the splice happens after kmalloc/etc
-     * succeeds. */
-    g_tasks[idx].state = TASK_STATE_READY;
+     * task_create on another CPU can't pick the same one. Mark
+     * it BLOCKED rather than READY: pick_next_ready scans for
+     * READY only, so the half-initialized task is invisible to the
+     * scheduler until our caller flips state to READY at the end
+     * of its setup (see splice_into_ring below). */
+    g_tasks[idx].state = TASK_STATE_BLOCKED;
     g_tasks[idx].next  = NULL;
     spin_unlock(&g_sched_lock);
 
@@ -273,8 +275,13 @@ struct task *task_create(task_fn entry, const char *name) {
     /* cwd defaults to / (session 25). */
     t->cwd_dir = TASK_CWD_ROOT;
 
-    /* Splice into the round-robin list right after current.
-     * The list is shared across CPUs; protect with the scheduler lock. */
+    /* Splice into the round-robin list right after current. State
+     * stays BLOCKED — caller is responsible for the final READY
+     * transition once any post-task_create field setup is done.
+     * For plain kernel-task callers (demo_a, reaper) that means
+     * one extra task_make_runnable() call after task_create. For
+     * task_create_user / task_fork the customization happens
+     * before they call task_make_runnable. */
     spin_lock(&g_sched_lock);
     struct task *cur = cpu_current();
     t->next = cur->next ? cur->next : cur;
@@ -284,28 +291,50 @@ struct task *task_create(task_fn entry, const char *name) {
     return t;
 }
 
+/* Caller-side promotion: flip the task from BLOCKED (the state
+ * task_create leaves it in) to READY so the scheduler can dispatch
+ * it. Held only across the state write, then released — quick. */
+void task_make_runnable(struct task *t) {
+    if (!t) return;
+    spin_lock(&g_sched_lock);
+    t->state = TASK_STATE_READY;
+    spin_unlock(&g_sched_lock);
+}
+
 /*
  * Build a ring-3 task. The first time it's scheduled, task_switch's
  * `ret` jumps to user_entry_stub (running in ring 0 on the task's
  * kernel stack). user_entry_stub configures the TSS, builds an iret
  * frame for ring 3, and irets into user code.
+ *
+ * Race with the SMP scheduler (session 38): task_create returns the
+ * task in TASK_STATE_READY, which means an AP could pick it up
+ * BEFORE we set cr3 / user_eip / user_esp here. The task would
+ * iret to whatever uninitialized garbage is in the user_eip slot.
+ * Fix: temporarily demote to BLOCKED while we customize, then
+ * promote back to READY at the end. Both transitions are protected
+ * by g_sched_lock.
  */
 struct task *task_create_user(uint32_t user_eip, uint32_t user_esp,
                               uint32_t cr3, const char *name) {
+    /* task_create leaves the new task in TASK_STATE_BLOCKED so it's
+     * invisible to pick_next_ready while we finish field setup
+     * here. The final task_make_runnable() flips state→READY. */
     struct task *t = task_create(user_entry_stub, name);
     if (!t) return NULL;
     t->cr3      = cr3;
     t->user_eip = user_eip;
     t->user_esp = user_esp;
     t->is_user  = 1;
-    /* SMP scope of session 33: APs run KERNEL-ONLY tasks. User tasks
-     * stay pinned to the BSP because the syscall surface (fs.c,
-     * bcache, kmalloc, paging_destroy_user_pd, …) is not yet
-     * SMP-safe. The page-fault races we hit when AP picked up a
-     * forked user task were rooted in unsynchronized fs / elf-loader
-     * state. A future session will add per-subsystem locks (or a Big
-     * Kernel Lock around syscall_dispatch) and lift this pin. */
-    t->cpu_pin  = 0;
+    /* Session 38: BKL + BLOCKED-create + reaper/syncer locking laid
+     * the groundwork. Migration to AP is GATED at boot via the
+     * AP_CAN_RUN_USER kconfig (kernel/kernel.c). Default OFF until
+     * cross-CPU TLB shootdowns are added — without those, occasional
+     * stale-PTE faults manifest in long-running fork/exec storms.
+     * Set the flag to 1 to opt in and observe; see deep dive 38. */
+    extern int g_ap_runs_user;
+    t->cpu_pin = g_ap_runs_user ? -1 : 0;
+    task_make_runnable(t);
     return t;
 }
 
@@ -470,7 +499,25 @@ void schedule(void) {
 }
 
 void task_yield(void) {
-    schedule();
+    /* If we're inside a syscall (BKL held by us), drop the BKL
+     * across the schedule. Without this, other CPUs would
+     * eventually deadlock waiting on a BKL that's held by a
+     * task that's not currently running. The trade-off: other
+     * CPUs can enter the kernel during our yield, so any in-
+     * progress kernel state we left behind must be tolerable
+     * to concurrent access (pmm/kmalloc/sched have their own
+     * locks; fs/bcache/elf assume serial access — we mostly
+     * don't yield from inside those). */
+    extern int  bkl_held(void);
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
+    if (bkl_held()) {
+        bkl_unlock();
+        schedule();
+        bkl_lock();
+    } else {
+        schedule();
+    }
 }
 
 struct task *task_current(void) {
@@ -510,9 +557,15 @@ const char *task_state_name(int s) {
  *     so we drop cli before those calls.
  */
 static void task_reaper(void) {
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
     for (;;) {
         pit_sleep(200);
 
+        /* Reaper touches paging_destroy_user_pd (alloc/free pages),
+         * the FS-resident exit-code field, and the g_tasks ring.
+         * Hold BKL so it serializes with user-side syscalls. */
+        bkl_lock();
         for (int i = 1; i < TASK_MAX; i++) {
             struct task *t = &g_tasks[i];
             /* Skip the per-CPU current of any CPU — pulling the rug
@@ -568,11 +621,12 @@ static void task_reaper(void) {
                     reaped_user ? "user" : "kernel",
                     i);
         }
+        bkl_unlock();
     }
 }
 
 void task_reaper_start(void) {
-    task_create(task_reaper, "reaper");
+    task_make_runnable(task_create(task_reaper, "reaper"));
 }
 
 void task_set_init_pid(uint32_t pid) { g_init_pid = pid; }
@@ -666,13 +720,23 @@ struct task *task_fork(struct registers *parent_regs) {
     uint32_t child_esp = synth_fork_child_stack(kstack, parent_regs);
 
     /* 4. Populate the TCB. We do this before splicing into the round-
-     *    robin ring so the scheduler never sees a half-built task. */
+     *    robin ring so the scheduler never sees a half-built task.
+     *
+     * SMP race (session 38): pick_next_ready scans all g_tasks for
+     * READY when no ring anchor is given (AP idle's case). If we
+     * set state=READY before all the inheritance below is done, an
+     * AP could dispatch the child with stale fds, signals, etc.
+     * Hide it as BLOCKED while we set up; transition to READY at
+     * the very end (after the splice). */
     struct task *child = &g_tasks[slot];
     memset(child, 0, sizeof(*child));
     child->id               = g_next_id++;
-    child->state            = TASK_STATE_READY;
+    child->state            = TASK_STATE_BLOCKED;
     child->cpu              = -1;
-    child->cpu_pin          = 0;           /* user tasks stay on BSP — see task_create_user */
+    /* Session 38: same gate as task_create_user — flag controls
+     * whether children migrate to AP. Off by default. */
+    extern int g_ap_runs_user;
+    child->cpu_pin          = g_ap_runs_user ? -1 : 0;
     child->stack_base       = kstack;
     child->esp              = child_esp;
     child->cr3              = (uint32_t)(uintptr_t)child_pd;
@@ -732,10 +796,13 @@ struct task *task_fork(struct registers *parent_regs) {
     child->sid  = parent->sid;
 
     /* 6. Splice into the round-robin ring under the scheduler lock —
-     * APs may be picking from the ring concurrently. */
+     * APs may be picking from the ring concurrently. Transition
+     * state to READY in the same critical section so the moment
+     * the splice is visible the task is also dispatchable. */
     spin_lock(&g_sched_lock);
     child->next       = parent->next;
     parent->next      = child;
+    child->state      = TASK_STATE_READY;
     spin_unlock(&g_sched_lock);
 
     return child;

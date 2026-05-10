@@ -158,6 +158,13 @@ typedef void (*task_fn)(void);
 void           task_init(void);
 struct task   *task_create(task_fn entry, const char *name);
 
+/* task_create returns the task in TASK_STATE_BLOCKED so the caller
+ * can finish field setup (e.g., user task's cr3/eip/esp) without
+ * the scheduler dispatching a half-built task on another CPU.
+ * Call task_make_runnable() once the task is fully built — this
+ * flips state to READY and the scheduler will pick it up. */
+void           task_make_runnable(struct task *t);
+
 /* Build the per-CPU idle task for an application processor. Called
  * from ap_entry once the AP has its kernel stack + LAPIC + TSS. The
  * resulting TCB is marked is_idle (off the round-robin ring), bound

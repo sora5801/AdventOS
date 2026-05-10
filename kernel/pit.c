@@ -45,7 +45,17 @@ uint32_t pit_seconds(void) {
 void pit_sleep(uint32_t ms) {
     if (ticks_per_sec == 0) return;
     uint32_t target_ticks = ticks + (ms * ticks_per_sec) / 1000u;
+    /* Drop the BKL across the wait if we're inside a syscall. The
+     * hlt itself doesn't acquire any kernel locks, but the BKL
+     * blocks every other CPU from doing kernel work — bad if we
+     * sleep multiple ticks. */
+    extern int  bkl_held(void);
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
+    int held = bkl_held();
+    if (held) bkl_unlock();
     while (ticks < target_ticks) {
         __asm__ volatile ("hlt");
     }
+    if (held) bkl_lock();
 }

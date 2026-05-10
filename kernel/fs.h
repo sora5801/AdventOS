@@ -30,7 +30,11 @@
  *   Sector 1: 16 entries × 32 bytes
  */
 
-#define FS_DISK_OFFSET_SECTORS  200u
+/* Bumped from 200 → 256 in session 38: kernel.bin grew past 100 KiB
+ * with all the SMP machinery (BKL + g_kvprintf_lock + ac97 + tls
+ * etc.), pushing it past sector 200. The FS would land at the wrong
+ * offset. 256 sectors = 128 KiB of boot+kernel headroom. */
+#define FS_DISK_OFFSET_SECTORS  256u
 #define FS_SUPER_SECTORS        5u    /* superblock = 1 header + 4 entry sectors */
 #define FS_NAME_MAX             16
 #define FS_MAX_FILES            64    /* bumped from 32 in session 29 (network apps) */

@@ -44,6 +44,12 @@
 #include "dyld.h"
 #include "ac97.h"
 
+/* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
+ * pinned to BSP. The BKL machinery + race-fixed task creation are
+ * always in effect; this flag only controls cpu_pin. Off by
+ * default until we add cross-CPU TLB shootdowns; see docs/38. */
+int g_ap_runs_user = 0;
+
 /* Two demo tasks that emit a tag to the serial port at different rates,
  * so you can see the scheduler interleaving them in real time without
  * fighting the shell's VGA cursor. */
@@ -264,8 +270,8 @@ void kmain(uint32_t boot_drive) {
 
     kputs("[boot] spawning reaper + demo tasks A, B\n");
     task_reaper_start();
-    task_create(demo_task_a, "demo_a");
-    task_create(demo_task_b, "demo_b");
+    task_make_runnable(task_create(demo_task_a, "demo_a"));
+    task_make_runnable(task_create(demo_task_b, "demo_b"));
 
     /* The bcache syncer needs the task system + interrupts up so its
      * pit_sleep() loop can actually be scheduled. */
@@ -306,6 +312,14 @@ void kmain(uint32_t boot_drive) {
      * only spawns init.elf, which reads /etc/inittab and forks the
      * actual services (httpd, sh, ...). Tell the task layer init's
      * pid so future orphan reparenting goes there. */
+    /* kmain isn't in syscall context, so it doesn't naturally hold
+     * the BKL. But the LAUNCH path touches fs / elf / paging state
+     * that reaper / syncer (already running BKL-protected on the
+     * AP) might be touching. Take the lock for the duration of the
+     * launch so we serialize cleanly with them. */
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
+    bkl_lock();
     {
         int  _fd = fs_open("init.elf");
         if (_fd >= 0) {
@@ -323,6 +337,7 @@ void kmain(uint32_t boot_drive) {
             }
         }
     }
+    bkl_unlock();
     kputc('\n');
 
     /* If the shell launched, we expect it to drive the system from

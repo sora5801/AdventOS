@@ -477,8 +477,8 @@ static void cmd_mtest(void) {
         return;
     }
     mutex_init(&g_demo_mtx);
-    task_create(mtxa, "mtx_a");
-    task_create(mtxb, "mtx_b");
+    task_make_runnable(task_create(mtxa, "mtx_a"));
+    task_make_runnable(task_create(mtxb, "mtx_b"));
     spawned = 1;
     kputs("mtest: spawned mtx_a and mtx_b. Watch serial for [MA-IN ... MA-OUT] /\n");
     kputs("       [MB-IN ... MB-OUT] — the two should never interleave inside a\n");

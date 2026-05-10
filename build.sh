@@ -133,7 +133,7 @@ cat boot/boot.bin kernel/kernel.bin > os.img
 
 echo "[7/7] mkfs + append AdventFS at LBA 200"
 python mkfs.py
-fs_lba=200
+fs_lba=256   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS
 fs_offset=$(( fs_lba * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$fs_offset" ]; then

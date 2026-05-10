@@ -240,9 +240,18 @@ uint32_t bcache_dirty(void) {
  * shows the syncer is alive. With no writes happening, nothing
  * gets logged — the task stays quiet. */
 static void syncer_task(void) {
+    /* Acquire the BKL around bcache_sync — bcache state is shared
+     * with sys_read / sys_write / sys_open syscalls, which all
+     * run BKL-protected. Without this, the syncer (a kernel task
+     * with cpu_pin=-1) could race a user-side fs_open from the
+     * BSP while the syncer runs on the AP. */
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
     for (;;) {
         pit_sleep(5000);
+        bkl_lock();
         uint32_t flushed = bcache_sync();
+        bkl_unlock();
         if (flushed > 0) {
             kprintf("[bcache] syncer flushed %u dirty block(s)\n",
                     (unsigned)flushed);
@@ -251,5 +260,5 @@ static void syncer_task(void) {
 }
 
 void bcache_start_syncer(void) {
-    task_create(syncer_task, "bcache");
+    task_make_runnable(task_create(syncer_task, "bcache"));
 }

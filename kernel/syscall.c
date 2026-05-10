@@ -24,6 +24,7 @@
 #include "vbe.h"
 #include "mouse.h"
 #include "ac97.h"
+#include "bkl.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -71,6 +72,20 @@ void syscall_dispatch(struct registers *r) {
      * EFLAGS regardless. */
     __asm__ volatile ("sti");
 
+    /* === Big Kernel Lock (session 38) === Acquired before reading
+     * the syscall args so concurrent syscalls from different CPUs
+     * serialize on the kernel side. The lock is RELEASED by:
+     *   - the SYS_SIGRETURN early-return path (jumps over the
+     *     bkl_unlock at the end of this function)
+     *   - explicit drop+retake around blocking yields inside
+     *     specific syscall implementations (SYS_WAIT, SYS_SLEEP_MS,
+     *     SYS_YIELD, SYS_ACCEPT, SYS_READ on a socket, ...)
+     *
+     * This is the simplest correct serializer. Every syscall body
+     * runs as if single-CPU; user-mode execution between syscalls
+     * is fully parallel. */
+    bkl_lock();
+
     uint32_t num = r->eax;
     uint32_t a   = r->ebx;
     uint32_t b   = r->ecx;
@@ -97,11 +112,15 @@ void syscall_dispatch(struct registers *r) {
              * us, and demotes us to ZOMBIE (parent will harvest via
              * sys_wait) or DEAD (kernel reaper will free). */
             task_exit_current((int)a);
+            /* schedule() releases the CPU forever — drop the BKL
+             * so other CPUs can keep doing kernel work. */
+            bkl_unlock();
             schedule();
             for (;;) __asm__ volatile ("hlt");
         }
         case SYS_YIELD: {
-            schedule();
+            /* task_yield drops/retakes the BKL itself when held. */
+            task_yield();
             ret = 0;
             break;
         }
@@ -118,8 +137,9 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_SLEEP_MS: {
-            /* pit_sleep `hlt`s until the deadline, so other tasks
-             * (kernel and user) get scheduled in our place. */
+            /* pit_sleep itself drops/retakes the BKL while it
+             * hlt-waits. Other CPUs can serve syscalls during
+             * the sleep. */
             pit_sleep(a);
             ret = 0;
             break;
@@ -481,9 +501,17 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_WAIT: {
+            /* task_wait_current may set state=BLOCKED_ON_CHILD and
+             * schedule(). When BLOCKED, the calling task isn't
+             * running ANYWHERE, so it can't release the BKL — that
+             * would block every other CPU's kernel work until the
+             * child exits, possibly forever. Drop BKL before the
+             * blocking wait, re-take after wakeup. */
             int  *uout = (int *)(uintptr_t)a;
             int   exit_code = 0;
+            bkl_unlock();
             int   pid = task_wait_current(uout ? &exit_code : NULL);
+            bkl_lock();
             if (pid > 0 && uout) *uout = exit_code;
             ret = pid;
             break;
@@ -665,6 +693,7 @@ void syscall_dispatch(struct registers *r) {
              * (we just FINISHED a delivery; recursing would be
              * incorrect). */
             signal_sigreturn(r);
+            bkl_unlock();
             return;
         }
         case SYS_TTY_SET_MODE: {
@@ -989,4 +1018,8 @@ void syscall_dispatch(struct registers *r) {
      * The handler eventually trampolines into SYS_SIGRETURN, which
      * restores the original frame. */
     signal_check_and_deliver(r);
+
+    /* Release the BKL last — signal delivery touches per-task signal
+     * tables, also kernel-shared state. */
+    bkl_unlock();
 }
