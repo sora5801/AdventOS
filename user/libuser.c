@@ -255,6 +255,33 @@ int sys_audio_play(const void *pcm, int n) {
     return ret;
 }
 
+int sys_block_info(int dev_idx, struct sys_block_info *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BLOCK_INFO), "b"(dev_idx), "c"(out)
+                      : "memory");
+    return ret;
+}
+int sys_block_read(int dev_idx, unsigned int lba, unsigned int n, void *buf) {
+    struct sys_block_args a = { (unsigned)dev_idx, lba, n, buf };
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BLOCK_READ), "b"(&a)
+                      : "memory");
+    return ret;
+}
+int sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const void *buf) {
+    struct sys_block_args a = { (unsigned)dev_idx, lba, n, (void *)buf };
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_BLOCK_WRITE), "b"(&a)
+                      : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

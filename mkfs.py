@@ -91,6 +91,8 @@ USER_PROGRAMS = [
     ('cryptotest.elf', 'user/_obj/cryptotest.bin', None),
     ('httpsd.elf',     'user/_obj/httpsd.bin',     None),
     ('httpsget.elf',   'user/_obj/httpsget.bin',   None),
+    # Session 41: USB Mass Storage round-trip test.
+    ('usbtest.elf',    'user/_obj/usbtest.bin',    None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
@@ -139,15 +141,17 @@ def encode_entry(name, start, size, type_, parent):
     return name_b + struct.pack('<IIBB6x', start, size, type_, parent)
 
 
-def build():
-    entries = []        # (name, start_sector, size, type, parent_idx)
-    file_blobs = []     # raw bytes for each FILE entry, in entry order
+def build_image(directories, user_programs, raw_blobs, data_files,
+                 out_name, log_prefix):
+    """Generic build — takes its own file lists + output filename. Used
+    to produce fs.img (the boot disk) AND usbfs.img (the USB drive
+    image attached via -device usb-storage,drive=usbfs)."""
+    entries = []
+    file_blobs = []
     next_sector = FS_SUPER_SECTORS
 
-    # 1. Build the directory entries first so they get low indices
-    #    that downstream entries can reference.
     dir_idx_by_name = {}
-    for dname in DIRECTORIES:
+    for dname in directories:
         dir_idx_by_name[dname] = len(entries)
         entries.append((dname, 0, 0, FS_TYPE_DIR, FS_DIR_ROOT))
 
@@ -160,59 +164,46 @@ def build():
         file_blobs.append(padded)
         next_sector += len(padded) // SECTOR_SIZE
 
-    # 2. ELF-wrapped user programs.
-    for fs_name, bin_path, parent in USER_PROGRAMS:
+    for fs_name, bin_path, parent in user_programs:
         if not os.path.exists(bin_path):
             print(f"mkfs: {bin_path} not found — build user programs first",
-                  file=sys.stderr)
-            sys.exit(1)
+                  file=sys.stderr); sys.exit(1)
         raw = open(bin_path, 'rb').read()
         elf = make_elf(raw, USER_VA)
         add_file(fs_name, elf, len(elf), parent)
 
-    # 2b. Raw blobs that aren't ELF-wrapped (e.g. libc.bin).
-    for fs_name, src_path, parent in RAW_BLOBS:
+    for fs_name, src_path, parent in raw_blobs:
         if not os.path.exists(src_path):
-            print(f"mkfs: {src_path} not found", file=sys.stderr)
-            sys.exit(1)
+            print(f"mkfs: {src_path} not found", file=sys.stderr); sys.exit(1)
         raw = open(src_path, 'rb').read()
         add_file(fs_name, raw, len(raw), parent)
 
-    # 3. Raw data files.
-    for fs_name, src_path, parent in DATA_FILES:
+    for fs_name, src_path, parent in data_files:
         if not os.path.exists(src_path):
-            print(f"mkfs: {src_path} not found", file=sys.stderr)
-            sys.exit(1)
+            print(f"mkfs: {src_path} not found", file=sys.stderr); sys.exit(1)
         raw = open(src_path, 'rb').read()
         add_file(fs_name, raw, len(raw), parent)
 
     if len(entries) > FS_MAX_FILES:
         print(f"mkfs: {len(entries)} entries exceeds FS_MAX_FILES "
-              f"({FS_MAX_FILES})", file=sys.stderr)
-        sys.exit(1)
+              f"({FS_MAX_FILES})", file=sys.stderr); sys.exit(1)
 
-    # 4. Pack the superblock.
-    #    Sector 0: 8 magic + 4 file_count + 500 reserved
-    #    Sector 1: FS_MAX_FILES × 32-byte entries
     super_hdr = b'ADVENTFS' + struct.pack('<I', len(entries))
     super_hdr = super_hdr.ljust(SECTOR_SIZE, b'\x00')
 
     entry_blob = b''
     for (name, start, size, type_, parent) in entries:
         entry_blob += encode_entry(name, start, size, type_, parent)
-    # Pad remaining slots with zeroed FREE entries.
     entry_blob += b'\x00' * (FS_ENTRY_SIZE * (FS_MAX_FILES - len(entries)))
     entry_blob = entry_blob.ljust(FS_SUPER_SECTORS * SECTOR_SIZE - SECTOR_SIZE, b'\x00')
 
     fs = super_hdr + entry_blob + b''.join(file_blobs)
-    open(OUT_IMG, 'wb').write(fs)
+    open(out_name, 'wb').write(fs)
 
-    print(f"  FS    {len(fs)} bytes ({len(fs) // SECTOR_SIZE} sectors)")
-    print(f"        layout: superblock @ sector 0..{FS_SUPER_SECTORS - 1}, "
-          f"data @ sector {FS_SUPER_SECTORS}+")
+    print(f"  {log_prefix:5} {len(fs)} bytes ({len(fs) // SECTOR_SIZE} sectors)")
     for i, (name, start, size, type_, parent) in enumerate(entries):
         kind = 'DIR ' if type_ == FS_TYPE_DIR else 'FILE'
-        parent_str = '/' if parent == FS_DIR_ROOT else f"/{DIRECTORIES[parent]}"
+        parent_str = '/' if parent == FS_DIR_ROOT else f"/{directories[parent]}"
         if type_ == FS_TYPE_FILE:
             print(f"        [{i:2}] {kind} {parent_str}/{name:<12} "
                   f"sec {start}  ({size} bytes)")
@@ -220,5 +211,46 @@ def build():
             print(f"        [{i:2}] {kind} {parent_str}/{name}")
 
 
+def build():
+    """Build the boot disk filesystem image (fs.img)."""
+    print(f"        layout: superblock @ sector 0..{FS_SUPER_SECTORS - 1}, "
+          f"data @ sector {FS_SUPER_SECTORS}+")
+    build_image(DIRECTORIES, USER_PROGRAMS, RAW_BLOBS, DATA_FILES,
+                'fs.img', 'FS')
+
+
+def build_usb():
+    """Build a small AdventFS image (usbfs.img) that QEMU exposes as
+    a USB Mass Storage device. Just enough content for usbtest to
+    find the AdventFS magic on sector 0 and a single readable file."""
+    readme_path = 'fs/usb-readme.txt'
+    if not os.path.exists(readme_path):
+        os.makedirs(os.path.dirname(readme_path), exist_ok=True)
+        open(readme_path, 'w').write(
+            "Hello from a USB Mass Storage device!\n\n"
+            "QEMU exposes this file via:\n"
+            "    -drive id=usbfs,file=usbfs.img,format=raw,if=none\n"
+            "    -device usb-storage,drive=usbfs\n\n"
+            "AdventOS's UHCI driver enumerates the device, the Bulk-Only\n"
+            "Transport layer wraps SCSI commands, and the new sys_block_*\n"
+            "syscalls expose block-level access to user space.\n"
+        )
+    build_image(directories=[],
+                user_programs=[],
+                raw_blobs=[],
+                data_files=[('readme.txt', readme_path, None)],
+                out_name='usbfs.img',
+                log_prefix='USB')
+
+    # Pad usbfs.img up to 256 KiB (512 sectors) so the SCSI READ
+    # CAPACITY result is sensible and write tests at LBA 100 fit.
+    target = 256 * 1024
+    cur = os.path.getsize('usbfs.img')
+    if cur < target:
+        with open('usbfs.img', 'ab') as f:
+            f.write(b'\x00' * (target - cur))
+
+
 if __name__ == '__main__':
     build()
+    build_usb()

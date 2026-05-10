@@ -30,11 +30,14 @@
 #include "kmalloc.h"
 #include "pit.h"
 
-/* Forward decl from usb_hid.c so we don't need a separate header. */
+/* Forward decls from class drivers — keep them here to avoid a
+ * separate header per class. */
 void usb_hid_attach(struct usb_device *d,
                     const uint8_t *cfg_buf, int cfg_len,
                     int iface_num, int proto, int ep_addr,
                     int ep_max, int ep_interval);
+void usb_msc_attach(struct usb_device *d,
+                    int iface_num, int ep_in, int ep_out, int ep_max);
 
 /* Up to 4 simultaneous USB devices total (2 ports × possible
  * future hubs). Plenty for the demo. */
@@ -160,6 +163,70 @@ static int find_hid_interface(const uint8_t *cfg, int cfg_len,
     return 0;
 }
 
+/* Same idea for USB Mass Storage Class — we need an interface with
+ * bInterfaceClass=0x08 plus a bulk-IN and bulk-OUT endpoint pair.
+ * Returns 1 on success and fills iface_num + ep_in + ep_out + ep_max
+ * (the latter being min(in_max, out_max), which is always 64 for
+ * full-speed BOT in practice). */
+static int find_msc_interface(const uint8_t *cfg, int cfg_len,
+                              int *iface_num,
+                              int *ep_in, int *ep_out, int *ep_max)
+{
+    int o = 0;
+    int in_msc = 0;
+    int cur_iface = -1;
+    int found_in = 0, found_out = 0;
+    int max_in = 0, max_out = 0;
+
+    while (o + 2 <= cfg_len) {
+        uint8_t blen  = cfg[o];
+        uint8_t btype = cfg[o + 1];
+        if (blen == 0 || o + blen > cfg_len) return 0;
+
+        if (btype == USB_DT_INTERFACE && blen >= 9) {
+            /* Crossing into a new interface — if we'd accumulated
+             * a complete IN+OUT pair on the previous one, return now. */
+            if (in_msc && found_in && found_out) {
+                *iface_num = cur_iface;
+                *ep_in     = found_in;
+                *ep_out    = found_out;
+                *ep_max    = max_in < max_out ? max_in : max_out;
+                if (*ep_max == 0) *ep_max = 64;
+                return 1;
+            }
+            const struct usb_interface_descriptor *id =
+                (const struct usb_interface_descriptor *)(cfg + o);
+            in_msc = (id->bInterfaceClass == USB_CLASS_MASS_STORAGE);
+            cur_iface = id->bInterfaceNumber;
+            found_in = found_out = 0;
+            max_in = max_out = 0;
+        } else if (btype == USB_DT_ENDPOINT && blen >= 7 && in_msc) {
+            const struct usb_endpoint_descriptor *ed =
+                (const struct usb_endpoint_descriptor *)(cfg + o);
+            if ((ed->bmAttributes & USB_EP_TYPE_MASK) == USB_EP_TYPE_BULK) {
+                if (ed->bEndpointAddress & USB_EP_DIR_MASK) {
+                    found_in  = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_in    = ed->wMaxPacketSize;
+                } else {
+                    found_out = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_out   = ed->wMaxPacketSize;
+                }
+            }
+        }
+        o += blen;
+    }
+    /* Tail case: last interface in the blob was MSC and complete. */
+    if (in_msc && found_in && found_out) {
+        *iface_num = cur_iface;
+        *ep_in     = found_in;
+        *ep_out    = found_out;
+        *ep_max    = max_in < max_out ? max_in : max_out;
+        if (*ep_max == 0) *ep_max = 64;
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- Per-device enumeration ------------------------------------ */
 
 static struct usb_device *alloc_device(int low_speed) {
@@ -258,18 +325,24 @@ static void enumerate_one(int port_idx, int low_speed) {
         return;
     }
 
-    /* Step 8: bind a class driver. For now, only HID. */
+    /* Step 8: bind a class driver. */
     int iface, proto, ep, ep_max, ep_int;
+    int ep_in, ep_out;
+
     if (find_hid_interface(full_cfg, total_len,
                            &iface, &proto, &ep, &ep_max, &ep_int)) {
         kprintf("[usb] addr %d: HID iface=%d proto=%d ep=IN%d max=%d int=%dms\n",
                 d->addr, iface, proto, ep, ep_max, ep_int);
         usb_hid_attach(d, full_cfg, total_len,
                        iface, proto, ep, ep_max, ep_int);
-        /* HID driver keeps the cfg buffer if it needs to. We
-         * intentionally don't free here. */
+    } else if (find_msc_interface(full_cfg, total_len,
+                                  &iface, &ep_in, &ep_out, &ep_max)) {
+        kprintf("[usb] addr %d: MSC iface=%d  ep_in=IN%d  ep_out=OUT%d  max=%d\n",
+                d->addr, iface, ep_in, ep_out, ep_max);
+        usb_msc_attach(d, iface, ep_in, ep_out, ep_max);
+        kfree(full_cfg);
     } else {
-        kprintf("[usb] addr %d: no HID interface — leaving idle\n", d->addr);
+        kprintf("[usb] addr %d: no recognized class — leaving idle\n", d->addr);
         kfree(full_cfg);
     }
 }

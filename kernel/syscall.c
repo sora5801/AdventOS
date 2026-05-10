@@ -25,6 +25,7 @@
 #include "mouse.h"
 #include "ac97.h"
 #include "bkl.h"
+#include "blkdev.h"
 
 /* Allocate the lowest free fd >= 3 in the calling task's table.
  * Returns the fd index or -1 if the table is full. */
@@ -573,6 +574,57 @@ void syscall_dispatch(struct registers *r) {
             /* ac97_play copies — userspace ptr deref happens here, in
              * the active (user) PD context. */
             ret = ac97_play(upcm, n);
+            break;
+        }
+        case SYS_BLOCK_INFO: {
+            uint32_t idx = a;
+            struct sys_block_info *uout = (struct sys_block_info *)(uintptr_t)b;
+            struct blkdev *d = blkdev_get((int)idx);
+            if (!d || !uout) { ret = -1; break; }
+            uout->block_size = d->block_size;
+            uout->n_blocks   = d->n_blocks;
+            for (int i = 0; i < 16; i++) uout->name[i] = d->name[i];
+            ret = 0;
+            break;
+        }
+        case SYS_BLOCK_READ:
+        case SYS_BLOCK_WRITE: {
+            const struct sys_block_args *ua =
+                (const struct sys_block_args *)(uintptr_t)a;
+            if (!ua) { ret = -1; break; }
+            uint32_t idx = ua->dev_idx;
+            uint32_t lba = ua->lba;
+            uint32_t n   = ua->n_blocks;
+            void    *ubuf = ua->buf;
+            struct blkdev *d = blkdev_get((int)idx);
+            if (!d || !ubuf || n == 0 || n > 32) { ret = -1; break; }
+            if (lba + n > d->n_blocks)         { ret = -1; break; }
+            if ((uintptr_t)ubuf >= 0xC0000000u){ ret = -1; break; }
+
+            /* Bounce through a kmalloc'd kernel buffer. The USB MSC
+             * driver's underlying UHCI bulk transfer DMAs by physical
+             * address, and user pages don't have phys==virt the way
+             * kernel pages do. ATA goes through PIO and would tolerate
+             * the user pointer directly, but using one path keeps the
+             * code uniform. */
+            uint32_t bytes = n * d->block_size;
+            void *kbuf = kmalloc(bytes);
+            if (!kbuf) { ret = -1; break; }
+
+            if (r->eax == SYS_BLOCK_READ) {
+                ret = d->read(d, lba, n, kbuf);
+                if (ret == 0) {
+                    uint8_t *src = (uint8_t *)kbuf;
+                    uint8_t *dst = (uint8_t *)ubuf;
+                    for (uint32_t i = 0; i < bytes; i++) dst[i] = src[i];
+                }
+            } else {
+                const uint8_t *src = (const uint8_t *)ubuf;
+                uint8_t *dst = (uint8_t *)kbuf;
+                for (uint32_t i = 0; i < bytes; i++) dst[i] = src[i];
+                ret = d->write(d, lba, n, kbuf);
+            }
+            kfree(kbuf);
             break;
         }
         case SYS_FB_MMAP: {

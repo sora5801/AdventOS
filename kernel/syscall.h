@@ -75,6 +75,27 @@
                               at 48 kHz. Buffer is COPIED into kernel
                               staging — caller can reuse on return. */
 
+#define SYS_BLOCK_INFO   57 /* (eax=57, ebx=dev_idx, ecx=struct sys_block_info *)
+                              -> 0 on success, -1 if dev_idx out of range.
+                              Fills *out with block_size + n_blocks + name. */
+#define SYS_BLOCK_READ   58 /* (eax=58, ebx=struct sys_block_args *) -> 0 / -1.
+                              Reads n_blocks blocks starting at lba into buf. */
+#define SYS_BLOCK_WRITE  59 /* (eax=59, ebx=struct sys_block_args *) -> 0 / -1.
+                              Writes n_blocks blocks from buf to lba. */
+
+/* User/kernel ABI for the SYS_BLOCK_* calls. */
+struct sys_block_info {
+    uint32_t block_size;
+    uint32_t n_blocks;
+    char     name[16];
+};
+struct sys_block_args {
+    uint32_t dev_idx;
+    uint32_t lba;
+    uint32_t n_blocks;
+    void    *buf;
+};
+
 void syscall_dispatch(struct registers *r);
 
 #endif

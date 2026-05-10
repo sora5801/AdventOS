@@ -685,6 +685,19 @@ static void selftest(void) {
         printf("  httpsget exit code = %d\n", code2);
     }
 
+    puts("[t28] USB Mass Storage: SCSI READ/WRITE round-trip via blkdev\n");
+    {
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv2[] = { "usbtest.elf", 0 };
+            sys_exec("usbtest.elf", argv2);
+            sys_exit(127);
+        }
+        int code = -1;
+        sys_wait(&code);
+        printf("  usbtest exit code = %d  (0 = USB pass / no USB device)\n", code);
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

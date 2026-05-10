@@ -54,6 +54,30 @@ int uhci_control_transfer(uint8_t addr, int low_speed, int ep0_max,
 int uhci_int_in(uint8_t addr, int low_speed, int ep_max,
                 int ep, void *buf, int max_len, int *toggle);
 
+/* Bulk-IN / bulk-OUT transfers, used by USB Mass Storage.
+ *
+ * The transfer fragments across multiple TDs: each TD carries up
+ * to `ep_max` bytes (typically 64 for full-speed bulk). Toggle
+ * alternates between TDs and persists across calls (USB §5.5.4
+ * — the toggle state is per-endpoint, owned by the host).
+ *
+ *   addr      USB address of the device
+ *   ep_max    bulk endpoint max-packet (from endpoint descriptor)
+ *   ep        bulk endpoint number (1..15)
+ *   buf       host buffer (must be physically contiguous; we
+ *             pass kmalloc'd memory in MSC, which is identity-
+ *             mapped so it satisfies that)
+ *   len       total bytes to transfer
+ *   *toggle   in/out: the next DATA0/1 to use; updated to the
+ *             value the device should expect on the NEXT bulk
+ *             call to this endpoint
+ *
+ * Returns total bytes transferred (= len on success), or USB_ERR_*. */
+int uhci_bulk_in (uint8_t addr, int ep_max, int ep,
+                  void *buf, int len, int *toggle);
+int uhci_bulk_out(uint8_t addr, int ep_max, int ep,
+                  const void *buf, int len, int *toggle);
+
 /* Reset+probe the root-hub ports. For each connected port, returns
  * 1 in `connected[i]` and the low-speed flag in `low_speed[i]`.
  * `connected`/`low_speed` arrays must hold at least `*n_ports`

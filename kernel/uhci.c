@@ -450,3 +450,99 @@ int uhci_int_in(uint8_t addr, int low_speed, int ep_max,
     *toggle ^= 1;
     return (int)(actlen_field + 1);
 }
+
+/* ---- Bulk transfers (USB Mass Storage uses these) -------------- */
+
+/* Generic full-direction bulk transfer. `pid` is UHCI_PID_IN or
+ * UHCI_PID_OUT. Builds a TD chain of up to UHCI_TD_POOL_SIZE TDs,
+ * each carrying ep_max bytes (last TD carries the tail), with the
+ * data toggle alternating per TD and the depth bit set so the
+ * controller follows the chain in order.
+ *
+ * The chain's last TD has IOC set so wait_chain detects completion
+ * by polling that TD's ACTIVE bit. On success returns `len`; on
+ * partial success (some TDs ran but a later one stalled), returns
+ * the cumulative ActLen of the TDs that did complete. */
+static int bulk_xfer(uint8_t pid, uint8_t addr, int ep_max, int ep,
+                     uint8_t *buf, int len, int *toggle)
+{
+    if (!g_present) return USB_ERR_OTHER;
+    if (len <= 0) return 0;
+    if (ep_max <= 0) ep_max = 64;
+
+    int n_tds = (len + ep_max - 1) / ep_max;
+    if (n_tds > UHCI_TD_POOL_SIZE) {
+        /* Loop in chunks if the transfer is bigger than what one
+         * fill-the-pool can carry. (One BOT data-phase chunk is
+         * typically a single 512-byte SCSI block, ie 8 TDs at
+         * ep_max=64 — well under the pool.) */
+        int done = 0;
+        while (done < len) {
+            int chunk = (len - done) < UHCI_TD_POOL_SIZE * ep_max
+                          ? (len - done)
+                          : UHCI_TD_POOL_SIZE * ep_max;
+            int rc = bulk_xfer(pid, addr, ep_max, ep,
+                               buf + done, chunk, toggle);
+            if (rc < 0) return rc;
+            done += rc;
+            if (rc < chunk) break;     /* short — stop */
+        }
+        return done;
+    }
+
+    int t = *toggle;
+    int remaining = len;
+    uint8_t *p = buf;
+
+    for (int i = 0; i < n_tds; i++) {
+        int chunk = remaining > ep_max ? ep_max : remaining;
+        struct uhci_td *td = &g_td_pool[i];
+        td->status = make_status(/*low_speed=*/0, /*ioc=*/(i == n_tds - 1));
+        td->token  = make_token(pid, addr, ep, t, chunk);
+        td->buffer = phys(p);
+        p         += chunk;
+        remaining -= chunk;
+        t         ^= 1;
+    }
+    /* Chain links — depth-first. */
+    for (int i = 0; i < n_tds - 1; i++) {
+        g_td_pool[i].link = phys(&g_td_pool[i + 1]) | UHCI_LINK_DEPTH;
+    }
+    g_td_pool[n_tds - 1].link = UHCI_LINK_TERMINATE;
+
+    g_qh->element_link = phys(&g_td_pool[0]);
+
+    /* Bulk transfers can take longer than control or interrupt
+     * (large data phase). 500 ms is generous. */
+    int rc = wait_chain(&g_td_pool[n_tds - 1], 500);
+    g_qh->element_link = UHCI_LINK_TERMINATE;
+
+    /* Compute total actual bytes transferred by walking the TDs.
+     * Even on a STALL, the TDs that did complete have their actlen
+     * field set; the TDs that didn't run still have ACTIVE=1. */
+    int got = 0;
+    for (int i = 0; i < n_tds; i++) {
+        if (g_td_pool[i].status & UHCI_TD_STS_ACTIVE) break;
+        uint32_t af = UHCI_TD_STS_ACTLEN(g_td_pool[i].status);
+        if (af == 0x7FF) break;
+        got += (int)(af + 1);
+        /* Toggle advanced for every TD that completed. */
+        *toggle ^= 1;
+    }
+
+    if (rc == USB_OK) return len;
+    if (got > 0)      return got;     /* short / partial */
+    return rc;
+}
+
+int uhci_bulk_in(uint8_t addr, int ep_max, int ep,
+                 void *buf, int len, int *toggle) {
+    return bulk_xfer(UHCI_PID_IN, addr, ep_max, ep, (uint8_t *)buf, len, toggle);
+}
+int uhci_bulk_out(uint8_t addr, int ep_max, int ep,
+                  const void *buf, int len, int *toggle) {
+    /* bulk_xfer doesn't write through `buf` for OUT transfers, so
+     * casting away const is safe. */
+    return bulk_xfer(UHCI_PID_OUT, addr, ep_max, ep,
+                     (uint8_t *)(uintptr_t)buf, len, toggle);
+}

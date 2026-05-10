@@ -84,6 +84,22 @@ typedef unsigned int   size_t;
 #define SYS_MOUSE_STATE  54
 #define SYS_FB_MMAP      55
 #define SYS_AUDIO_PLAY   56
+#define SYS_BLOCK_INFO   57
+#define SYS_BLOCK_READ   58
+#define SYS_BLOCK_WRITE  59
+
+/* Block-device ABI — must match kernel/syscall.h exactly. */
+struct sys_block_info {
+    unsigned int block_size;
+    unsigned int n_blocks;
+    char         name[16];
+};
+struct sys_block_args {
+    unsigned int dev_idx;
+    unsigned int lba;
+    unsigned int n_blocks;
+    void        *buf;
+};
 
 /* TTY mode flags — must agree with kernel/tty.h. */
 #define TTY_ICANON   0x01
@@ -190,6 +206,15 @@ void    *sys_fb_mmap(void);
  * device. The buffer is COPIED into kernel staging — caller can
  * reuse on return. */
 int      sys_audio_play(const void *pcm, int n);
+
+/* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
+ * appear at higher indices once enumerated. SYS_BLOCK_INFO returns
+ * the device's block_size + n_blocks + name; READ/WRITE transfer
+ * `n` blocks starting at `lba` from/to `buf`. Returns 0/-1.
+ * `n` is capped at 32 blocks per call. */
+int      sys_block_info (int dev_idx, struct sys_block_info *out);
+int      sys_block_read (int dev_idx, unsigned int lba, unsigned int n, void *buf);
+int      sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const void *buf);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

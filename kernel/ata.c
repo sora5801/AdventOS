@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "blkdev.h"
 #include "spinlock.h"
 #include "../include/io.h"
 
@@ -54,11 +55,44 @@ static int ata_wait_drq(void) {
     return -1;
 }
 
+/* ---- blkdev adapter ------------------------------------------- */
+
+static int ata_blkdev_read(struct blkdev *d, uint32_t lba, uint32_t n, void *buf) {
+    (void)d;
+    uint8_t *p = (uint8_t *)buf;
+    for (uint32_t i = 0; i < n; i++) {
+        if (ata_read_sector(lba + i, p + i * 512) != 0) return -1;
+    }
+    return 0;
+}
+static int ata_blkdev_write(struct blkdev *d, uint32_t lba, uint32_t n, const void *buf) {
+    (void)d;
+    const uint8_t *p = (const uint8_t *)buf;
+    for (uint32_t i = 0; i < n; i++) {
+        if (ata_write_sector(lba + i, p + i * 512) != 0) return -1;
+    }
+    return 0;
+}
+
+static struct blkdev g_ata_blkdev = {
+    .name        = "ata0",
+    .block_size  = ATA_SECTOR_SIZE,
+    /* IDENTIFY would give us the real LBA28 size; for the demo
+     * disk (~140 MiB worth of sectors per QEMU's default), we just
+     * declare a large bound. The kernel never reads past the FS
+     * area set up by mkfs.py, and bcache doesn't range-check. */
+    .n_blocks    = 0x100000,    /* 512 MiB worth of sectors */
+    .read        = ata_blkdev_read,
+    .write       = ata_blkdev_write,
+    .driver_data = 0,
+};
+
 void ata_init(void) {
     spin_lock_init(&g_lock);
     /* Mask the controller's IRQ line — we'll only use polling. Bit 1
      * of the device-control register is nIEN. */
     outb(ATA_PRIMARY_CTRL, 0x02);
+    blkdev_register(&g_ata_blkdev);
 }
 
 static int ata_setup_lba28(uint32_t lba) {
