@@ -93,10 +93,14 @@ void sha256_update(struct sha256 *s, const void *data, size_t n) {
         for (uint32_t i = 0; i < take; i++) s->buf[s->buf_len + i] = p[i];
         s->buf_len += take;
         p += take; n -= take;
-        if (s->buf_len == 64) {
-            sha256_compress(s->state, s->buf);
-            s->buf_len = 0;
-        }
+        /* Partial block — we're done. Falling through to the
+         * trailing "buf_len = n" would WIPE the partial buffer
+         * when n hit 0. (Latent here since TLS transcript
+         * updates always carry data, but Ed25519's sha512 hit
+         * this with update(prefix, 32) + update(empty_msg, 0).) */
+        if (s->buf_len < 64) return;
+        sha256_compress(s->state, s->buf);
+        s->buf_len = 0;
     }
     /* Direct-from-input compression. */
     while (n >= 64) {

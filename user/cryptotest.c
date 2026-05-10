@@ -6,6 +6,7 @@
  */
 #include "libuser.h"
 #include "../libcrypto/crypto.h"
+#include "../libcrypto/sha512.h"
 
 static int hexbyte(const char *s) {
     int hi = (s[0] >= 'a') ? s[0] - 'a' + 10 : s[0] - '0';
@@ -128,6 +129,56 @@ int main(void) {
         int eq = (r == 0);
         for (int i = 0; i < 20; i++) eq &= (d2[i] == p2[i]);
         CHECK(eq, "GCM round-trip");
+    }
+
+    /* ---- SHA-512 (RFC 6234 §8.4) ------------------------------- */
+    puts("== SHA-512 ==\n");
+    {
+        unsigned char h[64];
+        sha512("abc", 3, h);
+        CHECK(hex_eq(h,
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", 64),
+              "SHA512(\"abc\")");
+        sha512("", 0, h);
+        CHECK(hex_eq(h,
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e", 64),
+              "SHA512(\"\")");
+    }
+
+    /* ---- Ed25519 (RFC 8032 §7.1, Test 1) ----------------------- */
+    puts("== Ed25519 ==\n");
+    {
+        const char *seed_hex =
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        unsigned char seed[32];
+        for (int i = 0; i < 32; i++) seed[i] = hexbyte(seed_hex + 2*i);
+
+        unsigned char pk[32], sk[64];
+        ed25519_keypair_from_seed(pk, sk, seed);
+        CHECK(hex_eq(pk,
+                "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", 32),
+              "RFC 8032 test 1 public key");
+
+        /* RFC 8032 deterministic signature for the empty message.
+         * If this matches, sign + verify + the SHA-512 streaming
+         * fix all line up with the spec — and the cert we'll
+         * sign in CertificateVerify will satisfy curl's
+         * canonical verify. */
+        unsigned char sig[64];
+        ed25519_sign(sig, (const unsigned char *)"", 0, sk);
+        CHECK(hex_eq(sig,
+                "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+                "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", 64),
+              "RFC 8032 test 1 signature");
+        int v = ed25519_verify(sig, (const unsigned char *)"", 0, pk);
+        CHECK(v == 0, "Ed25519 verify RFC signature");
+
+        /* Bad signature: flip a bit, expect rejection. */
+        sig[0] ^= 0x01;
+        v = ed25519_verify(sig, (const unsigned char *)"", 0, pk);
+        CHECK(v != 0, "Ed25519 reject tampered signature");
     }
 
     /* ---- X25519 (RFC 7748 §6.1) -------------------------------- */

@@ -97,4 +97,16 @@ void x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]);
  * is "fine for a demo" — not for real secrets. Documented in t26. */
 void rand_bytes(uint8_t *out, size_t n);
 
+/* ---- Ed25519 (RFC 8032) ----------------------------------------- */
+/* Sign uses the standard "expanded secret key" format: 64 bytes
+ * where the low 32 are the seed and the high 32 are the cached
+ * public key. Generated from a 32-byte seed via _from_seed(). */
+void ed25519_keypair_from_seed(uint8_t pk[32], uint8_t sk[64], const uint8_t seed[32]);
+void ed25519_sign(uint8_t sig[64],
+                  const uint8_t *msg, size_t msg_len,
+                  const uint8_t sk[64]);
+int  ed25519_verify(const uint8_t sig[64],
+                    const uint8_t *msg, size_t msg_len,
+                    const uint8_t pk[32]);
+
 #endif

@@ -3,43 +3,43 @@
  *
  * Cipher suite (only one): TLS_AES_128_GCM_SHA256
  * Key exchange (only one): X25519 ECDHE
- * Authentication (only one): pre-shared key (PSK) — no X.509
- * Versions (only one):       TLS 1.3
+ * Signature scheme:        Ed25519 (RFC 8410 — and the only thing
+ *                          we have a working sign/verify for).
+ * Versions (only one):     TLS 1.3
  *
- * Wire format mostly mirrors RFC 8446 §5 (record layer), §4.1.2/3
- * (ClientHello/ServerHello sub-message structure), §4.4.4 (Finished),
- * §7.1 (key schedule). Simplifications relative to real TLS 1.3:
+ * Two server modes:
  *
- *   - No certificate / CertificateVerify (PSK only).
- *   - Single hardcoded cipher suite, version, and named group:
- *     no extensions for negotiation, no HelloRetryRequest.
- *   - ClientHello / ServerHello don't include a session_id, the
- *     legacy compression byte, or any extensions — body is purely
- *     {random, psk_id_len, psk_id, x25519_public}.
- *   - PSK binder is NOT verified (real TLS 1.3 binds the PSK to
- *     the ClientHello transcript via HMAC; we skip — the ECDHE
- *     shared secret already provides confidentiality and the
- *     transcript hash protection comes from Finished).
- *   - Single connection, no resumption, no 0-RTT, no post-handshake.
+ *   1. tls_server_handshake_psk  — original PSK flow from session 36.
+ *      ClientHello carries PSK identity inline; no extensions, no
+ *      certificates. Used by httpsget for the OS↔OS demo.
  *
- * What IS RFC-faithful: the cryptography. SHA-256, HMAC, HKDF,
- * AES-128-GCM, X25519, the TLS 1.3 key schedule (Early/Handshake/
- * Master secrets, the "tls13 " HKDF label prefix, the c_hs_traffic
- * / s_hs_traffic / c_ap_traffic / s_ap_traffic secrets), the
- * AEAD nonce construction (sequence ^ write_iv), the additional-
- * data layout (5-byte record header).
+ *   2. tls_server_handshake_cert — full RFC 8446 cert flow with
+ *      real ClientHello extensions, EncryptedExtensions, Certificate,
+ *      CertificateVerify, Finished. This is what curl talks.
+ *
+ * Both share record I/O (send_record, send_encrypted, recv_record),
+ * key schedule (HKDF-Extract/Expand-Label, Derive-Secret), and
+ * AEAD nonce construction (sequence ^ write_iv).
+ *
+ * The cert flow handles middlebox-compatibility ChangeCipherSpec
+ * records (RFC 8446 Appendix D.4): server sends one after its
+ * ServerHello, ignores any received from the client.
  */
 #ifndef ADVENTOS_TLS_H
 #define ADVENTOS_TLS_H
 
 #include "crypto.h"
 
+#define TLS_REC_CHANGE_CIPHER 20
+#define TLS_REC_ALERT         21
 #define TLS_REC_HANDSHAKE     22
 #define TLS_REC_APP_DATA      23
-#define TLS_REC_ALERT         21
 
 #define TLS_HS_CLIENT_HELLO    1
 #define TLS_HS_SERVER_HELLO    2
+#define TLS_HS_ENCRYPTED_EXTS  8
+#define TLS_HS_CERTIFICATE    11
+#define TLS_HS_CERT_VERIFY    15
 #define TLS_HS_FINISHED       20
 
 #define TLS_AES_KEY_LEN       16
@@ -47,13 +47,12 @@
 #define TLS_TAG_LEN           16
 #define TLS_HASH_LEN          32
 
-/* Maximum TLS record fragment. Real TLS 1.3 caps at 2^14 + 256;
- * we run on a 16-task system with a 16 KiB user stack — and the
- * record buffers live ON the stack of the handshake/send/recv
- * functions. 1.5 KiB record + handshake-message buffers + AES
- * round keys all need to fit. The HTTPS demo's largest message
- * (the static reply body) is ~600 bytes; 1024 leaves headroom. */
-#define TLS_MAX_FRAGMENT      1024
+/* Bumped from 1024 to 2048: a real ClientHello from curl can hit
+ * ~500 bytes (ALPN, SNI, lots of sig schemes, lots of groups), and
+ * our server-side encrypted flight (EncryptedExtensions + Certificate
+ * + CertificateVerify + Finished) is ~440 bytes plaintext. 2048
+ * leaves headroom and keeps everything in one record per direction. */
+#define TLS_MAX_FRAGMENT      2048
 
 struct tls_keys {
     uint8_t key[TLS_AES_KEY_LEN];
@@ -73,11 +72,20 @@ struct tls_conn {
     uint8_t  our_priv[32];
     uint8_t  ecdhe_shared[32];
 
-    /* PSK */
+    /* Echoed legacy_session_id from ClientHello (cert flow only). */
+    uint8_t  session_id[32];
+    int      session_id_len;
+
+    /* PSK (psk-flow only — ignored in cert flow) */
     const uint8_t *psk;
     size_t         psk_len;
     const char    *psk_id;
     size_t         psk_id_len;
+
+    /* Certificate (cert-flow only — set by caller before handshake) */
+    const uint8_t *cert_der;
+    int            cert_der_len;
+    const uint8_t *server_sk;          /* 64-byte Ed25519 sk */
 
     /* Key schedule outputs */
     uint8_t  early_secret      [32];
@@ -94,24 +102,31 @@ struct tls_conn {
 
     /* Running transcript hash. */
     struct sha256 transcript;
-
-    /* Receive buffer (for reassembling a record from the TCP stream). */
-    uint8_t  rxbuf[TLS_MAX_FRAGMENT + 64];
-    size_t   rxlen;
 };
 
-/* Returns 0 on success. fd is a connected TCP socket (server-side
- * comes from accept(); client-side from connect()). */
-int tls_server_handshake(struct tls_conn *c, int fd,
-                         const uint8_t *psk, size_t psk_len,
-                         const char *psk_id);
-int tls_client_handshake(struct tls_conn *c, int fd,
-                         const uint8_t *psk, size_t psk_len,
-                         const char *psk_id);
+/* PSK-mode handshake (session 36 flow, used by httpsget demo). */
+int tls_server_handshake_psk(struct tls_conn *c, int fd,
+                             const uint8_t *psk, size_t psk_len,
+                             const char *psk_id);
+int tls_client_handshake_psk(struct tls_conn *c, int fd,
+                             const uint8_t *psk, size_t psk_len,
+                             const char *psk_id);
+
+/* Cert-mode handshake (RFC 8446 with X.509 + CertificateVerify).
+ * Caller must populate c->cert_der / cert_der_len / server_sk
+ * before calling — these are typically static state in the
+ * server program (e.g., httpsd). */
+int tls_server_handshake_cert(struct tls_conn *c, int fd);
+
+/* Cert-mode CLIENT — speaks the same wire format curl does, so
+ * httpsget can talk to httpsd over the cert flow. Accepts any
+ * server cert without validation (i.e., -k semantics) — this is
+ * a demo TLS client, not a security-critical CA-validating one. */
+int tls_client_handshake_cert(struct tls_conn *c, int fd);
 
 /* Send/receive application data. tls_send returns bytes sent or
  * -1; tls_recv returns bytes received, 0 on close, -1 on error
- * (incl. AEAD tag mismatch). */
+ * (including AEAD tag mismatch). */
 int tls_send(struct tls_conn *c, const void *data, int n);
 int tls_recv(struct tls_conn *c, void *out, int max_n);
 
