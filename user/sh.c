@@ -638,6 +638,36 @@ static void selftest(void) {
         int code; sys_wait(&code);
     }
 
+    puts("[t26] libcrypto: SHA-256 / HMAC / HKDF / AES-GCM / X25519 vectors\n");
+    {
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv2[] = { "cryptotest.elf", 0 };
+            sys_exec("cryptotest.elf", argv2);
+            sys_exit(127);
+        }
+        int code = -1;
+        sys_wait(&code);
+        printf("  cryptotest exit code = %d  (0 = all pass)\n", code);
+
+        /* End-to-end: have httpsget connect to httpsd (started by
+         * init at boot) and exchange one HTTPS request/response.
+         * If both sides agree on the PSK and ECDHE, both Finished
+         * messages verify, AEAD records exchange — we'll see the
+         * server's reply printed. Otherwise the handshake returns
+         * a negative rc which httpsget reports. */
+        puts("\n  end-to-end TLS 1.3 handshake (PSK + X25519 ECDHE):\n");
+        int pid2 = sys_fork();
+        if (pid2 == 0) {
+            const char *argv2[] = { "httpsget.elf", 0 };
+            sys_exec("httpsget.elf", argv2);
+            sys_exit(127);
+        }
+        int code2 = -1;
+        sys_wait(&code2);
+        printf("  httpsget exit code = %d\n", code2);
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

@@ -33,6 +33,7 @@ USER_CFLAGS=(
     -fno-omit-frame-pointer
     -mno-mmx -mno-sse -mno-sse2 -mno-sse3 -mno-3dnow -mno-avx
     -mgeneral-regs-only
+    -mno-stack-arg-probe          # don't emit __chkstk for big frames
     -nostdlib -nostartfiles
     -O2 -std=gnu11
     -Wall -Wextra -Wno-unused-parameter
@@ -85,6 +86,16 @@ done
     libc/_obj/libc.elf libc/_obj/libc.bin
 echo "        libc.bin = $(stat -c%s libc/_obj/libc.bin) bytes"
 
+echo "[5b/7] build libcrypto (static, statically linked into TLS programs)"
+mkdir -p libcrypto/_obj
+LIBCRYPTO_OBJS=()
+for src in libcrypto/*.c; do
+    obj="libcrypto/_obj/$(basename "${src%.c}").o"
+    "$CC" "${USER_CFLAGS[@]}" -c -o "$obj" "$src"
+    LIBCRYPTO_OBJS+=("$obj")
+done
+echo "        compiled $(echo ${LIBCRYPTO_OBJS[@]} | wc -w) crypto objects"
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
@@ -96,6 +107,22 @@ for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+# Crypto-using programs link against the libcrypto static archive
+# in addition to libuser. Kept separate from USER_PROGS so the
+# basic programs don't pay the libcrypto link cost.
+TLS_PROGS=(cryptotest httpsd httpsget)
+for name in "${TLS_PROGS[@]}"; do
+    src="user/${name}.c"
+    if [ ! -f "$src" ]; then continue; fi
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
+        "${LIBCRYPTO_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"

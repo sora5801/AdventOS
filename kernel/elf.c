@@ -126,25 +126,45 @@ int elf_load(int fs_idx, struct elf_load_result *out) {
         return -107;
     }
 
-    /* 4. Allocate a one-page user stack. */
-    void *stack_page = pmm_alloc_page();
-    if (!stack_page) {
-        paging_destroy_user_pd(user_pd);
-        return -300;
-    }
-    memset(stack_page, 0, PAGE_SIZE);
-    if (paging_map_in(user_pd, USER_STACK_VA, (uintptr_t)stack_page,
-                      PTE_USER | PTE_WRITABLE) != 0) {
-        pmm_free_page(stack_page);
-        paging_destroy_user_pd(user_pd);
-        return -301;
+    /* 4. Allocate a multi-page user stack. Bumped from 1 page to 4
+     * pages (16 KiB) in session 36 — TLS handshake code allocates
+     * 4 KiB record buffers plus call-chain frames; a single-page
+     * stack overflows into unmapped memory at 0x400FF000 just below
+     * USER_STACK_VA. The previous "1 page is enough for shells and
+     * coreutils" assumption stops holding once we add crypto. The
+     * stack is allocated as four contiguous pages (NOT contiguous
+     * physical pages — they're separately pmm_alloc'd, but VA is
+     * contiguous from USER_STACK_VA - 3*PAGE_SIZE up to USER_STACK_VA
+     * + PAGE_SIZE). */
+    #define USER_STACK_PAGES  4
+    #define USER_STACK_BYTES  (USER_STACK_PAGES * PAGE_SIZE)
+    /* Stack lives in [USER_STACK_VA - 3*PAGE_SIZE, USER_STACK_VA + PAGE_SIZE);
+     * user_esp starts at the high end (USER_STACK_VA + PAGE_SIZE) and
+     * grows down. */
+    uint32_t stack_va_lo = USER_STACK_VA + PAGE_SIZE - USER_STACK_BYTES;
+    void *first_stack_page = 0;
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        void *p = pmm_alloc_page();
+        if (!p) {
+            paging_destroy_user_pd(user_pd);
+            return -300;
+        }
+        memset(p, 0, PAGE_SIZE);
+        uint32_t va = stack_va_lo + (uint32_t)i * PAGE_SIZE;
+        if (paging_map_in(user_pd, va, (uintptr_t)p,
+                          PTE_USER | PTE_WRITABLE) != 0) {
+            pmm_free_page(p);
+            paging_destroy_user_pd(user_pd);
+            return -301;
+        }
+        if (i == USER_STACK_PAGES - 1) first_stack_page = p;  /* top page (used by elf_setup_args) */
     }
 
     out->entry      = eh.entry;
     out->cr3        = (uint32_t)(uintptr_t)user_pd;
     out->user_esp   = USER_STACK_VA + PAGE_SIZE;
-    out->stack_phys = (uint32_t)(uintptr_t)stack_page;
-    out->stack_size = PAGE_SIZE;
+    out->stack_phys = (uint32_t)(uintptr_t)first_stack_page;
+    out->stack_size = PAGE_SIZE;     /* elf_setup_args only uses top page */
     return 0;
 }
 

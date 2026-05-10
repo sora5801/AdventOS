@@ -7,4 +7,5 @@
 # Lines starting with `#` and blank lines are ignored.
 
 once httpd.elf
+once httpsd.elf
 once sh.elf selftest

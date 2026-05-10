@@ -216,8 +216,16 @@ int tcp_send(struct tcb *t, const void *data, int len) {
     uint32_t seq = t->snd_nxt;
     t->snd_nxt += (uint32_t)len;
     int rc = tcp_send_seg_seq(t, TCP_PSH | TCP_ACK, data, len, seq);
-    if (rc < 0) t->snd_nxt = seq;     /* roll back on failure */
-    return rc;
+    if (rc < 0) {
+        t->snd_nxt = seq;             /* roll back on failure */
+        return -1;
+    }
+    /* Return the byte count accepted, not ip_send's "ok" 0. Without
+     * this fix, a write_all loop (e.g., libcrypto/tls.c's record
+     * sender) sees sys_write return 0 and treats it as "wrote
+     * nothing — retry forever". httpd/wget were lucky: they don't
+     * check sys_write's return value. TLS does, and must. */
+    return len;
 }
 
 int tcp_close(struct tcb *t) {
