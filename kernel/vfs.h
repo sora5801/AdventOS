@@ -43,20 +43,32 @@ struct vfs_inode {
     int      obj_idx;
     uint32_t size;
     int      is_dir;
+    void    *fs_data;     /* the fs instance that owns this inode;
+                           * NULL for single-instance fs's like procfs.
+                           * Copied through to task_fd by SYS_OPEN so
+                           * SYS_READ knows which instance to dispatch
+                           * back into. */
 };
 
 /*
  * Per-fs operation table. All paths passed to ops are RELATIVE to
  * the mount point — no leading slash, possibly empty (means "the
  * root of this fs"). VFS strips the mount prefix before dispatch.
+ *
+ * The `fs_data` field lets multi-instance filesystems (e.g. AdventFS
+ * mounted twice — once on the boot ATA disk at /, once on a USB drive
+ * at /mnt/usb) carry per-mount context through to their op funcs
+ * without colliding on global state. Single-instance fs's (procfs)
+ * just leave it NULL and ignore the argument.
  */
 struct vfs_fs_ops {
-    int (*open)     (const char *rel_path, struct vfs_inode *out);
-    int (*read)     (struct vfs_inode *ino, uint32_t offset,
+    void *fs_data;
+    int (*open)     (void *fs_data, const char *rel_path, struct vfs_inode *out);
+    int (*read)     (void *fs_data, struct vfs_inode *ino, uint32_t offset,
                      void *buf, uint32_t n);
-    int (*readdir)  (const char *rel_dir,  int *iter, char *name_buf);
-    int (*mkdir)    (const char *rel_path);
-    int (*write_all)(const char *rel_path, const void *data, uint32_t n);
+    int (*readdir)  (void *fs_data, const char *rel_dir, int *iter, char *name_buf);
+    int (*mkdir)    (void *fs_data, const char *rel_path);
+    int (*write_all)(void *fs_data, const char *rel_path, const void *data, uint32_t n);
 };
 
 void vfs_init (void);

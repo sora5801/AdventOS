@@ -44,6 +44,7 @@
 #include "dyld.h"
 #include "ac97.h"
 #include "usb_core.h"
+#include "blkdev.h"
 
 /* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
  * pinned to BSP. The BKL machinery + race-fixed task creation are
@@ -298,6 +299,28 @@ void kmain(uint32_t boot_drive) {
      * code has finished, kick off background polling tasks (USB
      * HID, etc.) that need to run on whichever CPU schedule(). */
     usb_start_polling();
+
+    /* If a USB Mass Storage device showed up during USB enumeration,
+     * try to mount it as an additional AdventFS instance at /mnt/usb.
+     * Silently no-ops if no USB drive is present, or if its sector 0
+     * doesn't have the AdventFS magic. */
+    {
+        extern int blkdev_count(void);
+        extern struct blkdev *blkdev_get(int idx);
+        for (int i = 1; i < blkdev_count(); i++) {
+            struct blkdev *b = blkdev_get(i);
+            if (!b) continue;
+            if (b->name[0] != 'u' || b->name[1] != 's' || b->name[2] != 'b') continue;
+            struct fs_instance *uinst =
+                fs_create_instance(b, /*base_lba=*/0, b->n_blocks);
+            if (!uinst) continue;
+            struct vfs_fs_ops *uops = fs_make_ops_for(uinst);
+            if (uops && vfs_mount("/mnt/usb", "usbfs", uops) == 0) {
+                kprintf("[boot] mounted %s at /mnt/usb\n", b->name);
+            }
+            break;     /* one USB drive is enough for the demo */
+        }
+    }
 
     kputs("\n");
     banner();

@@ -35,6 +35,8 @@ struct task_fd {
     int      kind;
     int      obj_idx;      /* fs_idx / sock_idx / pipe_idx / tmpfs_idx */
     uint32_t offset;       /* used by FD_FS, FD_TMPFS                  */
+    void    *fs_data;      /* FD_FS only: which fs_instance owns this  */
+                           /* fd. NULL means boot fs.                  */
 };
 
 enum {

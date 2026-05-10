@@ -696,6 +696,39 @@ static void selftest(void) {
         int code = -1;
         sys_wait(&code);
         printf("  usbtest exit code = %d  (0 = USB pass / no USB device)\n", code);
+
+        /* Mount-it demo (session 42): the boot-time AdventFS-on-USB
+         * mount lives at /mnt/usb. Use the existing `cat` and `ls`
+         * binaries to read the file through the normal VFS path —
+         * proving fs.c is now multi-instance and VFS dispatches
+         * correctly across mount boundaries. */
+        puts("\n  --- AdventFS mounted at /mnt/usb (via VFS) ---\n");
+        puts("  ls /mnt/usb:\n");
+        int pid2 = sys_fork();
+        if (pid2 == 0) {
+            const char *argv2[] = { "ls.elf", "/mnt/usb", 0 };
+            sys_exec("ls.elf", argv2);
+            sys_exit(127);
+        }
+        sys_wait(&code);
+
+        puts("  cat /mnt/usb/readme.txt:\n");
+        int pid3 = sys_fork();
+        if (pid3 == 0) {
+            const char *argv2[] = { "cat.elf", "/mnt/usb/readme.txt", 0 };
+            sys_exec("cat.elf", argv2);
+            sys_exit(127);
+        }
+        sys_wait(&code);
+
+        puts("\n  cat /proc/mounts:\n");
+        int pid4 = sys_fork();
+        if (pid4 == 0) {
+            const char *argv2[] = { "cat.elf", "/proc/mounts", 0 };
+            sys_exec("cat.elf", argv2);
+            sys_exit(127);
+        }
+        sys_wait(&code);
     }
 
     puts("[t1] forktest:\n");

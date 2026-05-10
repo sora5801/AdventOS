@@ -214,7 +214,8 @@ static int pid_is_live(int pid) {
     return 0;
 }
 
-static int procfs_open(const char *rel, struct vfs_inode *out) {
+static int procfs_open(void *fs_data, const char *rel, struct vfs_inode *out) {
+    (void)fs_data;
     if (!rel || !out) return -1;
 
     /* "" or "/" → /proc itself, a directory. */
@@ -290,8 +291,9 @@ int procfs_read_by_id(int id, uint32_t offset, void *buf, uint32_t n) {
 /* For symmetry with the rootfs adapter — the actual fd-side read
  * happens in syscall.c, which calls procfs_read_by_id. This entry
  * just satisfies the vfs_fs_ops slot. */
-static int procfs_read_via_inode(struct vfs_inode *ino, uint32_t off,
-                                 void *buf, uint32_t n) {
+static int procfs_read_via_inode(void *fs_data, struct vfs_inode *ino,
+                                 uint32_t off, void *buf, uint32_t n) {
+    (void)fs_data;
     return procfs_read_by_id(ino->obj_idx, off, buf, n);
 }
 
@@ -306,7 +308,8 @@ static void emit_pid_name(int pid, char *name_buf) {
     name_buf[j] = 0;
 }
 
-static int procfs_readdir(const char *rel, int *iter, char *name) {
+static int procfs_readdir(void *fs_data, const char *rel, int *iter, char *name) {
+    (void)fs_data;
     if (!iter || !name) return -1;
 
     /* Listing /proc itself: emit static files then live pids. */

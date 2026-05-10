@@ -50,6 +50,7 @@ OUT_IMG           = 'fs.img'
 # Top-level: /etc, /bin, plus the executable binaries living at root.
 DIRECTORIES = [
     'etc',
+    'mnt',     # session 42 — USB drive mounts here at /mnt/usb
 ]
 
 # (on-disk filename, source binary path, parent directory name or None for root)

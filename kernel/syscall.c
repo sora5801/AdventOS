@@ -183,6 +183,7 @@ void syscall_dispatch(struct registers *r) {
                 t->fds[fd].kind    = ino.kind;
                 t->fds[fd].obj_idx = ino.obj_idx;
                 t->fds[fd].offset  = 0;
+                t->fds[fd].fs_data = ino.fs_data;
                 ret = fd;
                 break;
             }
@@ -192,6 +193,7 @@ void syscall_dispatch(struct registers *r) {
                 t->fds[fd].kind    = FD_TMPFS;
                 t->fds[fd].obj_idx = tmp_idx;
                 t->fds[fd].offset  = 0;
+                t->fds[fd].fs_data = 0;
                 ret = fd;
                 break;
             }
@@ -234,7 +236,10 @@ void syscall_dispatch(struct registers *r) {
                     ret = tty_read(buf, n);
                     break;
                 case FD_FS: {
-                    int rd = fs_read(e->obj_idx, e->offset, buf, (uint32_t)n);
+                    /* fs_data routes to the right instance — boot fs
+                     * (NULL) or a USB / additional mount. */
+                    int rd = fs_read_at(e->fs_data, e->obj_idx, e->offset,
+                                        buf, (uint32_t)n);
                     if (rd > 0) e->offset += (uint32_t)rd;
                     ret = rd;
                     break;

@@ -101,25 +101,26 @@ static struct vfs_mount *resolve(const char *path, const char **rel_out) {
 
 int vfs_open(const char *path, struct vfs_inode *out) {
     if (!path || !out) return -1;
+    out->fs_data = 0;     /* default; ops may overwrite */
 
     /* Relative path → always rootfs (no concept of cwd-on-procfs yet). */
     if (path[0] != '/') {
         struct vfs_mount *r = find_rootfs();
         if (!r) return -1;
-        return r->ops->open(path, out);
+        return r->ops->open(r->ops->fs_data, path, out);
     }
 
     /* "/" by itself is the rootfs root. */
     if (path[0] == '/' && path[1] == 0) {
         struct vfs_mount *r = find_rootfs();
         if (!r) return -1;
-        return r->ops->open("", out);
+        return r->ops->open(r->ops->fs_data, "", out);
     }
 
     const char *rel;
     struct vfs_mount *m = resolve(path, &rel);
     if (!m) return -1;
-    return m->ops->open(rel, out);
+    return m->ops->open(m->ops->fs_data, rel, out);
 }
 
 int vfs_read(struct vfs_inode *ino, uint32_t offset,
@@ -138,7 +139,7 @@ int vfs_readdir(const char *path, int *iter, char *name_buf) {
     if (path[0] != '/') {
         struct vfs_mount *r = find_rootfs();
         if (!r || !r->ops->readdir) return -1;
-        return r->ops->readdir(path, iter, name_buf);
+        return r->ops->readdir(r->ops->fs_data, path, iter, name_buf);
     }
 
     const char *rel;
@@ -149,7 +150,7 @@ int vfs_readdir(const char *path, int *iter, char *name_buf) {
     int is_root_listing =
         (path[0] == '/' && (path[1] == 0 || (path[1] == '/' && path[2] == 0)));
     if (!is_root_listing) {
-        return m->ops->readdir(rel, iter, name_buf);
+        return m->ops->readdir(m->ops->fs_data, rel, iter, name_buf);
     }
 
     /* Root listing: first emit rootfs entries, then synthetic
@@ -157,7 +158,7 @@ int vfs_readdir(const char *path, int *iter, char *name_buf) {
      * regular files. The transition is signaled by *iter crossing
      * MOUNT_PHASE. */
     if (*iter < MOUNT_PHASE) {
-        int idx = m->ops->readdir(rel, iter, name_buf);
+        int idx = m->ops->readdir(m->ops->fs_data, rel, iter, name_buf);
         if (idx >= 0) return idx;
         /* Fell through end-of-rootfs: switch to mount phase. */
         *iter = MOUNT_PHASE;
@@ -189,13 +190,13 @@ int vfs_mkdir(const char *path) {
     if (path[0] != '/') {
         struct vfs_mount *r = find_rootfs();
         if (!r || !r->ops->mkdir) return -1;
-        return r->ops->mkdir(path);
+        return r->ops->mkdir(r->ops->fs_data, path);
     }
 
     const char *rel;
     struct vfs_mount *m = resolve(path, &rel);
     if (!m || !m->ops->mkdir) return -1;
-    return m->ops->mkdir(rel);
+    return m->ops->mkdir(m->ops->fs_data, rel);
 }
 
 int vfs_write_all(const char *path, const void *data, uint32_t n) {
@@ -204,13 +205,13 @@ int vfs_write_all(const char *path, const void *data, uint32_t n) {
     if (path[0] != '/') {
         struct vfs_mount *r = find_rootfs();
         if (!r || !r->ops->write_all) return -1;
-        return r->ops->write_all(path, data, n);
+        return r->ops->write_all(r->ops->fs_data, path, data, n);
     }
 
     const char *rel;
     struct vfs_mount *m = resolve(path, &rel);
     if (!m || !m->ops->write_all) return -1;
-    return m->ops->write_all(rel, data, n);
+    return m->ops->write_all(m->ops->fs_data, rel, data, n);
 }
 
 int vfs_describe_mounts(char *buf, int cap) {

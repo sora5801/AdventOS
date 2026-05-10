@@ -65,6 +65,50 @@ struct fs_super {
     struct fs_entry files[FS_MAX_FILES];
 } __attribute__((packed));        /* 1024 bytes total */
 
+/* ---- Multi-instance core (session 42) ----------------------------- */
+
+/* AdventFS is now multi-instance: the boot disk's filesystem is one
+ * instance, the USB drive mounted at /mnt/usb is another. Each
+ * instance owns its own superblock + sector bitmap and is bound to
+ * a backing block device.
+ *
+ * The public single-instance API below (`fs_open`, `fs_read`, …)
+ * still operates on the BOOT instance — those calls are how the
+ * kernel's elf loader / dyld / shell built-ins find files on the
+ * boot disk. Anything that wants a non-boot mount goes through VFS.
+ */
+struct fs_instance;
+struct blkdev;
+struct vfs_fs_ops;
+
+/* Create a fresh fs instance backed by `bdev`. The superblock is
+ * read from `base_lba` on that device; `n_sectors` caps the bitmap
+ * (everything past it is marked permanently allocated). Returns
+ * NULL on bad-magic / read-failure / out-of-table.
+ *
+ * Pass bdev=NULL to use the global bcache + ATA path (the boot fs
+ * does this internally; outside callers should always pass a real
+ * blkdev). */
+struct fs_instance *fs_create_instance(struct blkdev *bdev,
+                                       uint32_t base_lba,
+                                       uint32_t n_sectors);
+
+/* The root fs instance — set up by fs_init(). NULL before fs_init. */
+struct fs_instance *fs_root_instance(void);
+
+/* Build a vfs_fs_ops table whose ops are bound to `inst` via the
+ * fs_data field. The returned pointer aliases statically-allocated
+ * storage inside fs.c, one per instance. */
+struct vfs_fs_ops *fs_make_ops_for(struct fs_instance *inst);
+
+/* Per-instance read used by SYS_READ. The fd table stores the
+ * fs_instance pointer (or NULL = boot fs) alongside the entry idx;
+ * this dispatches to the right superblock. */
+int         fs_read_at(void *fs_data, int idx, uint32_t offset,
+                       void *buf, uint32_t n);
+
+/* ---- Boot-instance singleton API (rest of the kernel uses this) -- */
+
 void        fs_init(void);
 
 /* Path-aware open. `path` may be:
@@ -101,7 +145,6 @@ uint32_t    fs_free_sectors(void);
 
 /* The rootfs adapter exposed to the VFS layer (session 28). Pass to
  * vfs_mount to register the on-disk AdventFS as the system root. */
-struct vfs_fs_ops;
 struct vfs_fs_ops *fs_rootfs_ops(void);
 
 #endif
