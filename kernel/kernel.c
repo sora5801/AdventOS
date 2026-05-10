@@ -43,6 +43,7 @@
 #include "mouse.h"
 #include "dyld.h"
 #include "ac97.h"
+#include "usb_core.h"
 
 /* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
  * pinned to BSP. The BKL machinery + race-fixed task creation are
@@ -250,6 +251,13 @@ void kmain(uint32_t boot_drive) {
      * just no-op. */
     ac97_init();
 
+    /* USB stack: probes UHCI on the PIIX3 PCI device, enumerates
+     * any attached HID keyboard, spawns a polling task that injects
+     * keystrokes into the same ring buffer the PS/2 driver uses.
+     * No-ops cleanly if QEMU was launched without `-usb`. */
+    kputs("[boot] starting USB stack\n");
+    usb_init();
+
     kputs("[boot] starting network stack\n");
     net_init();
 
@@ -285,6 +293,11 @@ void kmain(uint32_t boot_drive) {
     pipe_init();
     tmpfs_init();
     tty_init();
+
+    /* Now that the task system is fully up and the BSP-only init
+     * code has finished, kick off background polling tasks (USB
+     * HID, etc.) that need to run on whichever CPU schedule(). */
+    usb_start_polling();
 
     kputs("\n");
     banner();
