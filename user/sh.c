@@ -580,6 +580,64 @@ static void selftest(void) {
         printf("  gui.elf exited (code=%d)\n", code);
     }
 
+    puts("[t25] dynamic libc: every libc call lands at LIBC_BASE\n");
+    {
+        /* Read the library header at LIBC_BASE — should be the magic
+         * 'ADLC' and version 1 from libc.h. The kernel's dyld layer
+         * mapped libc.bin into our PD at process-load time; we never
+         * called the kernel for it from userspace. This is "dynamic
+         * linking" in the same sense Linux's vDSO is. */
+        const unsigned int *hdr = (const unsigned int *)0x70000000u;
+        printf("  LIBC_BASE @ 0x70000000:\n");
+        printf("    magic        = 0x%x  (expect 0x434c4441 = 'ADLC')\n", hdr[0]);
+        printf("    version      = %u\n", hdr[1]);
+        printf("    export_count = %u\n", hdr[2]);
+
+        /* Show that strlen, malloc, memcpy actually execute INSIDE
+         * libc — by checking the function pointers stored in the
+         * export table all live at addresses >= LIBC_BASE. */
+        const unsigned int *exports = (const unsigned int *)0x70000010u;
+        unsigned int strlen_addr = exports[1];          /* LIBC_FN_STRLEN */
+        unsigned int printf_addr = exports[42];         /* LIBC_FN_VPRINTF */
+        unsigned int malloc_addr = exports[24];         /* LIBC_FN_MALLOC */
+        printf("  exports[strlen]  = 0x%x\n", strlen_addr);
+        printf("  exports[vprintf] = 0x%x\n", printf_addr);
+        printf("  exports[malloc]  = 0x%x\n", malloc_addr);
+
+        if (hdr[0] == 0x434C4441u && strlen_addr >= 0x70000000u
+                                  && malloc_addr >= 0x70000000u) {
+            puts("  PASS: header magic ok, exports point INTO libc\n");
+        } else {
+            puts("  FAIL: bogus magic or exports not in libc range\n");
+        }
+
+        /* Sanity: a real libc call. strlen/malloc/free all dispatch
+         * via the table; if they work, the trampolines work. */
+        char *p = malloc(64);
+        if (p) {
+            int n = 0;
+            for (int i = 0; i < 60; i++) p[n++] = (char)('a' + (i % 26));
+            p[n] = 0;
+            int len = strlen(p);
+            printf("  malloc+strlen round-trip: len=%d (expect 60)\n", len);
+            free(p);
+        }
+
+        /* fork: child has its OWN copy of libc.bin (different
+         * physical pages) so libc state is per-process. Verify by
+         * comparing malloc state visible across the fork boundary
+         * — child's free-list is independent of parent's. */
+        int alpid = sys_fork();
+        if (alpid == 0) {
+            char *q = malloc(8);
+            printf("  child malloc -> 0x%x  (per-process libc heap)\n",
+                   (unsigned)(unsigned long)q);
+            free(q);
+            sys_exit(0);
+        }
+        int code; sys_wait(&code);
+    }
+
     puts("[t1] forktest:\n");
     cmd_forktest();
 

@@ -87,6 +87,13 @@ USER_PROGRAMS = [
     ('gui.elf',   'user/_obj/gui.bin',   None),
 ]
 
+# Raw blobs that aren't ELFs — the kernel reads them as flat data.
+RAW_BLOBS = [
+    # Session 35: the dynamic libc. Mapped into every user process at
+    # virtual address 0x70000000 by the dyld layer.
+    ('libc.bin',  'libc/_obj/libc.bin',  None),
+]
+
 # (on-disk filename, source path, parent directory name or None for root)
 DATA_FILES = [
     ('hello.txt', 'fs/hello.txt', None),
@@ -156,6 +163,14 @@ def build():
         raw = open(bin_path, 'rb').read()
         elf = make_elf(raw, USER_VA)
         add_file(fs_name, elf, len(elf), parent)
+
+    # 2b. Raw blobs that aren't ELF-wrapped (e.g. libc.bin).
+    for fs_name, src_path, parent in RAW_BLOBS:
+        if not os.path.exists(src_path):
+            print(f"mkfs: {src_path} not found", file=sys.stderr)
+            sys.exit(1)
+        raw = open(src_path, 'rb').read()
+        add_file(fs_name, raw, len(raw), parent)
 
     # 3. Raw data files.
     for fs_name, src_path, parent in DATA_FILES:

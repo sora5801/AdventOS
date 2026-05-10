@@ -41,6 +41,7 @@
 #include "vbe.h"
 #include "fbcon.h"
 #include "mouse.h"
+#include "dyld.h"
 
 /* Two demo tasks that emit a tag to the serial port at different rates,
  * so you can see the scheduler interleaving them in real time without
@@ -205,6 +206,14 @@ void kmain(uint32_t boot_drive) {
                 now.year, now.month, now.day,
                 now.hour, now.min, now.sec);
     }
+
+    /* Cache libc.bin from the FS so elf_load can map it into every
+     * new user PD. After this, user programs can call into libc
+     * via the LIBC_BASE export table. Must come AFTER fs/vfs init
+     * (we need fs_open) and BEFORE any user task is launched (we
+     * map libc into every PD elf_load builds). */
+    kputs("[boot] caching libc.bin... ");
+    dyld_init();
 
     kputs("[boot] initializing task system... ");
     task_init();

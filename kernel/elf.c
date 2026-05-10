@@ -4,6 +4,7 @@
 #include "pmm.h"
 #include "kprintf.h"
 #include "string.h"
+#include "dyld.h"
 
 #define USER_STACK_VA   0x40100000u
 #define USER_MIN_VA     0x40000000u   /* refuse to map kernel-area VAs */
@@ -111,6 +112,18 @@ int elf_load(int fs_idx, struct elf_load_result *out) {
                 }
             }
         }
+    }
+
+    /* 3b. Map libc.bin into the new PD at LIBC_VA. The dyld layer
+     *     copies bytes from a kernel-side cache; each process gets
+     *     its own private physical pages so libc's .data (malloc
+     *     state, etc.) is naturally per-process. If libc.bin isn't
+     *     in the FS, dyld_map_libc returns 0 silently — programs
+     *     that don't use libc trampolines still work. */
+    if (dyld_map_libc(user_pd) != 0) {
+        kputs("elf: libc map failed\n");
+        paging_destroy_user_pd(user_pd);
+        return -107;
     }
 
     /* 4. Allocate a one-page user stack. */

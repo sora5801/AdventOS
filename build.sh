@@ -72,6 +72,19 @@ echo "[4/7] link kernel"
 "$OBJCOPY" -O binary -j .text -j .rdata -j .data -j .up1 -j .up2 kernel/kernel.elf kernel/kernel.bin
 echo "        kernel.bin = $(stat -c%s kernel/kernel.bin) bytes"
 
+echo "[5a/7] build libc.bin (dynamic library at VA 0x70000000)"
+mkdir -p libc/_obj
+LIBC_OBJS=()
+for src in libc/*.c; do
+    obj="libc/_obj/$(basename "${src%.c}").o"
+    "$CC" "${USER_CFLAGS[@]}" -c -o "$obj" "$src"
+    LIBC_OBJS+=("$obj")
+done
+"$LD" -m i386pe -T libc/libc.ld -o libc/_obj/libc.elf "${LIBC_OBJS[@]}"
+"$OBJCOPY" -O binary -j .exports -j .text -j .rdata -j .data \
+    libc/_obj/libc.elf libc/_obj/libc.bin
+echo "        libc.bin = $(stat -c%s libc/_obj/libc.bin) bytes"
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c

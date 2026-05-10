@@ -515,182 +515,154 @@ sighandler_t signal(int sig, sighandler_t handler) {
     return sigaction(sig, handler);
 }
 
-/* ---------- Output --------------------------------------------------- */
+/* ---------- Dynamic libc trampolines -------------------------------
+ *
+ * Session 35 moved the C library implementations out of libuser into
+ * libc.bin, which the kernel's dyld layer maps into every new user
+ * process at LIBC_BASE = 0x70000000. The first 16 bytes are a
+ * magic/version header; the next 256 bytes are a fixed-order array
+ * of function pointers (the EXPORT TABLE).
+ *
+ * Each function below is a thin trampoline that loads the right
+ * pointer out of the table and calls into libc. The trampolines are
+ * REAL functions (not macros) so taking their address still works
+ * (e.g., `int (*p)(const char *) = strcmp` continues to compile).
+ *
+ * For variadic printf-family functions, we use va_list versions in
+ * libc (vprintf/vsprintf/vsnprintf) and wrap them with va_start/end
+ * here. That avoids needing GCC's __builtin_va_arg_pack to forward
+ * the original variadic arglist through the indirect call. */
 
-/*
- * stdout-aware versions. Going through SYS_WRITE_FD with fd=1 means
- * dup2(pipe_w, 1) before exec actually causes our printf output to
- * land in the pipe instead of the console — which is the whole point
- * of session 15. The legacy sys_putchar / sys_write_str syscalls
- * still exist (the .up1/.up2 asm demos use them by number) but the
- * higher-level libuser stack no longer calls them.
- */
-void putchar(char c)        { sys_write(1, &c, 1); }
-void puts(const char *s)    {
-    int n = 0;
-    while (s[n]) n++;
-    sys_write(1, s, n);
+#define LIBC_BASE          0x70000000u
+#define LIBC_TABLE_OFF     0x10u
+#define LIBC_TABLE         ((void * const *)(LIBC_BASE + LIBC_TABLE_OFF))
+
+/* Indices MUST agree with libc/libc.h's enum. */
+#define LIBC_FN_LIBC_INFO    0
+#define LIBC_FN_STRLEN       1
+#define LIBC_FN_STRCMP       2
+#define LIBC_FN_STRNCMP      3
+#define LIBC_FN_STRCPY       4
+#define LIBC_FN_STRNCPY      5
+#define LIBC_FN_STRCAT       6
+#define LIBC_FN_STRCHR       7
+#define LIBC_FN_STRRCHR      8
+#define LIBC_FN_STRSTR       9
+#define LIBC_FN_MEMSET      10
+#define LIBC_FN_MEMCPY      11
+#define LIBC_FN_MEMMOVE     12
+#define LIBC_FN_MEMCMP      13
+#define LIBC_FN_MEMCHR      14
+#define LIBC_FN_ATOI        20
+#define LIBC_FN_ATOL        21
+#define LIBC_FN_STRTOL      22
+#define LIBC_FN_ABS         23
+#define LIBC_FN_MALLOC      24
+#define LIBC_FN_FREE        25
+#define LIBC_FN_CALLOC      26
+#define LIBC_FN_REALLOC     27
+#define LIBC_FN_PUTCHAR     40
+#define LIBC_FN_PUTS        41
+#define LIBC_FN_VPRINTF     42
+#define LIBC_FN_VSPRINTF    43
+#define LIBC_FN_VSNPRINTF   44
+#define LIBC_FN_MALLOC_BRK   50
+#define LIBC_FN_MALLOC_USED  51
+#define LIBC_FN_MALLOC_FREE_ 52
+#define LIBC_FN_MALLOC_TOTAL 53
+
+/* String — direct pass-through. */
+size_t strlen(const char *s) {
+    return ((size_t (*)(const char *))LIBC_TABLE[LIBC_FN_STRLEN])(s);
+}
+int strcmp(const char *a, const char *b) {
+    return ((int (*)(const char *, const char *))LIBC_TABLE[LIBC_FN_STRCMP])(a, b);
+}
+int strncmp(const char *a, const char *b, size_t n) {
+    return ((int (*)(const char *, const char *, size_t))
+            LIBC_TABLE[LIBC_FN_STRNCMP])(a, b, n);
+}
+const char *strchr(const char *s, int c) {
+    return ((const char *(*)(const char *, int))LIBC_TABLE[LIBC_FN_STRCHR])(s, c);
 }
 
-static void put_dec_signed(int32_t n) {
-    char buf[12];
-    int  i = 0;
-    int  neg = 0;
-    uint32_t u;
-    if (n < 0) { neg = 1; u = (uint32_t)(-n); } else u = (uint32_t)n;
-    if (u == 0) { putchar('0'); return; }
-    while (u) { buf[i++] = (char)('0' + u % 10); u /= 10; }
-    if (neg) putchar('-');
-    while (i--) putchar(buf[i]);
+/* Memory. */
+void *memset(void *p, int c, size_t n) {
+    return ((void *(*)(void *, int, size_t))LIBC_TABLE[LIBC_FN_MEMSET])(p, c, n);
+}
+void *memcpy(void *d, const void *s, size_t n) {
+    return ((void *(*)(void *, const void *, size_t))
+            LIBC_TABLE[LIBC_FN_MEMCPY])(d, s, n);
+}
+int memcmp(const void *a, const void *b, size_t n) {
+    return ((int (*)(const void *, const void *, size_t))
+            LIBC_TABLE[LIBC_FN_MEMCMP])(a, b, n);
 }
 
-static void put_dec_unsigned(uint32_t u) {
-    char buf[12];
-    int  i = 0;
-    if (u == 0) { putchar('0'); return; }
-    while (u) { buf[i++] = (char)('0' + u % 10); u /= 10; }
-    while (i--) putchar(buf[i]);
+/* stdlib. */
+int atoi(const char *s) {
+    return ((int (*)(const char *))LIBC_TABLE[LIBC_FN_ATOI])(s);
 }
 
-static void put_hex(uint32_t u) {
-    static const char digits[] = "0123456789abcdef";
-    char buf[8];
-    int  i = 0;
-    if (u == 0) { putchar('0'); return; }
-    while (u) { buf[i++] = digits[u & 0xF]; u >>= 4; }
-    while (i--) putchar(buf[i]);
+/* Heap — trampoline through libc's malloc/free.  Each user process
+ * has its own libc.bin .data so the heap state stays per-process. */
+void *malloc(size_t size) {
+    return ((void *(*)(size_t))LIBC_TABLE[LIBC_FN_MALLOC])(size);
+}
+void free(void *p) {
+    ((void (*)(void *))LIBC_TABLE[LIBC_FN_FREE])(p);
+}
+uint32_t malloc_brk(void) {
+    return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_BRK])();
+}
+uint32_t malloc_total(void) {
+    return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_TOTAL])();
+}
+uint32_t malloc_used(void) {
+    return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_USED])();
+}
+uint32_t malloc_free_bytes(void) {
+    return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_FREE_])();
 }
 
+/* Stdio. putchar/puts forward straight into libc's putchar_/puts_. */
+void putchar(char c) {
+    ((void (*)(char))LIBC_TABLE[LIBC_FN_PUTCHAR])(c);
+}
+void puts(const char *s) {
+    ((void (*)(const char *))LIBC_TABLE[LIBC_FN_PUTS])(s);
+}
+
+/* printf: shim wraps va_list and dispatches into libc's vprintf_. */
 void printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    while (*fmt) {
-        if (*fmt != '%') { putchar(*fmt++); continue; }
-        fmt++;
-        switch (*fmt) {
-            case 'c': putchar((char)va_arg(args, int)); break;
-            case 's': {
-                const char *s = va_arg(args, const char *);
-                while (*s) putchar(*s++);
-                break;
-            }
-            case 'd': case 'i': put_dec_signed  (va_arg(args, int32_t));  break;
-            case 'u':           put_dec_unsigned(va_arg(args, uint32_t)); break;
-            case 'x':           put_hex         (va_arg(args, uint32_t)); break;
-            case '%':           putchar('%'); break;
-            default:            putchar('%'); putchar(*fmt); break;
-        }
-        if (*fmt) fmt++;
-    }
+    ((int (*)(const char *, va_list))LIBC_TABLE[LIBC_FN_VPRINTF])(fmt, args);
     va_end(args);
 }
 
-/* ---------- Tiny C library bits ------------------------------------- */
-
-size_t strlen(const char *s) {
-    size_t n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-int strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-
-int strncmp(const char *a, const char *b, size_t n) {
-    while (n && *a && *a == *b) { a++; b++; n--; }
-    if (!n) return 0;
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-
-void *memset(void *p, int c, size_t n) {
-    unsigned char *d = p;
-    while (n--) *d++ = (unsigned char)c;
-    return p;
-}
-
-void *memcpy(void *d, const void *s, size_t n) {
-    unsigned char       *dd = d;
-    const unsigned char *ss = s;
-    while (n--) *dd++ = *ss++;
-    return d;
-}
-
-int memcmp(const void *a, const void *b, size_t n) {
-    const unsigned char *aa = a;
-    const unsigned char *bb = b;
-    while (n--) {
-        if (*aa != *bb) return (int)*aa - (int)*bb;
-        aa++; bb++;
-    }
-    return 0;
-}
-
-/* Decimal-only atoi. Skips leading whitespace; honors a single +/- sign;
- * stops at the first non-digit. No overflow detection — callers in the
- * coreutils sweep pass small counts (line counts, signal numbers, pids)
- * that comfortably fit in int. */
-int atoi(const char *s) {
-    int v = 0, sign = 1;
-    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
-    if      (*s == '-') { sign = -1; s++; }
-    else if (*s == '+') {             s++; }
-    while (*s >= '0' && *s <= '9') {
-        v = v * 10 + (*s - '0');
-        s++;
-    }
-    return v * sign;
-}
-
-const char *strchr(const char *s, int c) {
-    char ch = (char)c;
-    while (*s) {
-        if (*s == ch) return s;
-        s++;
-    }
-    return (ch == 0) ? s : 0;
-}
-
-/* ---------- Heap: sys_brk + malloc / free --------------------------- */
-
-/*
- * Port of the kernel's kmalloc free-list allocator into ring 3.
- * Headered blocks threaded in physical-address order; first-fit,
- * split-on-alloc, neighbor-coalesce on free.
+/* Non-zero-initialized marker: forces user.ld's .data section to be
+ * emitted with CONTENTS (not as a NOBITS section the linker would
+ * collapse). Without this, an init.c-style program with an
+ * uninitialized `static char buf[2048]` would have buf living in a
+ * .data region that objcopy strips from the flat binary, leaving
+ * the kernel ELF loader to map only the .text+.rdata pages — and
+ * the very first sys_read into buf would page-fault on the unmapped
+ * tail half. The legacy libuser had an initialized global (g_brk =
+ * HEAP_START_VA) that accidentally papered over this; we now keep
+ * a single explicit marker.
  *
- * The heap grows on demand: when malloc can't satisfy a request from
- * the existing free list, it issues SYS_BRK to map new pages between
- * the current break and a target break, then drops a fresh free
- * block on top of the new pages and retries.
- *
- * Allocator state is just `g_brk`. The list head is implicit:
- * heap-empty iff g_brk == HEAP_START_VA, else the head is the
- * mblock at HEAP_START_VA. This avoids needing a separate `g_head`
- * pointer in .data — explained in detail in the deep dive.
- */
+ * `used` keeps the symbol from being garbage-collected even though
+ * nothing references it. */
+__attribute__((used))
+static uint32_t libuser_data_marker = 0xADBEEF35u;
 
-#define HEAP_START_VA   0x40200000u
-#define M_ALIGN         16
-#define M_HDR_SIZE      sizeof(struct mblock)
-#define M_MIN_PAYLOAD   16u
-#define M_MAGIC         0xCAFEu
-
-struct mblock {
-    uint32_t        size;
-    uint16_t        free;
-    uint16_t        magic;
-    struct mblock  *prev;
-    struct mblock  *next;
-};
-
-/* IMPORTANT: explicit non-zero initializer. user.ld discards .bss,
- * which means a zero-initialized file-scope static would be linked
- * at address 0. Setting g_brk = HEAP_START_VA both gives it the
- * right initial value AND forces it into .data so the loader sets
- * it correctly. */
-static uint32_t g_brk = HEAP_START_VA;
-
+/* sys_brk: only syscall left in libuser that's directly tied to the
+ * heap. malloc itself lives in libc.bin (so the implementation is
+ * shared across processes); each process's libc.data has its own
+ * g_brk pointer. We expose sys_brk here for any user program that
+ * wants to manage its own break independently of malloc — and for
+ * the [t25] selftest's diagnostics. */
 int sys_brk(int new_brk) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -698,135 +670,4 @@ int sys_brk(int new_brk) {
                       : "a"(SYS_BRK), "b"(new_brk)
                       : "memory");
     return ret;
-}
-
-static struct mblock *heap_head(void) {
-    return (g_brk == HEAP_START_VA) ? (struct mblock *)0
-                                    : (struct mblock *)HEAP_START_VA;
-}
-
-static struct mblock *heap_tail(void) {
-    struct mblock *b = heap_head();
-    if (!b) return (struct mblock *)0;
-    while (b->next) b = b->next;
-    return b;
-}
-
-/* Ask the kernel for at least `at_least` more bytes of heap (rounded
- * up to a page), then drop a fresh free block on the new pages. If
- * the previous tail block was free, coalesce. Returns 0 on success,
- * -1 on out-of-memory. */
-static int grow_heap(uint32_t at_least) {
-    uint32_t need = (at_least + 4095u) & ~4095u;
-    uint32_t want = g_brk + need;
-    int got = sys_brk((int)want);
-    if (got != (int)want) return -1;
-
-    uint32_t old = g_brk;
-    g_brk = (uint32_t)got;
-
-    /* New free block at [old, g_brk). */
-    struct mblock *nb = (struct mblock *)(uint32_t)old;
-    nb->size  = (uint32_t)(g_brk - old - M_HDR_SIZE);
-    nb->free  = 1;
-    nb->magic = M_MAGIC;
-    nb->prev  = (struct mblock *)0;
-    nb->next  = (struct mblock *)0;
-
-    if (old == HEAP_START_VA) {
-        /* First growth — nb is the head AND the tail. Done. */
-        return 0;
-    }
-
-    /* Link after current tail. */
-    struct mblock *tail = heap_tail();
-    if (!tail) return -1;
-    tail->next = nb;
-    nb->prev   = tail;
-
-    /* If the old tail was free, coalesce nb into it. */
-    if (tail->free) {
-        tail->size += M_HDR_SIZE + nb->size;
-        tail->next  = (struct mblock *)0;
-    }
-    return 0;
-}
-
-void *malloc(size_t size) {
-    if (size == 0) return (void *)0;
-    size_t want = (size + M_ALIGN - 1) & ~(size_t)(M_ALIGN - 1);
-
-    for (;;) {
-        for (struct mblock *b = heap_head(); b; b = b->next) {
-            if (b->magic != M_MAGIC) return (void *)0;     /* corruption */
-            if (!b->free || b->size < want) continue;
-
-            /* Found a fit. Split if leftover would be a usable block. */
-            size_t leftover = b->size - want;
-            if (leftover >= M_HDR_SIZE + M_MIN_PAYLOAD) {
-                struct mblock *n =
-                    (struct mblock *)((uint32_t)b + M_HDR_SIZE + want);
-                n->size  = (uint32_t)(leftover - M_HDR_SIZE);
-                n->free  = 1;
-                n->magic = M_MAGIC;
-                n->prev  = b;
-                n->next  = b->next;
-                if (b->next) b->next->prev = n;
-                b->next  = n;
-                b->size  = (uint32_t)want;
-            }
-            b->free = 0;
-            return (void *)((uint32_t)b + M_HDR_SIZE);
-        }
-
-        /* No fit — grow and retry. Bail if the kernel says no. */
-        if (grow_heap((uint32_t)(want + M_HDR_SIZE)) != 0) return (void *)0;
-    }
-}
-
-void free(void *p) {
-    if (!p) return;
-    struct mblock *b = (struct mblock *)((uint32_t)p - M_HDR_SIZE);
-    if (b->magic != M_MAGIC || b->free) return;       /* double-free / corrupt */
-    b->free = 1;
-
-    /* Coalesce with the next block if free. */
-    if (b->next && b->next->free) {
-        struct mblock *n = b->next;
-        b->size += M_HDR_SIZE + n->size;
-        b->next  = n->next;
-        if (n->next) n->next->prev = b;
-        n->magic = 0;
-    }
-
-    /* Coalesce with the previous block if free. */
-    if (b->prev && b->prev->free) {
-        struct mblock *pp = b->prev;
-        pp->size += M_HDR_SIZE + b->size;
-        pp->next  = b->next;
-        if (b->next) b->next->prev = pp;
-        b->magic = 0;
-    }
-}
-
-uint32_t malloc_brk(void) { return g_brk; }
-
-uint32_t malloc_total(void) {
-    return g_brk - HEAP_START_VA;
-}
-
-uint32_t malloc_used(void) {
-    uint32_t total = 0;
-    for (struct mblock *b = heap_head(); b; b = b->next) {
-        if (!b->free) total += b->size + M_HDR_SIZE;
-    }
-    return total;
-}
-
-uint32_t malloc_free_bytes(void) {
-    uint32_t total = 0;
-    for (struct mblock *b = heap_head(); b; b = b->next) {
-        if (b->free) total += b->size;
-    }
-    return total;
 }
