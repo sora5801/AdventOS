@@ -1983,6 +1983,75 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t37] TLS interop: cert-flow round-trip with CertificateVerify validation\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* httpsget connects via the FULL TLS 1.3 cert-flow handshake
+         * to the httpsd that init started at boot. With the session-55
+         * fixes, this round-trip is now cryptographically tight:
+         *
+         *   1. Server's CertificateVerify uses sig_alg matching the
+         *      cert key type (was clobbered to Ed25519 in session 51).
+         *   2. Client extracts the cert's pubkey via the tiny X.509
+         *      walker and runs ed25519_verify / p256_verify on the
+         *      CertificateVerify body (was unvalidated entirely).
+         *
+         * If either side regresses, this test FAILS at the handshake
+         * — we wouldn't even see the HTTP body. */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for httpsget capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "httpsget.elf", "https://10.0.2.15:4433/", 0 };
+                sys_exec("httpsget.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from httpsget  (exit=%d)\n", total, code);
+
+            int find_hs = 0, find_200 = 0, find_aos = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_hs && i + 21 <= total && captured[i] == 'T' &&
+                    memcmp(captured + i, "TLS 1.3 handshake OK", 20) == 0) find_hs = 1;
+                if (!find_200 && i + 12 <= total && captured[i] == 'H' &&
+                    memcmp(captured + i, "HTTP/1.0 200", 12) == 0) find_200 = 1;
+                if (!find_aos && i + 24 <= total && captured[i] == 'H' &&
+                    memcmp(captured + i, "Hello from a TLS 1.3 + H", 24) == 0) find_aos = 1;
+            }
+
+            EXPECT(find_hs,    "httpsget reports TLS 1.3 handshake OK (sig_alg matched + CertificateVerify validated)");
+            EXPECT(find_200,   "HTTP/1.0 200 came through the encrypted record layer");
+            EXPECT(find_aos,   "response body decrypted into expected greeting");
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \

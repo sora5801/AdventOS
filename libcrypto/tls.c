@@ -537,6 +537,106 @@ static int build_serverhello_body(struct tls_conn *c, uint8_t *body) {
 /* Build the CertificateVerify signature input per RFC 8446 §4.4.3:
  *   64 octets of 0x20  ||  "TLS 1.3, server CertificateVerify"
  *   ||  0x00  ||  transcript_hash[32]   = 130 bytes total. */
+/* DER reader. Each call: read a tag, decode its length, advance *p
+ * past the header. On return *p points at the value bytes, *vl is
+ * the value length, and the function return is the tag byte read.
+ * Returns -1 on truncation or unsupported long-form lengths. */
+static int der_read_tlv(const uint8_t **p, const uint8_t *end, int *vl) {
+    if (*p >= end) return -1;
+    int tag = *(*p)++;
+    if (*p >= end) return -1;
+    int b = *(*p)++;
+    int len;
+    if ((b & 0x80) == 0) {
+        len = b;
+    } else {
+        int nlen = b & 0x7F;
+        if (nlen == 0 || nlen > 3 || *p + nlen > end) return -1;
+        len = 0;
+        for (int i = 0; i < nlen; i++) len = (len << 8) | *(*p)++;
+    }
+    if (*p + len > end) return -1;
+    *vl = len;
+    return tag;
+}
+
+/* Extract the server cert's SubjectPublicKeyInfo BIT STRING into
+ * (out_alg, out_pk, out_pk_len). This walks the X.509 just far enough
+ * to find the public-key bytes — not a general parser, but it covers
+ * both Ed25519 (RFC 8410) and ECDSA-P256 (RFC 5480) certs we emit.
+ *
+ *   out_alg = 0x0807 (ed25519): out_pk = 32 raw bytes
+ *   out_alg = 0x0403 (p256):    out_pk = 65 bytes (0x04 || X || Y)
+ *
+ * Returns 0 on success. The fragile-by-design path: a malformed cert
+ * is rejected with -1; we do NOT attempt to handle every X.509 quirk
+ * curl-style — just our two known cert shapes. */
+static int x509_extract_pubkey(const uint8_t *cert, int cert_len,
+                                int *out_alg,
+                                uint8_t *out_pk, int *out_pk_len) {
+    const uint8_t *p = cert, *end = cert + cert_len;
+    int vl;
+    /* outer SEQUENCE */
+    if (der_read_tlv(&p, end, &vl) != 0x30) return -1;
+    /* tbsCertificate SEQUENCE */
+    if (der_read_tlv(&p, end, &vl) != 0x30) return -1;
+    const uint8_t *tbs_end = p + vl;
+    /* [0] EXPLICIT version  (optional) — skip */
+    if (p < tbs_end && p[0] == 0xA0) {
+        if (der_read_tlv(&p, tbs_end, &vl) != 0xA0) return -1;
+        p += vl;
+    }
+    /* serialNumber INTEGER */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x02) return -1; p += vl;
+    /* signature AlgorithmIdentifier SEQUENCE */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
+    /* issuer Name */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
+    /* validity Validity */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
+    /* subject Name */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
+    /* subjectPublicKeyInfo SEQUENCE { algorithm SEQUENCE, subjectPublicKey BIT STRING } */
+    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1;
+    const uint8_t *spki_end = p + vl;
+    /* algorithm SEQUENCE — read its OID to decide ed25519 vs p256 */
+    if (der_read_tlv(&p, spki_end, &vl) != 0x30) return -1;
+    const uint8_t *alg_end = p + vl;
+    /* algorithm.OID */
+    int otag = der_read_tlv(&p, alg_end, &vl);
+    if (otag != 0x06) return -1;
+    /* OIDs:
+     *   ed25519: 1.3.101.112  → 06 03 2B 65 70
+     *   p256:    1.2.840.10045.2.1 → 06 07 2A 86 48 CE 3D 02 01
+     */
+    int alg = 0;
+    if (vl == 3 && p[0] == 0x2B && p[1] == 0x65 && p[2] == 0x70) {
+        alg = 0x0807;
+    } else if (vl == 7 && p[0] == 0x2A && p[1] == 0x86 && p[2] == 0x48 &&
+               p[3] == 0xCE && p[4] == 0x3D && p[5] == 0x02 && p[6] == 0x01) {
+        alg = 0x0403;
+    } else {
+        return -1;
+    }
+    p = alg_end;     /* skip the rest of the algorithm SEQUENCE (curve params for p256) */
+    /* subjectPublicKey BIT STRING */
+    if (der_read_tlv(&p, spki_end, &vl) != 0x03) return -1;
+    /* BIT STRING starts with a "unused bits" byte (always 0 for our keys). */
+    if (vl < 1 || p[0] != 0x00) return -1;
+    int pk_bytes = vl - 1;
+    if (alg == 0x0807) {
+        if (pk_bytes != 32) return -1;
+        for (int i = 0; i < 32; i++) out_pk[i] = p[1 + i];
+        *out_pk_len = 32;
+    } else {     /* p256 — uncompressed point: 0x04 || X(32) || Y(32) = 65 bytes */
+        if (pk_bytes != 65 || p[1] != 0x04) return -1;
+        for (int i = 0; i < 65; i++) out_pk[i] = p[1 + i];
+        *out_pk_len = 65;
+    }
+    *out_alg = alg;
+    return 0;
+}
+
 static void build_cv_sign_input(uint8_t out[130],
                                 const uint8_t transcript_hash[32])
 {
@@ -549,11 +649,25 @@ static void build_cv_sign_input(uint8_t out[130],
 }
 
 int tls_server_handshake_cert(struct tls_conn *c, int fd) {
-    /* Save inputs the caller stashed (cert_der, server_sk) so we
-     * can zero the rest. */
+    /* Save inputs the caller stashed (cert_der, server_sk, sig_alg)
+     * so we can zero the rest of the struct.
+     *
+     * sig_alg matters: httpsd sets it to 0x0403 (ECDSA-P256) before
+     * the handshake, and parse_clienthello_extensions uses that as
+     * the desired-from-client value (via `want_sig = c->sig_alg ?
+     * c->sig_alg : 0x0807;`). If we zero sig_alg here, want_sig
+     * falls back to Ed25519 — the parser then "matches" Ed25519 in
+     * the client's offered list, the CertificateVerify path runs
+     * ed25519_sign with the 32-byte ECDSA scalar as if it were the
+     * 64-byte expanded Ed25519 sk, and the resulting wire bytes
+     * tell the client "ssh-ed25519 sig" over an ECDSA-P256 cert key.
+     * Real clients (openssl, curl, Schannel) reject that combo with
+     * "wrong signature type" before they even try to verify.
+     * Session 54 missed this; session 55 fixes it. */
     const uint8_t *cert_der    = c->cert_der;
     int            cert_len    = c->cert_der_len;
     const uint8_t *sk          = c->server_sk;
+    int            saved_sig   = c->sig_alg;
 
     for (int i = 0; i < (int)sizeof(*c); i++) ((uint8_t *)c)[i] = 0;
     c->fd = fd;
@@ -561,6 +675,7 @@ int tls_server_handshake_cert(struct tls_conn *c, int fd) {
     c->cert_der = cert_der;
     c->cert_der_len = cert_len;
     c->server_sk = sk;
+    c->sig_alg   = saved_sig;
     sha256_init(&c->transcript);
 
     /* === 1. Receive ClientHello === */
@@ -954,6 +1069,22 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
     /* Snapshot transcript-without-server-Finished for later verify. */
     struct sha256 transcript_at_cf_compute_point;
 
+    /* Server cert + CertificateVerify state. We extract the cert's
+     * public key during Certificate processing and use it to verify
+     * the CertificateVerify signature. Without this validation the
+     * client would accept any server-presented cert + bogus sig as
+     * "successful" — exactly the bug session 54's broken-server
+     * exposed and openssl caught at the wire layer. */
+    int     have_cert_pk = 0;
+    int     cert_alg = 0;            /* 0x0807 (ed25519) or 0x0403 (p256) */
+    uint8_t cert_pk[65];             /* ed25519=32 bytes; p256=65 (0x04||X||Y) */
+    int     cert_pk_len = 0;
+    /* Transcript snapshot AFTER Certificate but BEFORE CertificateVerify,
+     * which is what the server signed (RFC 8446 §4.4.3 "Handshake Context
+     * = transcript-Hash(... || Certificate)"). */
+    struct sha256 transcript_at_cv_compute_point;
+    int     have_transcript_at_cv = 0;
+
     /* Buffer for handshake message reassembly across records (rare
      * but allowed). For our minimal server flight everything fits
      * in one record though. */
@@ -976,7 +1107,37 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
             int     mlen = ((int)hs_buf[p+1] << 16) | ((int)hs_buf[p+2] << 8) | hs_buf[p+3];
             if (p + 4 + mlen > hs_off) break;     /* incomplete — wait for more */
 
-            if (mt == TLS_HS_FINISHED) {
+            if (mt == TLS_HS_CERTIFICATE) {
+                /* TLS 1.3 Certificate (RFC 8446 §4.4.2):
+                 *   opaque cert_request_context<0..255>
+                 *   CertificateEntry list<3>
+                 *     CertificateEntry: opaque cert_data<3>, Extension list<2>
+                 * We need the first cert_data — that's the server's cert. */
+                if (mlen < 1) return -110;
+                int ctx_len = hs_buf[p + 4];
+                int q = p + 4 + 1 + ctx_len;
+                if (q + 3 > p + 4 + mlen) return -111;
+                int list_len = ((int)hs_buf[q] << 16) |
+                                ((int)hs_buf[q+1] << 8) | hs_buf[q+2];
+                q += 3;
+                if (q + 3 > p + 4 + mlen || list_len < 3) return -112;
+                int cd_len = ((int)hs_buf[q] << 16) |
+                              ((int)hs_buf[q+1] << 8) | hs_buf[q+2];
+                q += 3;
+                if (q + cd_len > p + 4 + mlen) return -113;
+                /* Extract pubkey from this first DER cert. */
+                if (x509_extract_pubkey(hs_buf + q, cd_len,
+                                        &cert_alg, cert_pk, &cert_pk_len) < 0) return -114;
+                have_cert_pk = 1;
+            }
+            else if (mt == TLS_HS_CERT_VERIFY) {
+                /* CertificateVerify is signed over the running
+                 * transcript that INCLUDES Certificate but NOT this
+                 * message itself. Snapshot now. */
+                transcript_at_cv_compute_point = c->transcript;
+                have_transcript_at_cv = 1;
+            }
+            else if (mt == TLS_HS_FINISHED) {
                 /* Snapshot the transcript BEFORE adding Finished — that's
                  * what server's verify_data was computed over. */
                 transcript_at_cf_compute_point = c->transcript;
@@ -987,6 +1148,49 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
             }
 
             sha256_update(&c->transcript, hs_buf + p, 4 + mlen);
+
+            /* If this was CertificateVerify, validate it now — we have
+             * the transcript snapshot from BEFORE adding CV, the
+             * cert's pubkey from the Certificate message, and the
+             * signature body. RFC 8446 §4.4.3 signs the 130-byte
+             * "TLS 1.3, server CertificateVerify" content. */
+            if (mt == TLS_HS_CERT_VERIFY) {
+                if (!have_cert_pk || !have_transcript_at_cv) return -120;
+                if (mlen < 4) return -121;
+                int sig_alg = ((int)hs_buf[p + 4] << 8) | hs_buf[p + 5];
+                int sig_len = ((int)hs_buf[p + 6] << 8) | hs_buf[p + 7];
+                if (4 + sig_len > mlen) return -122;
+                const uint8_t *sig = hs_buf + p + 8;
+
+                /* sig_alg from wire must match the cert key type. */
+                if (sig_alg != cert_alg) return -123;
+
+                uint8_t th[32];
+                struct sha256 ts_copy = transcript_at_cv_compute_point;
+                sha256_final(&ts_copy, th);
+                uint8_t to_verify[130];
+                build_cv_sign_input(to_verify, th);
+
+                if (sig_alg == 0x0807) {
+                    if (sig_len != 64) return -124;
+                    if (ed25519_verify(sig, to_verify, 130, cert_pk) != 0)
+                        return -125;
+                } else if (sig_alg == 0x0403) {
+                    /* DER-encoded ECDSA sig → raw R||S → p256_verify */
+                    uint8_t rs[64];
+                    if (p256_sig_from_der(rs, sig, sig_len) != 0) return -126;
+                    uint8_t hash[32];
+                    sha256(to_verify, 130, hash);
+                    /* cert_pk for p256 is 65 bytes (0x04 || X || Y);
+                     * p256_verify expects 64 bytes (X || Y). */
+                    if (p256_verify(rs, hash, cert_pk + 1) != 0) return -127;
+                } else {
+                    return -128;     /* unknown sig scheme */
+                }
+                /* Stash sig_alg so callers know what algo proved up. */
+                c->sig_alg = sig_alg;
+            }
+
             p += 4 + mlen;
         }
         /* Move any leftover bytes (incomplete message) to front. */
@@ -1034,6 +1238,20 @@ int tls_send(struct tls_conn *c, const void *data, int n) {
     if (send_encrypted(c, k, TLS_REC_APP_DATA,
                        (const uint8_t *)data, n) < 0) return -1;
     return n;
+}
+
+/* Send a TLS 1.3 close_notify alert (level=warning, desc=close_notify)
+ * before tearing the TCP connection down. Without this, OpenSSL logs
+ * "unexpected eof while reading" and Schannel reports "server closed
+ * abruptly (missing close_notify)" — both clean-close politeness
+ * warnings, but cosmetically distracting. RFC 8446 §6.1 says either
+ * side may signal close at any time; the receiving side stops reading
+ * application data after seeing it. */
+int tls_close_notify(struct tls_conn *c) {
+    struct tls_keys *k = c->is_server ? &c->s_ap_keys : &c->c_ap_keys;
+    uint8_t alert[2] = { 1 /*warning*/, 0 /*close_notify*/ };
+    if (send_encrypted(c, k, TLS_REC_ALERT, alert, sizeof(alert)) < 0) return -1;
+    return 0;
 }
 
 int tls_recv(struct tls_conn *c, void *out, int max_n) {

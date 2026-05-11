@@ -86,6 +86,9 @@ static void serve_one(int conn) {
 
     int sent = tls_send(&t, REPLY, sizeof(REPLY) - 1);
     printf("httpsd: sent %d encrypted bytes\n", sent);
+    /* Send TLS close_notify before TCP close so real clients
+     * (OpenSSL, Schannel) don't log "unexpected eof". */
+    tls_close_notify(&t);
     sys_close(conn);
 }
 

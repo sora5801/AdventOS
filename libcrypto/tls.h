@@ -149,4 +149,8 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd);
 int tls_send(struct tls_conn *c, const void *data, int n);
 int tls_recv(struct tls_conn *c, void *out, int max_n);
 
+/* Send a close_notify alert (RFC 8446 §6.1) before the underlying TCP
+ * close. Avoids "unexpected eof" warnings from OpenSSL / Schannel. */
+int tls_close_notify(struct tls_conn *c);
+
 #endif
