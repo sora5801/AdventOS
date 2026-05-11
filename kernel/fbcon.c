@@ -245,3 +245,14 @@ void fbcon_init(void) {
 }
 
 int fbcon_enabled(void) { return g_enabled; }
+
+/* Session 57: the userspace window manager calls this via SYS_FB_TAKEOVER
+ * to freeze kernel-side framebuffer writes for the duration of its run.
+ * Once `on=0`, fbcon stops painting on every kprintf/sys_write that
+ * would otherwise tear into the WM's rendering. The WM owns the screen
+ * until it calls back with `on=1`. The console state (cur_row/cur_col)
+ * is preserved across the freeze — the next `on=1` resumes printing
+ * where the WM took over, no full clear. */
+void fbcon_set_enabled(int on) {
+    g_enabled = on ? 1 : 0;
+}

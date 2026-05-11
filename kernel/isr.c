@@ -43,6 +43,47 @@ void isr_register_irq(int irq, irq_handler_fn handler) {
     if (irq >= 0 && irq < 16) irq_handlers[irq] = handler;
 }
 
+/* Stop the current task for a tracer (session 57). Called from the
+ * INT3 / #DB exception paths when the trap originated in ring 3.
+ *
+ * The pattern is straight ptrace: park `trap_frame` so the tracer can
+ * GETREGS / SETREGS off it, mark traced_stopped, deliver SIGCHLD to
+ * the tracer so its sys_wait wakes up, flip our state, schedule away.
+ * When the tracer later calls PTRACE_CONT / STEP, it flips us back
+ * to READY and the scheduler resumes us inside the iret tail — the
+ * pre-trap context the CPU pushed is what we iret back to. */
+static void trap_stop_for_tracer(struct registers *r, int trap_signal) {
+    extern void schedule(void);
+    extern int  bkl_held(void);
+    extern void bkl_lock(void);
+    extern void bkl_unlock(void);
+
+    struct task *t = task_current();
+    if (!t || !t->is_user || t->tracer_pid == 0) {
+        /* No tracer (or kernel-mode trap) — fall through to default
+         * diagnostic. The caller decides whether to halt or kill. */
+        return;
+    }
+
+    t->trap_frame    = r;
+    t->trap_signal   = trap_signal;
+    t->traced_stopped = 1;
+    t->state         = TASK_STATE_STOPPED;
+
+    /* Wake the tracer if it was blocked in sys_wait. signal_send
+     * sets the SIGCHLD pending bit; the wait machinery checks for
+     * stopped children too. */
+    signal_send(t->tracer_pid, SIGCHLD);
+
+    /* Same BKL handoff dance as signal_check_and_deliver's ACT_STOP:
+     * the syscall tail won't run, so we must release before
+     * scheduling and re-take afterward when the tracer resumes us. */
+    int had_bkl = bkl_held();
+    if (had_bkl) bkl_unlock();
+    schedule();
+    if (had_bkl) bkl_lock();
+}
+
 /*
  * Called from isr_common_stub for CPU exceptions.
  * The pointer is passed via cdecl on the stack; on mingw32 the symbol
@@ -57,6 +98,31 @@ void isr_handler(struct registers *r) {
     }
 
     if (n < 32) {
+        /* Debugger traps (session 57): INT3 (#BP, vector 3) is a
+         * software breakpoint hit; #DB (vector 1) is a single-step
+         * trap raised by the CPU after EFLAGS.TF=1 retired one
+         * instruction. Both stop the tracee if there's a tracer
+         * attached; otherwise we fall through to the default
+         * "kill the task with SIGSEGV-style halt" diagnostic. */
+        if ((n == 1 || n == 3) && (r->cs & 0x3) == 3) {
+            struct task *t = task_current();
+            if (t && t->tracer_pid != 0) {
+                /* #DB is delivered as a Fault (re-execute the
+                 * instruction with TF cleared)? In our model both
+                 * INT3 and TF-step are reported to the tracer as
+                 * SIGTRAP. TF is auto-cleared by the CPU on entry
+                 * to the handler. */
+                if (n == 1) {
+                    /* CPU already cleared TF in the saved EFLAGS
+                     * snapshot, but be defensive — some emulators
+                     * differ. */
+                    r->eflags &= ~0x100u;
+                }
+                trap_stop_for_tracer(r, SIGTRAP);
+                return;
+            }
+        }
+
         /* Page fault graduates from defensive panic to productive
          * lazy-loader (session 24). If cr2 lands in any of the
          * current task's mmap regions, the handler allocates a fresh

@@ -78,6 +78,20 @@ static void put_hex(struct sink *s, uint32_t u, int upper) {
     while (i--) s->putc(s, buf[i]);
 }
 
+/* Width-padded hex — emits exactly `width` digits, zero-padding on
+ * the left. Used by the %0Nx printf specifier (session 57: the
+ * debugger prints addresses as %08x for alignment). */
+static void put_hex_pad(struct sink *s, uint32_t u, int upper, int width) {
+    static const char lo[] = "0123456789abcdef";
+    static const char hi[] = "0123456789ABCDEF";
+    const char *digits = upper ? hi : lo;
+    char buf[8]; int i = 0;
+    if (u == 0) { buf[i++] = '0'; }
+    while (u)   { buf[i++] = digits[u & 0xF]; u >>= 4; }
+    while (i < width && i < 8) { buf[i++] = '0'; }
+    while (i--) s->putc(s, buf[i]);
+}
+
 /* Session 48: octal. Used for Unix file modes — printf("%o", 0644) → "644". */
 static void put_oct(struct sink *s, uint32_t u) {
     char buf[12]; int i = 0;
@@ -90,6 +104,20 @@ static int do_format(struct sink *s, const char *fmt, va_list ap) {
     while (*fmt) {
         if (*fmt != '%') { s->putc(s, *fmt++); continue; }
         fmt++;
+        /* Minimal width spec: "%0Nx" / "%0Nd" — leading zero + a
+         * single decimal digit (1..8). Anything more exotic (left
+         * justify, dynamic width, etc.) falls through to the no-
+         * width path. The session-57 debugger prints addresses as
+         * %08x; before this the format string was dumped literally
+         * because there was no parser at all. */
+        int width = 0;
+        if (*fmt == '0') {
+            fmt++;
+            while (*fmt >= '0' && *fmt <= '9') {
+                width = width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        }
         switch (*fmt) {
             case 'c': s->putc(s, (char)va_arg(ap, int)); break;
             case 's': {
@@ -100,8 +128,14 @@ static int do_format(struct sink *s, const char *fmt, va_list ap) {
             }
             case 'd': case 'i': put_dec_signed  (s, va_arg(ap, int32_t)); break;
             case 'u':           put_dec_unsigned(s, va_arg(ap, uint32_t)); break;
-            case 'x':           put_hex         (s, va_arg(ap, uint32_t), 0); break;
-            case 'X':           put_hex         (s, va_arg(ap, uint32_t), 1); break;
+            case 'x':
+                if (width > 0) put_hex_pad(s, va_arg(ap, uint32_t), 0, width);
+                else           put_hex    (s, va_arg(ap, uint32_t), 0);
+                break;
+            case 'X':
+                if (width > 0) put_hex_pad(s, va_arg(ap, uint32_t), 1, width);
+                else           put_hex    (s, va_arg(ap, uint32_t), 1);
+                break;
             case 'o':           put_oct         (s, va_arg(ap, uint32_t)); break;
             case 'p': {
                 s->putc(s, '0'); s->putc(s, 'x');

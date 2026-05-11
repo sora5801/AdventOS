@@ -102,6 +102,9 @@ USER_PROGRAMS = [
     # Session 50: TLS-backed remote shell.
     ('sshd.elf',       'user/_obj/sshd.bin',       None),
     ('ssh.elf',        'user/_obj/ssh.bin',        None),
+    # Session 57: ptrace-based debugger + its toy target.
+    ('dbg.elf',        'user/_obj/dbg.bin',        None),
+    ('dbgtest.elf',    'user/_obj/dbgtest.bin',    None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
@@ -117,6 +120,12 @@ DATA_FILES = [
     ('inittab',   'fs/inittab',   'etc'),
     ('passwd',    'fs/passwd',    'etc'),     # session 47
     ('ssh_keys',  'fs/ssh_keys',  'etc'),     # session 53 — pubkey auth
+    # Session 57: debugger sidecars. The interactive debugger
+    # (dbg.elf) opens "<prog>.syms" at runtime to resolve symbol
+    # names → user VAs. Only ship for programs we want to debug;
+    # adding more here costs ~2 KB each.
+    ('dbgtest.syms', 'user/_obj/dbgtest.syms', None),
+    ('dbg.syms',     'user/_obj/dbg.syms',     None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

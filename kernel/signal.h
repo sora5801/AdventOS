@@ -36,6 +36,9 @@
 #define SIGCONT    18    /* continue if stopped — uncatchable for default; clears stop pendings */
 #define SIGSTOP    19    /* stop, uncatchable */
 #define SIGTSTP    20    /* stop from terminal (Ctrl-Z); catchable */
+#define SIGTRAP     5    /* breakpoint / single-step trap (session 57). The
+                          * INT3 / #DB exception handler delivers this to
+                          * the tracer-attached task before stopping it. */
 
 /* User-facing handler-pointer sentinels. Kept as void* so we can
  * stuff them through the same array slot as real function pointers. */

@@ -163,6 +163,22 @@ struct task {
      * to root (uid 0); a non-root task that tries it gets -1. */
     uint16_t      uid;
     uint16_t      gid;
+
+    /* ptrace state (session 57). tracer_pid is the pid of the task
+     * that did PTRACE_TRACEME or PTRACE_ATTACH on us; 0 means not
+     * traced. When `traced_stopped` is non-zero, we're sitting in
+     * TASK_STATE_STOPPED waiting for the tracer to PTRACE_CONT /
+     * STEP — and the saved kernel-stack iret frame at trap_frame
+     * is what the tracer reads/writes via GETREGS / SETREGS.
+     *
+     * trap_frame points into THIS task's kernel stack — specifically
+     * at the `struct registers` the INT3 / #DB handler pushed before
+     * stopping us. The tracer reads it through our cr3-independent
+     * kernel mapping (the kernel stack is identity-mapped). */
+    uint32_t      tracer_pid;
+    int           traced_stopped;     /* 1 = waiting for tracer */
+    int           trap_signal;        /* SIGTRAP / SIGSEGV etc.   */
+    void         *trap_frame;         /* struct registers *       */
 };
 
 #define USER_HEAP_START  0x40200000u

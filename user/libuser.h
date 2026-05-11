@@ -100,6 +100,38 @@ typedef unsigned int   size_t;
 #define SYS_CHOWN         70
 #define SYS_OPENPTY       71
 
+/* Session 57 — GUI + debugger plumbing (mirror of kernel/syscall.h). */
+#define SYS_FB_TAKEOVER   72
+#define SYS_KBD_POLL      73
+#define SYS_MOUSE_INJECT  74
+#define SYS_PTRACE        75
+
+/* ptrace op set — mirror of kernel/syscall.h. */
+#define PTRACE_TRACEME    0
+#define PTRACE_ATTACH     1
+#define PTRACE_DETACH     2
+#define PTRACE_PEEKDATA   3
+#define PTRACE_POKEDATA   4
+#define PTRACE_GETREGS    5
+#define PTRACE_SETREGS    6
+#define PTRACE_CONT       7
+#define PTRACE_STEP       8
+#define PTRACE_WAIT       9
+
+struct ptrace_regs {
+    uint32_t eax, ebx, ecx, edx;
+    uint32_t esi, edi, ebp;
+    uint32_t eip, esp;
+    uint32_t eflags;
+};
+
+struct ptrace_args {
+    uint32_t       addr;
+    uint32_t       size;
+    void          *buf;
+    struct ptrace_regs *regs;
+};
+
 /* Block-device ABI — must match kernel/syscall.h exactly. */
 struct sys_block_info {
     unsigned int block_size;
@@ -262,6 +294,22 @@ int      sys_chown   (const char *path, int uid, int gid);
  * master's read. Used by sshd to set up a real-tty environment for
  * the remote shell. Returns 0 on success, -1 if the pty table is full. */
 int      sys_openpty(int fds[2]);
+
+/* ---- Session 57: GUI + debugger ----
+ *
+ *   fb_takeover(on)   : on=1 freezes kernel fbcon writes; on=0 resumes.
+ *                       Lets the WM own the framebuffer without fbcon
+ *                       tearing into its rendering.
+ *   kbd_poll()        : non-blocking — returns next keystroke byte or 0.
+ *                       Bypasses the cooked TTY layer (WM wants raw
+ *                       keystrokes regardless of the global TTY mode).
+ *   mouse_inject(x,y,b): force absolute cursor state, for tests.
+ *   ptrace(op,pid,a)  : ptrace multiplexed syscall — see syscall.h for
+ *                       the op set + ptrace_args layout. */
+int      sys_fb_takeover (int on);
+int      sys_kbd_poll    (void);
+int      sys_mouse_inject(int x, int y, int btns);
+int      sys_ptrace      (int op, int pid, void *args);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

@@ -60,11 +60,18 @@ void idt_init(void) {
 
     memset(idt, 0, sizeof(idt));
 
-    /* 0x8E = present, ring 0, 32-bit interrupt gate */
+    /* 0x8E = present, ring 0, 32-bit interrupt gate.
+     * 0xEE = same, DPL=3 — required for INT3 (#BP) so a 0xCC byte
+     * executed at CPL=3 (debugger software breakpoint) traps into
+     * the kernel cleanly instead of raising #GP. Vector 1 (#DB) is
+     * CPU-generated either by TF-driven single-step or hardware
+     * debug registers; it doesn't need DPL=3 strictly, but we keep
+     * the kernel-only DPL=0 for it since user code never invokes
+     * `int $1` directly. */
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);
     idt_set_gate(1,  (uint32_t)isr1,  0x08, 0x8E);
     idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E);
-    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0x8E);
+    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0xEE);
     idt_set_gate(4,  (uint32_t)isr4,  0x08, 0x8E);
     idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);
     idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);

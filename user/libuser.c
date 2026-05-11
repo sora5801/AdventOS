@@ -366,6 +366,44 @@ int sys_openpty(int fds[2]) {
     return ret;
 }
 
+/* ---- Session 57: WM + debugger syscalls ---- */
+
+int sys_fb_takeover(int on) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FB_TAKEOVER), "b"(on)
+                      : "memory");
+    return ret;
+}
+
+int sys_kbd_poll(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_KBD_POLL)
+                      : "memory");
+    return ret;
+}
+
+int sys_mouse_inject(int x, int y, int btns) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MOUSE_INJECT), "b"(x), "c"(y), "d"(btns)
+                      : "memory");
+    return ret;
+}
+
+int sys_ptrace(int op, int pid, void *args) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_PTRACE), "b"(op), "c"(pid), "d"(args)
+                      : "memory");
+    return ret;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

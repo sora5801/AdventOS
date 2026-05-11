@@ -118,6 +118,23 @@ uintptr_t paging_translate(uintptr_t virt) {
     return (uintptr_t)((pt[pt_i] & (uint32_t)PAGE_MASK) | (virt & 0xFFF));
 }
 
+/* Cross-PD walk — translate `virt` in `pd`'s address space to physical.
+ * Used by the ptrace PEEK / POKE path (session 57) to read another
+ * task's user memory without doing a CR3 swap. Kernel pages are
+ * identity-mapped in low RAM, so dereferencing the PT pointers
+ * directly is safe.
+ *
+ * Returns 0 if the target page isn't mapped, matching paging_translate. */
+uint32_t paging_user_va_to_pa(uint32_t *pd, uint32_t virt) {
+    if (!pd) return 0;
+    uint32_t pd_i = PD_INDEX(virt);
+    uint32_t pt_i = PT_INDEX(virt);
+    if (!(pd[pd_i] & PTE_PRESENT)) return 0;
+    uint32_t *pt = (uint32_t *)(uintptr_t)(pd[pd_i] & (uint32_t)PAGE_MASK);
+    if (!(pt[pt_i] & PTE_PRESENT)) return 0;
+    return (pt[pt_i] & (uint32_t)PAGE_MASK) | (virt & 0xFFFu);
+}
+
 int       paging_is_enabled(void) { return g_paging_on; }
 uintptr_t paging_pd_addr(void)    { return (uintptr_t)g_pd; }
 

@@ -184,6 +184,21 @@ void mouse_inject(int32_t dx, int32_t dy, uint32_t buttons) {
     g_packets++;
 }
 
+/* Absolute-position injection (session 57). Sister to mouse_inject's
+ * relative deltas — used by SYS_MOUSE_INJECT for the GUI selftest,
+ * which needs to land the cursor on specific window coords without
+ * caring where it was before. Same clamping rules. */
+void mouse_set_state(int x, int y, int buttons) {
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > g_screen_w - 1) x = g_screen_w - 1;
+    if (y > g_screen_h - 1) y = g_screen_h - 1;
+    g_x = x;
+    g_y = y;
+    g_buttons = buttons & 0x07;
+    g_packets++;
+}
+
 void mouse_init(void) {
     if (g_initialized) return;
 

@@ -102,13 +102,23 @@ echo "[5/7] build user programs"
 
 USER_PROGS=(hello count sh cat echo httpd ed init
             wc head tail grep sort uniq tee tr seq date kill ls pwd
-            nc wget telnet irc ircd gui beep usbtest vi id)
+            nc wget telnet irc ircd gui beep usbtest vi id
+            dbg dbgtest)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    # Session 57: emit a symbol-table sidecar for the debugger. nm
+    # output is `<8-hex-digits> <type> <name>` — keep only the T/t
+    # (text, both global and file-static) rows so the debugger sees
+    # function entry points. Stripping the leading mingw underscore
+    # is done by the debugger at load time, NOT here, so the file
+    # stays a faithful nm dump.
+    nm "user/_obj/${name}.elf" \
+        | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
+        > "user/_obj/${name}.syms"
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
 done
 

@@ -26,6 +26,9 @@
 
 void fbcon_init(void);
 int  fbcon_enabled(void);
+/* Session 57: freeze / resume kernel fbcon writes so a userspace WM
+ * can own the framebuffer for the duration of its run. */
+void fbcon_set_enabled(int on);
 
 void fbcon_clear(void);
 void fbcon_putc(char c);

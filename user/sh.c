@@ -1115,14 +1115,13 @@ static void selftest(void) {
             puts("  SKIP: VBE not enabled, no FB to mmap\n");
         }
 
-        /* Optionally launch the gui.elf demo for ~4 seconds. The
-         * harness can take a screenshot mid-run and verify the
-         * cursor sprite is on screen. We fork+exec rather than
-         * inline so the demo's painting doesn't run on top of the
-         * shell's selftest output. */
+        /* Quick gui.elf smoke: the session-57 rewrite turned this
+         * into a multi-window WM. Running it in `selftest` mode caps
+         * at 80 frames (~1.3 s) and applies a deterministic mouse
+         * script — see t39 below for the full pixel-pattern check. */
         int pid = sys_fork();
         if (pid == 0) {
-            const char *argv2[] = { "gui.elf", 0 };
+            const char *argv2[] = { "gui.elf", "selftest", 0 };
             sys_exec("gui.elf", argv2);
             sys_exit(127);
         }
@@ -2205,6 +2204,202 @@ static void selftest(void) {
             EXPECT(find_sigalgs, "EXT_INFO carried server-sig-algs extension");
             EXPECT(find_rekey,   "client completed mid-session rekey (session_id preserved)");
             EXPECT(find_uid,     "id.elf output (uid=1000) flowed through post-rekey keys");
+        }
+
+        #undef EXPECT
+    }
+
+    puts("[t39] GUI / window manager: multi-window compositing + scripted events\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* The session-57 WM replaces the old single-window gui.elf
+         * with a real compositing window manager: 4 built-in apps
+         * (Hello, Clock, Paint, Tasks), title-bar drag, focus + z-
+         * order, close button, mouse + keyboard event dispatch.
+         *
+         * In `selftest` mode it runs a scripted ladder of injected
+         * mouse events (sys_mouse_inject) for 80 frames, then prints
+         * three pixel reads from known coordinates: a Paint canvas
+         * cell that the script clicks (should be red, 0xE03030), the
+         * Hello window's title bar after we dragged it (should be the
+         * focused-blue 0x305080), and the desktop background
+         * (0x103060). We grep for those exact hex values.
+         *
+         * If the WM never registered, the framebuffer mmap failed, or
+         * any of the script clicks missed their targets, the pixels
+         * won't match and the test fails. Pixel-exact == no flakiness. */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for gui.elf capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "gui.elf", "selftest", 0 };
+                sys_exec("gui.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[2048];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from gui.elf  (exit=%d)\n",
+                   total, code);
+            puts("  ---- gui.elf output ----\n");
+            sys_write(1, captured, total);
+            puts("  ------------------------\n");
+
+            /* Headless QEMU may run without -vga std => no VBE. In
+             * that case the WM prints "no framebuffer" and exits 0;
+             * we treat the test as SKIP rather than FAIL. */
+            int find_no_fb = 0;
+            for (int i = 0; i < total - 17; i++) {
+                if (captured[i] == 'n' &&
+                    memcmp(captured + i, "no framebuffer", 14) == 0) {
+                    find_no_fb = 1; break;
+                }
+            }
+
+            int find_wm_init  = 0;
+            int find_paint_px = 0;
+            int find_hello_px = 0;
+            int find_bg_px    = 0;
+            int find_done     = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_wm_init && i + 19 <= total &&
+                    captured[i] == 'g' &&
+                    memcmp(captured + i, "gui-wm: ", 8) == 0 &&
+                    /* width string starts with a digit after "gui-wm: " */
+                    captured[i + 8] >= '0' && captured[i + 8] <= '9') find_wm_init = 1;
+                if (!find_paint_px && i + 32 <= total &&
+                    memcmp(captured + i, "paint cell @ (322,232) = 0xe03030", 33) == 0)
+                    find_paint_px = 1;
+                if (!find_hello_px && i + 37 <= total &&
+                    memcmp(captured + i, "hello title bar @ (110,70) = 0x305080", 37) == 0)
+                    find_hello_px = 1;
+                if (!find_bg_px && i + 25 <= total &&
+                    memcmp(captured + i, "desktop bg @ (0,30) = 0x103060", 30) == 0)
+                    find_bg_px = 1;
+                if (!find_done && i + 16 <= total &&
+                    memcmp(captured + i, "selftest done", 13) == 0)
+                    find_done = 1;
+            }
+
+            if (find_no_fb) {
+                puts("  SKIP  no framebuffer in this QEMU instance\n");
+            } else {
+                EXPECT(find_wm_init,   "WM mmap'd framebuffer and reported geometry");
+                EXPECT(find_paint_px,  "Paint canvas cell @ (322,232) is RED (0xe03030) — scripted click landed");
+                EXPECT(find_hello_px,  "Hello title bar @ (110,70) is FOCUS-BLUE (0x305080) — drag-and-raise worked");
+                EXPECT(find_bg_px,     "Desktop bg @ (0,30) is steel-blue (0x103060) — fb_takeover'd cleanly");
+                EXPECT(find_done,      "WM exited normally after scripted frames");
+            }
+        }
+
+        #undef EXPECT
+    }
+
+    puts("[t40] dbg: INT3 breakpoint + single-step + ptrace round-trip\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* End-to-end check of the session-57 debugger plumbing:
+         *
+         *  1. dbg.elf --auto dbgtest.elf
+         *  2. dbgtest issues `int $3` at main entry (it was invoked
+         *     with `trap` arg). Kernel: vector 3 → trap_stop_for_tracer
+         *     → SIGCHLD to dbg, state=STOPPED, PTRACE_WAIT returns SIGTRAP.
+         *  3. dbg plants 0xCC at `_square` and PTRACE_CONTs.
+         *  4. dbgtest's compute_loop calls square() 5 times. Each call
+         *     hits the 0xCC, traps, dbg.continue_past_trap() restores
+         *     the byte, rewinds EIP, single-steps one instruction, re-
+         *     arms the 0xCC, then CONTs.
+         *  5. After 5 hits, dbgtest exits 0 (counter==30). dbg prints
+         *     "total square hits = 5".
+         *
+         * Grep targets in captured output:
+         *   - "entry trap, sig=5"     (SIGTRAP delivered)
+         *   - "<square+0x0>"          (symbol resolution working)
+         *   - "total square hits = 5" (breakpoint loop + step + rearm)
+         *   - "dbgtest: counter=30"   (target ran to completion) */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for dbg capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "dbg.elf", "--auto", "dbgtest.elf", 0 };
+                sys_exec("dbg.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from dbg.elf  (exit=%d)\n",
+                   total, code);
+            puts("  ---- dbg.elf output ----\n");
+            sys_write(1, captured, total);
+            puts("  ------------------------\n");
+
+            int find_loaded = 0, find_entry = 0, find_square = 0;
+            int find_hits   = 0, find_counter = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_loaded && i + 12 <= total &&
+                    memcmp(captured + i, "dbg: loaded", 11) == 0) find_loaded = 1;
+                if (!find_entry && i + 17 <= total &&
+                    memcmp(captured + i, "entry trap, sig=5", 17) == 0) find_entry = 1;
+                if (!find_square && i + 8 <= total &&
+                    memcmp(captured + i, "<square+", 8) == 0) find_square = 1;
+                if (!find_hits && i + 24 <= total &&
+                    memcmp(captured + i, "total square hits = 5", 21) == 0) find_hits = 1;
+                if (!find_counter && i + 19 <= total &&
+                    memcmp(captured + i, "dbgtest: counter=30", 19) == 0) find_counter = 1;
+            }
+
+            EXPECT(find_loaded,  "debugger loaded .syms file for dbgtest.elf");
+            EXPECT(find_entry,   "INT3 at dbgtest's main entry delivered SIGTRAP (sig=5)");
+            EXPECT(find_square,  "addr-to-sym resolved EIP to <square+...>");
+            EXPECT(find_hits,    "software breakpoint re-armed correctly across 5 calls");
+            EXPECT(find_counter, "dbgtest ran to completion under tracer (counter=30)");
         }
 
         #undef EXPECT

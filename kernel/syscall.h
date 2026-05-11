@@ -111,6 +111,33 @@
                                 fds[0] = master, fds[1] = slave. Refs both
                                 start at 1 (one fd per end). Session 52. */
 
+/* ---- Session 57: GUI + window manager support ---- */
+
+#define SYS_FB_TAKEOVER   72 /* (eax=72, ebx=on) -> 0. When on, freezes
+                                fbcon — kernel writes to fb stop landing on
+                                the framebuffer. When off, restores normal
+                                console output. Lets a userspace window
+                                manager fully own the framebuffer without
+                                fbcon tearing into its rendering. */
+#define SYS_KBD_POLL      73 /* (eax=73) -> next ASCII key from the kbd
+                                ring, or 0 if empty. Non-blocking — the
+                                WM polls this at frame rate instead of
+                                a blocking sys_read on fd 0 that would
+                                stall the 60 fps loop. */
+#define SYS_MOUSE_INJECT  74 /* (eax=74, ebx=x, ecx=y, edx=btns) -> 0.
+                                Test helper for the WM selftest: forces
+                                the mouse driver's reported cursor to
+                                (x,y) with the given button bitmask, as
+                                if a real PS/2 packet had arrived. */
+
+/* ---- Session 57: ptrace-based debugger support ---- */
+
+#define SYS_PTRACE        75 /* (eax=75, ebx=op, ecx=pid, edx=&struct
+                                ptrace_args) -> op-specific return.
+                                The operation set + arg encoding lives in
+                                struct ptrace_args below. Single multiplexed
+                                syscall to avoid burning seven slots. */
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;
@@ -122,6 +149,81 @@ struct sys_block_args {
     uint32_t lba;
     uint32_t n_blocks;
     void    *buf;
+};
+
+/* ---- ptrace ABI (session 57) ----
+ *
+ * The classic POSIX ptrace is a single syscall multiplexed by `op`. We
+ * follow the same shape so the userspace debugger reads naturally.
+ *
+ * For ops that need register state or a byte buffer, the third arg
+ * is a pointer to struct ptrace_args below — its `data` field carries
+ * either a `struct ptrace_regs *` or a `(void *, size_t)` buffer pair
+ * depending on op. `addr` is the target VA in the tracee's address
+ * space (for PEEK/POKE) or 0 (otherwise).
+ *
+ * Op semantics (kernel side):
+ *   - TRACEME:   the calling task marks itself traced by its parent.
+ *                The very next SIGTRAP-class event (entry to a
+ *                future exec'd binary, or an INT3) will stop the
+ *                task and notify the tracer via SIGCHLD.
+ *   - ATTACH:    parent declares "I am the tracer of pid". The tracee
+ *                is sent SIGSTOP so the tracer can inspect from a
+ *                quiesced state.
+ *   - DETACH:    clear the trace relationship; if stopped, continue.
+ *   - PEEKDATA:  read `size` bytes from tracee's VA `addr` into the
+ *                tracer's `buf`. Honors the tracee's user PD — i.e.
+ *                we walk the page table and copy from the right CR3.
+ *   - POKEDATA:  symmetric write; used by the debugger to plant 0xCC
+ *                breakpoints and to write back the original byte on
+ *                continue.
+ *   - GETREGS:   copy the tracee's saved ring-3 register frame into
+ *                tracer's `regs`. Only valid when tracee is STOPPED.
+ *   - SETREGS:   write tracer's `regs` back into the tracee's saved
+ *                frame. The next iret-to-ring3 picks up the new EIP/
+ *                ESP/EFLAGS, so this is how we "rewind" EIP after an
+ *                INT3 hit (the trap moves EIP one past the 0xCC byte;
+ *                the debugger has to put it back at the breakpoint
+ *                address so the original instruction re-executes).
+ *   - CONT:      resume the tracee. Same as SIGCONT but doesn't queue
+ *                a delivery — just flips state back to READY.
+ *   - STEP:      set EFLAGS.TF=1 in the saved frame and CONT. After
+ *                one instruction the CPU raises #DB (vector 1) and
+ *                we stop again. */
+
+#define PTRACE_TRACEME    0
+#define PTRACE_ATTACH     1
+#define PTRACE_DETACH     2
+#define PTRACE_PEEKDATA   3
+#define PTRACE_POKEDATA   4
+#define PTRACE_GETREGS    5
+#define PTRACE_SETREGS    6
+#define PTRACE_CONT       7
+#define PTRACE_STEP       8
+/* PTRACE_WAIT: block until the tracee changes state. Returns:
+ *   >0  : tracee stopped — value is the trap signal (e.g. SIGTRAP=5)
+ *   0   : tracee exited normally — caller should sys_wait to reap
+ *   -1  : pid isn't traced by us
+ * Implemented as a polling loop on the tracee's traced_stopped /
+ * state flags, with sys_sleep_ms-style yields between checks. */
+#define PTRACE_WAIT       9
+
+/* Register snapshot the tracer reads/writes. Layout MUST match the
+ * subset of `struct registers` (kernel/isr.h) that we expose — the
+ * extra kernel-only fields (segment selectors, error codes) are
+ * not surfaced because user-mode debuggers don't need them. */
+struct ptrace_regs {
+    uint32_t eax, ebx, ecx, edx;
+    uint32_t esi, edi, ebp;
+    uint32_t eip, esp;
+    uint32_t eflags;
+};
+
+struct ptrace_args {
+    uint32_t       addr;       /* tracee VA for PEEK/POKE; ignored otherwise */
+    uint32_t       size;       /* PEEK/POKE byte count */
+    void          *buf;        /* PEEK/POKE caller buffer (in tracer's VA) */
+    struct ptrace_regs *regs;  /* GETREGS / SETREGS */
 };
 
 void syscall_dispatch(struct registers *r);

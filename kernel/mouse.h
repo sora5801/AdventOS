@@ -55,4 +55,9 @@ void               mouse_set_pos(int32_t x, int32_t y);
  * shows up in the same `mouse_state` snapshot sys_mouse_state reads. */
 void               mouse_inject(int32_t dx, int32_t dy, uint32_t buttons);
 
+/* Force absolute (x, y, btns) — session 57 SYS_MOUSE_INJECT. The GUI
+ * selftest uses this to land the cursor on a known window-content
+ * pixel without depending on PS/2 packet arrival timing. */
+void               mouse_set_state(int x, int y, int buttons);
+
 #endif

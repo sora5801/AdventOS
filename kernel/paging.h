@@ -27,6 +27,12 @@ int       paging_unmap(uintptr_t virt);
 /* Translate a virtual address to physical, or 0 if unmapped. */
 uintptr_t paging_translate(uintptr_t virt);
 
+/* Same translation but against an arbitrary user PD instead of the
+ * currently-loaded CR3. Used by the ptrace PEEK/POKE path (session 57)
+ * to read/write a tracee's user memory while running on the tracer's
+ * CR3. Returns 0 if unmapped. */
+uint32_t  paging_user_va_to_pa(uint32_t *pd, uint32_t virt);
+
 int       paging_is_enabled(void);
 uintptr_t paging_pd_addr(void);
 uint32_t  paging_pd_used(void);

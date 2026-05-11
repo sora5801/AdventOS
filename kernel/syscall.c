@@ -427,6 +427,51 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
+        case SYS_FB_TAKEOVER: {
+            /* When `a` is non-zero, freeze fbcon so kernel writes
+             * to the framebuffer stop landing on screen — the userspace
+             * window manager takes over. When zero, restore. We don't
+             * also touch the back buffer; the WM redraws every frame
+             * so any "ghost" pre-takeover content gets overwritten. */
+            extern void fbcon_set_enabled(int on);
+            fbcon_set_enabled(a == 0);
+            ret = 0;
+            break;
+        }
+        case SYS_KBD_POLL: {
+            /* Non-blocking keyboard read for the WM event loop. Returns
+             * the next byte from the input ring, or 0 if empty. Bypasses
+             * the cooked/raw TTY dance entirely — the WM wants raw
+             * keystrokes regardless of TTY_ICANON state. */
+            extern int  keyboard_has_char(void);
+            extern char keyboard_getc(void);
+            if (keyboard_has_char()) {
+                ret = (uint8_t)keyboard_getc();
+            } else {
+                ret = 0;
+            }
+            break;
+        }
+        case SYS_MOUSE_INJECT: {
+            /* Force the mouse driver's reported cursor to absolute
+             * (a, b) with button mask `c`. Test-only — lets the WM
+             * selftest drive the cursor deterministically instead of
+             * relying on a real PS/2 event. Distinct from the existing
+             * mouse_inject(dx, dy, btns) which the USB HID path uses
+             * for relative deltas. */
+            extern void mouse_set_state(int x, int y, int btns);
+            mouse_set_state((int)a, (int)b, (int)c);
+            ret = 0;
+            break;
+        }
+        case SYS_PTRACE: {
+            /* Multiplexed ptrace dispatch (session 57). See the op
+             * comments in syscall.h for what each one does; the heavy
+             * lifting lives in kernel/ptrace.c. */
+            extern int  ptrace_dispatch(int op, uint32_t pid, void *args);
+            ret = ptrace_dispatch((int)a, b, (void *)(uintptr_t)c);
+            break;
+        }
         case SYS_OPENPTY: {
             /* Same shape as SYS_PIPE — claim two fd slots, then a pty
              * object, install both, write the fd ints back to user. */
