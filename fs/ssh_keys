@@ -1,0 +1,22 @@
+# /etc/ssh_keys — per-user authorized public keys for AdventOS sshd.
+#
+# One line per key:
+#   <user> ssh-ed25519 <base64-blob> [comment]
+#
+# The blob is the OpenSSH-format ed25519 public key. Generate one with:
+#
+#   ssh-keygen -t ed25519 -f mykey
+#
+# then paste the contents of `mykey.pub` here, with `<user>` prefixed.
+# For example, to let `guest` log in with the key in mykey.pub:
+#
+#   guest ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-comment-here
+#
+# Once added (and AdventOS rebuilt), `ssh -i mykey -p 2222 guest@host`
+# authenticates over RFC 4252 §7 with no password prompt.
+#
+# Lines starting with `#` and blank lines are ignored.
+#
+# sshd ALSO has a built-in demo pubkey for `guest`, matched by
+# ssh.elf's `@key` mode (see user/ssh.c DEMO_USER_SEED). That demo
+# does not require any entry here.

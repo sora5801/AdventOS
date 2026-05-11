@@ -343,6 +343,95 @@ static int do_userauth(struct ssh_conn *c, const char *user, const char *pass) {
     return -1;
 }
 
+/* Demo client keypair seed — MUST match sshd's DEMO_USER_SEED so the
+ * derived pubkey matches what sshd registered as `guest`'s authorized
+ * key. ssh.elf `@key` mode uses this seed to derive sk for signing. */
+static const uint8_t DEMO_USER_SEED[32] = {
+    0x42, 0x18, 0xE4, 0x77, 0xB5, 0x29, 0xAA, 0x06,
+    0x3C, 0x1F, 0x55, 0x91, 0x2E, 0x4D, 0xC3, 0x88,
+    0x6B, 0xAA, 0x07, 0x14, 0xE5, 0xD9, 0x60, 0x21,
+    0xCC, 0x8E, 0xFB, 0x32, 0x70, 0xA5, 0x16, 0x4F,
+};
+
+/* RFC 4252 §7 publickey auth. Two-step: probe with has_sig=FALSE to
+ * confirm the server accepts our key, then re-send with the canonical
+ * signed auth-blob. */
+static int do_pubkey_auth(struct ssh_conn *c, const char *user) {
+    uint8_t pk[32], sk[64];
+    ed25519_keypair_from_seed(pk, sk, DEMO_USER_SEED);
+
+    /* pk_blob = string "ssh-ed25519" || string pubkey(32). */
+    uint8_t pk_blob[64];
+    uint8_t *bp = pk_blob;
+    ssh_put_cstring(&bp, "ssh-ed25519");
+    ssh_put_string(&bp, pk, 32);
+    int pk_blob_len = (int)(bp - pk_blob);
+
+    /* (1) Probe — has_signature=FALSE. */
+    {
+        uint8_t pkt[256];
+        uint8_t *pp = pkt;
+        ssh_put_u8(&pp, SSH_MSG_USERAUTH_REQUEST);
+        ssh_put_cstring(&pp, user);
+        ssh_put_cstring(&pp, "ssh-connection");
+        ssh_put_cstring(&pp, "publickey");
+        ssh_put_bool(&pp, 0);
+        ssh_put_cstring(&pp, "ssh-ed25519");
+        ssh_put_string(&pp, pk_blob, pk_blob_len);
+        if (send_packet(c, pkt, (int)(pp - pkt)) < 0) return -1;
+    }
+    uint8_t reply[256];
+    int n = recv_packet(c, reply, sizeof(reply));
+    if (n < 1 || reply[0] != SSH_MSG_USERAUTH_PK_OK) {
+        puts("ssh: server rejected our pubkey at probe\n");
+        return -1;
+    }
+
+    /* (2) Build the canonical auth-blob and sign it. */
+    uint8_t auth_blob[1024];
+    uint8_t *abp = auth_blob;
+    ssh_put_string(&abp, c->session_id, 32);
+    ssh_put_u8(&abp, SSH_MSG_USERAUTH_REQUEST);
+    ssh_put_cstring(&abp, user);
+    ssh_put_cstring(&abp, "ssh-connection");
+    ssh_put_cstring(&abp, "publickey");
+    ssh_put_bool(&abp, 1);
+    ssh_put_cstring(&abp, "ssh-ed25519");
+    ssh_put_string(&abp, pk_blob, pk_blob_len);
+    int auth_blob_len = (int)(abp - auth_blob);
+
+    uint8_t sig[64];
+    ed25519_sign(sig, auth_blob, auth_blob_len, sk);
+
+    /* sig_blob = string "ssh-ed25519" || string sig(64). */
+    uint8_t sig_blob[128];
+    uint8_t *sbp = sig_blob;
+    ssh_put_cstring(&sbp, "ssh-ed25519");
+    ssh_put_string(&sbp, sig, 64);
+    int sig_blob_len = (int)(sbp - sig_blob);
+
+    /* (3) Resend the same request with has_signature=TRUE + the sig. */
+    {
+        uint8_t pkt[512];
+        uint8_t *pp = pkt;
+        ssh_put_u8(&pp, SSH_MSG_USERAUTH_REQUEST);
+        ssh_put_cstring(&pp, user);
+        ssh_put_cstring(&pp, "ssh-connection");
+        ssh_put_cstring(&pp, "publickey");
+        ssh_put_bool(&pp, 1);
+        ssh_put_cstring(&pp, "ssh-ed25519");
+        ssh_put_string(&pp, pk_blob, pk_blob_len);
+        ssh_put_string(&pp, sig_blob, sig_blob_len);
+        if (send_packet(c, pkt, (int)(pp - pkt)) < 0) return -1;
+    }
+    n = recv_packet(c, reply, sizeof(reply));
+    if (n < 1 || reply[0] != SSH_MSG_USERAUTH_SUCCESS) {
+        puts("ssh: server rejected our pubkey signature\n");
+        return -1;
+    }
+    return 0;
+}
+
 static int do_open_session(struct ssh_conn *c, uint32_t *server_chan) {
     uint8_t p[64];
     uint8_t *pp = p;
@@ -614,11 +703,21 @@ int main(int argc, char **argv) {
     puts("ssh: transport encrypted (aes128-gcm)\n");
 
     if (do_service_request(&c) < 0) { puts("ssh: SERVICE_REQUEST failed\n"); return 1; }
-    if (do_userauth(&c, user, pass) < 0) {
+
+    /* `@key` is a placeholder for the password slot meaning "skip
+     * password auth, try pubkey with the embedded demo key instead".
+     * Useful for the selftest and for cases where the user has
+     * registered the demo pubkey on the server side. */
+    int used_pubkey = (pass[0]=='@' && pass[1]=='k' && pass[2]=='e' &&
+                       pass[3]=='y' && pass[4]==0);
+    int auth_rc;
+    if (used_pubkey) auth_rc = do_pubkey_auth(&c, user);
+    else             auth_rc = do_userauth(&c, user, pass);
+    if (auth_rc < 0) {
         puts("ssh: authentication failed\n");
         return 1;
     }
-    puts("ssh: authenticated\n");
+    printf("ssh: authenticated (%s)\n", used_pubkey ? "pubkey" : "password");
 
     uint32_t scid;
     if (do_open_session(&c, &scid) < 0) {

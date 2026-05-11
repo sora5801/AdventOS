@@ -116,6 +116,7 @@ DATA_FILES = [
     ('hello.txt', 'fs/hello.txt', None),
     ('inittab',   'fs/inittab',   'etc'),
     ('passwd',    'fs/passwd',    'etc'),     # session 47
+    ('ssh_keys',  'fs/ssh_keys',  'etc'),     # session 53 — pubkey auth
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

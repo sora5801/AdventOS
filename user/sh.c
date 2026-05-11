@@ -1918,6 +1918,71 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t35] sshd: pubkey auth (ed25519 probe + signed auth-blob, RFC 4252 §7)\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* End-to-end pubkey loopback: ssh.elf in @key mode derives
+         * the demo private key from its embedded seed and authenticates
+         * via signed auth-blob. Server's matching demo pubkey is in
+         * its in-memory authorized list. No filesystem setup needed. */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for ssh capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "ssh.elf", "127.0.0.1", "guest", "@key", "id.elf", 0 };
+                sys_exec("ssh.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from ssh.elf @key  (exit=%d)\n",
+                   total, code);
+            puts("  ---- ssh.elf output ----\n");
+            sys_write(1, captured, total);
+            puts("  ------------------------\n");
+
+            int find_pubkey = 0, find_uid = 0, find_kex = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_kex && i + 10 <= total && captured[i] == 'K' &&
+                    memcmp(captured + i, "KEX done, ", 10) == 0) find_kex = 1;
+                if (!find_pubkey && i + 21 <= total && captured[i] == 'a' &&
+                    memcmp(captured + i, "authenticated (pubkey)", 22) == 0) find_pubkey = 1;
+                if (!find_uid && i + 8 <= total && captured[i] == 'u' &&
+                    memcmp(captured + i, "uid=1000", 8) == 0) find_uid = 1;
+            }
+
+            EXPECT(find_kex,    "transport handshake completed (KEX + host-key)");
+            EXPECT(find_pubkey, "client reported 'authenticated (pubkey)'");
+            EXPECT(find_uid,    "remote `id.elf` ran as guest (uid=1000) via pubkey-auth'd session");
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t9b] vi: modal editor round-trip (open, edit, :wq, verify)\n");
     {
         /* Seed a small file then drive vi via injected keystrokes:

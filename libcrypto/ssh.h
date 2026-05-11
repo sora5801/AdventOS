@@ -37,6 +37,7 @@
 #define SSH_MSG_USERAUTH_FAILURE           51
 #define SSH_MSG_USERAUTH_SUCCESS           52
 #define SSH_MSG_USERAUTH_BANNER            53
+#define SSH_MSG_USERAUTH_PK_OK             60   /* "publickey" probe reply */
 #define SSH_MSG_GLOBAL_REQUEST             80
 #define SSH_MSG_REQUEST_SUCCESS            81
 #define SSH_MSG_REQUEST_FAILURE            82

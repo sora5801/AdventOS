@@ -55,6 +55,149 @@ static const uint8_t HOSTKEY_SEED[32] = {
 static uint8_t g_host_pk[32];
 static uint8_t g_host_sk[64];
 
+/* ---- pubkey-auth (session 53, RFC 4252 §7) ----------------------- */
+
+/* Demo client keypair — seeded so the same pubkey lands in the
+ * authorized list every boot. ssh.elf derives the matching private
+ * key from the same constant via `@key` mode, so the in-OS loopback
+ * selftest can verify the auth flow end-to-end without filesystem
+ * setup. Real OpenSSH clients use their own keys — those go in
+ * /etc/ssh_keys (parsed below). */
+static const uint8_t DEMO_USER_SEED[32] = {
+    0x42, 0x18, 0xE4, 0x77, 0xB5, 0x29, 0xAA, 0x06,
+    0x3C, 0x1F, 0x55, 0x91, 0x2E, 0x4D, 0xC3, 0x88,
+    0x6B, 0xAA, 0x07, 0x14, 0xE5, 0xD9, 0x60, 0x21,
+    0xCC, 0x8E, 0xFB, 0x32, 0x70, 0xA5, 0x16, 0x4F,
+};
+
+#define AUTH_KEYS_MAX 16
+struct auth_key {
+    char    user[32];
+    uint8_t pubkey[32];
+};
+static struct auth_key g_auth_keys[AUTH_KEYS_MAX];
+static int             g_n_auth_keys;
+
+static int my_strlen(const char *s) {
+    int n = 0; while (s[n]) n++; return n;
+}
+
+static void add_auth_key(const char *user, const uint8_t pk[32]) {
+    if (g_n_auth_keys >= AUTH_KEYS_MAX) return;
+    int i = 0;
+    while (user[i] && i < 31) { g_auth_keys[g_n_auth_keys].user[i] = user[i]; i++; }
+    g_auth_keys[g_n_auth_keys].user[i] = 0;
+    for (int j = 0; j < 32; j++) g_auth_keys[g_n_auth_keys].pubkey[j] = pk[j];
+    g_n_auth_keys++;
+}
+
+static int pubkey_authorized(const char *user, const uint8_t pk[32]) {
+    int ulen = my_strlen(user);
+    for (int i = 0; i < g_n_auth_keys; i++) {
+        if (my_strlen(g_auth_keys[i].user) != ulen) continue;
+        int match = 1;
+        for (int j = 0; j < ulen; j++) {
+            if (g_auth_keys[i].user[j] != user[j]) { match = 0; break; }
+        }
+        if (!match) continue;
+        int kmatch = 1;
+        for (int j = 0; j < 32; j++) {
+            if (g_auth_keys[i].pubkey[j] != pk[j]) { kmatch = 0; break; }
+        }
+        if (kmatch) return 1;
+    }
+    return 0;
+}
+
+/* Standard base64 alphabet. Decode `in[0..len-1]`, skipping whitespace
+ * and `=` padding, into `out`. Returns bytes written, or -1 on a
+ * non-base64 char. */
+static int b64decode(const char *in, int len, uint8_t *out) {
+    static const char alpha[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int o = 0, bits = 0, val = 0;
+    for (int i = 0; i < len; i++) {
+        char c = in[i];
+        if (c == '=') break;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+        int v = -1;
+        for (int j = 0; j < 64; j++) if (alpha[j] == c) { v = j; break; }
+        if (v < 0) return -1;
+        val = (val << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (uint8_t)((val >> bits) & 0xff);
+        }
+    }
+    return o;
+}
+
+/* Parse one /etc/ssh_keys line:
+ *
+ *   <user> ssh-ed25519 <base64-blob> [comment]
+ *
+ * `blob` is the SSH-format public key blob:
+ *   string "ssh-ed25519" || string pubkey(32)
+ * which base64-decodes to 51 bytes total. */
+static void parse_auth_line(const char *line, int len) {
+    int p = 0;
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+    if (p == len || line[p] == '#') return;
+
+    /* Field 1: user */
+    int us = p;
+    while (p < len && line[p] != ' ' && line[p] != '\t') p++;
+    int ulen = p - us;
+    if (ulen <= 0 || ulen > 31) return;
+    char user[32];
+    for (int i = 0; i < ulen; i++) user[i] = line[us + i];
+    user[ulen] = 0;
+
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+
+    /* Field 2: algo — only "ssh-ed25519" supported. */
+    int as = p;
+    while (p < len && line[p] != ' ' && line[p] != '\t') p++;
+    int alen = p - as;
+    if (alen != 11) return;
+    for (int i = 0; i < 11; i++) if (line[as + i] != "ssh-ed25519"[i]) return;
+
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+
+    /* Field 3: base64 blob (up to next whitespace). */
+    int bs = p;
+    while (p < len && line[p] != ' ' && line[p] != '\t') p++;
+    int blen = p - bs;
+    if (blen <= 0) return;
+
+    uint8_t decoded[128];
+    int dlen = b64decode(line + bs, blen, decoded);
+    if (dlen < 51) return;
+    /* Decoded layout: u32(11) || "ssh-ed25519" || u32(32) || pubkey */
+    if (!(decoded[0] == 0 && decoded[1] == 0 && decoded[2] == 0 && decoded[3] == 11)) return;
+    for (int i = 0; i < 11; i++) if (decoded[4 + i] != "ssh-ed25519"[i]) return;
+    if (!(decoded[15] == 0 && decoded[16] == 0 && decoded[17] == 0 && decoded[18] == 32)) return;
+    add_auth_key(user, decoded + 19);
+}
+
+static int load_auth_keys_file(const char *path) {
+    int fd = sys_open(path);
+    if (fd < 0) return -1;
+    static char buf[4096];
+    int n = sys_read(fd, buf, sizeof(buf));
+    sys_close(fd);
+    if (n <= 0) return -1;
+    int line_start = 0;
+    for (int i = 0; i <= n; i++) {
+        if (i == n || buf[i] == '\n') {
+            if (i > line_start) parse_auth_line(buf + line_start, i - line_start);
+            line_start = i + 1;
+        }
+    }
+    return 0;
+}
+
 /* ---- /etc/passwd (same parser as login.c / session-47 sshd) ------- */
 
 struct user_entry {
@@ -560,17 +703,101 @@ static int do_userauth(struct ssh_conn *c, struct user_entry **out_user) {
                 *out_user = u;
                 return 0;
             }
-            printf("sshd: auth failed user='%s'\n", username);
+            printf("sshd: password auth failed user='%s'\n", username);
             sys_sleep_ms(200);
         }
+        else if (ml == 9 && ms[0]=='p'&&ms[1]=='u'&&ms[2]=='b'&&
+                            ms[3]=='l'&&ms[4]=='i'&&ms[5]=='c'&&
+                            ms[6]=='k'&&ms[7]=='e'&&ms[8]=='y') {
+            /* publickey method (RFC 4252 §7). Two-step:
+             *   has_sig=FALSE → probe; reply PK_OK if pubkey is in the
+             *                  user's authorized list, else FAILURE
+             *   has_sig=TRUE  → verify signature over the canonical
+             *                  auth-blob, reply SUCCESS or FAILURE */
+            int has_sig = ssh_get_u8(&p);
+            uint32_t algo_len, pk_blob_len;
+            const uint8_t *algo    = ssh_get_string(&p, end, &algo_len);
+            const uint8_t *pk_blob = ssh_get_string(&p, end, &pk_blob_len);
+            if (!algo || !pk_blob) return -1;
+
+            /* Only ssh-ed25519 supported. */
+            int is_ed = (algo_len == 11);
+            for (uint32_t i = 0; i < 11 && is_ed; i++)
+                if (algo[i] != "ssh-ed25519"[i]) is_ed = 0;
+            if (!is_ed) goto pk_fail;
+
+            /* Parse blob inner = string("ssh-ed25519") || string(pubkey). */
+            const uint8_t *bp = pk_blob, *bend = pk_blob + pk_blob_len;
+            uint32_t tl, pkl;
+            const uint8_t *tn = ssh_get_string(&bp, bend, &tl);
+            if (!tn || tl != 11) goto pk_fail;
+            for (uint32_t i = 0; i < 11; i++)
+                if (tn[i] != "ssh-ed25519"[i]) goto pk_fail;
+            const uint8_t *pk_raw = ssh_get_string(&bp, bend, &pkl);
+            if (!pk_raw || pkl != 32) goto pk_fail;
+
+            struct user_entry *u = find_user(username);
+            if (!u || !pubkey_authorized(username, pk_raw)) goto pk_fail;
+
+            if (!has_sig) {
+                /* Probe: PK_OK echoes the same algo + blob — tells
+                 * client "this key is acceptable, send a sig". */
+                uint8_t ok[256];
+                uint8_t *op = ok;
+                ssh_put_u8(&op, SSH_MSG_USERAUTH_PK_OK);
+                ssh_put_string(&op, algo, algo_len);
+                ssh_put_string(&op, pk_blob, pk_blob_len);
+                if (send_packet(c, ok, (int)(op - ok)) < 0) return -1;
+                continue;     /* Loop back: expect another USERAUTH_REQUEST */
+            }
+
+            /* has_sig=TRUE: parse the signature blob. */
+            uint32_t sig_blob_len;
+            const uint8_t *sig_blob = ssh_get_string(&p, end, &sig_blob_len);
+            if (!sig_blob) goto pk_fail;
+            const uint8_t *sbp = sig_blob, *sbend = sig_blob + sig_blob_len;
+            const uint8_t *stn = ssh_get_string(&sbp, sbend, &tl);
+            if (!stn || tl != 11) goto pk_fail;
+            for (uint32_t i = 0; i < 11; i++)
+                if (stn[i] != "ssh-ed25519"[i]) goto pk_fail;
+            uint32_t slen;
+            const uint8_t *sig = ssh_get_string(&sbp, sbend, &slen);
+            if (!sig || slen != 64) goto pk_fail;
+
+            /* Build the canonical auth-blob (RFC 4252 §7). The string()
+             * wrappers + the byte(50) + booleans are spec-exact. */
+            uint8_t auth_blob[1024];
+            uint8_t *abp = auth_blob;
+            ssh_put_string(&abp, c->session_id, 32);
+            ssh_put_u8(&abp, SSH_MSG_USERAUTH_REQUEST);
+            ssh_put_string(&abp, username, my_strlen(username));
+            ssh_put_cstring(&abp, "ssh-connection");
+            ssh_put_cstring(&abp, "publickey");
+            ssh_put_bool(&abp, 1);
+            ssh_put_string(&abp, algo, algo_len);
+            ssh_put_string(&abp, pk_blob, pk_blob_len);
+            int auth_blob_len = (int)(abp - auth_blob);
+
+            if (ed25519_verify(sig, auth_blob, auth_blob_len, pk_raw) == 0) {
+                uint8_t s = SSH_MSG_USERAUTH_SUCCESS;
+                if (send_packet(c, &s, 1) < 0) return -1;
+                printf("sshd: pubkey auth ok user='%s'\n", username);
+                *out_user = u;
+                return 0;
+            }
+            printf("sshd: pubkey sig verify FAILED user='%s'\n", username);
+        }
+pk_fail:
 
         /* Reject: send USERAUTH_FAILURE listing what we DO support. */
-        uint8_t fail[64];
-        uint8_t *fp = fail;
-        ssh_put_u8(&fp, SSH_MSG_USERAUTH_FAILURE);
-        ssh_put_cstring(&fp, "password");
-        ssh_put_bool(&fp, 0);
-        if (send_packet(c, fail, (int)(fp - fail)) < 0) return -1;
+        {
+            uint8_t fail[64];
+            uint8_t *fp = fail;
+            ssh_put_u8(&fp, SSH_MSG_USERAUTH_FAILURE);
+            ssh_put_cstring(&fp, "publickey,password");
+            ssh_put_bool(&fp, 0);
+            if (send_packet(c, fail, (int)(fp - fail)) < 0) return -1;
+        }
     }
     return -1;
 }
@@ -946,6 +1173,24 @@ int main(int argc, char **argv) {
 
     ed25519_keypair_from_seed(g_host_pk, g_host_sk, HOSTKEY_SEED);
     puts("sshd: host key: ssh-ed25519 (seeded, persistent across reboots)\n");
+
+    /* Register the built-in demo pubkey for `guest`. The selftest's
+     * ssh.elf @key mode derives the matching private key from the
+     * same seed and can authenticate without filesystem setup. */
+    {
+        uint8_t demo_pk[32], demo_sk[64];
+        ed25519_keypair_from_seed(demo_pk, demo_sk, DEMO_USER_SEED);
+        add_auth_key("guest", demo_pk);
+    }
+    /* Also pull in any keys the user has dropped in /etc/ssh_keys.
+     * Format per line: "<user> ssh-ed25519 <base64-blob> [comment]". */
+    if (load_auth_keys_file("/etc/ssh_keys") == 0) {
+        printf("sshd: loaded /etc/ssh_keys, total %d authorized key(s)\n",
+               g_n_auth_keys);
+    } else {
+        printf("sshd: no /etc/ssh_keys file; %d authorized key(s) (demo only)\n",
+               g_n_auth_keys);
+    }
 
     int srv = sys_socket();
     if (srv < 0)                              { puts("sshd: socket failed\n");  return 1; }
