@@ -33,6 +33,15 @@ void fbcon_write(const char *s);
 
 void fbcon_set_color(uint32_t fg, uint32_t bg);
 
+/* Cursor placement + line clear, used by the vi-style editor's
+ * in-place screen-update path (session 46). */
+void fbcon_set_cursor(int row, int col);
+void fbcon_clear_to_eol(void);
+int  fbcon_cur_row(void);
+int  fbcon_cur_col(void);
+int  fbcon_cols(void);
+int  fbcon_rows(void);
+
 /* Direct primitive — handy for selftest demos and future GUI bits.
  * Coordinates clipped silently. */
 void fbcon_fill_rect(uint32_t x, uint32_t y,

@@ -282,6 +282,25 @@ int sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const void *b
     return ret;
 }
 
+int sys_tty_cursor(int row, int col) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TTY_CURSOR), "b"(row), "c"(col)
+                      : "memory");
+    return ret;
+}
+int sys_tty_clear(void) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_TTY_CLEAR) : "memory");
+    return ret;
+}
+int sys_tty_clear_eol(void) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_TTY_CLEAR_EOL) : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

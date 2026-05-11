@@ -42,7 +42,9 @@
  * function ALWAYS hits the boot instance.
  */
 
-#define FS_BITMAP_BYTES_MAX  ((1024 + 7) / 8)   /* room for 1024-sector disks */
+/* Session 46 bump 1024 → 2048: adding vi.elf pushed fs.img past 1024
+ * sectors, breaking new-file allocation against the smaller bitmap. */
+#define FS_BITMAP_BYTES_MAX  ((2048 + 7) / 8)   /* room for 2048-sector disks */
 
 struct fs_instance {
     int             in_use;
@@ -157,7 +159,7 @@ struct fs_instance *fs_create_instance(struct blkdev *bdev,
 {
     struct fs_instance *inst = alloc_instance();
     if (!inst) return 0;
-    if (n_sectors > 1024) n_sectors = 1024;     /* bitmap cap */
+    if (n_sectors > 2048) n_sectors = 2048;     /* bitmap cap */
 
     inst->in_use      = 1;
     inst->initialized = 0;
@@ -182,10 +184,12 @@ struct fs_instance *fs_create_instance(struct blkdev *bdev,
 struct fs_instance *fs_root_instance(void) { return g_root_inst; }
 
 void fs_init(void) {
-    /* Boot fs: backed by bcache+ata. base_lba = FS_DISK_OFFSET_SECTORS. */
+    /* Boot fs: backed by bcache+ata. base_lba = FS_DISK_OFFSET_SECTORS.
+     * Session 46 bump 1024 → 2048 sectors — added vi.elf to mkfs.py
+     * pushed the on-disk fs.img past 1024 sectors. */
     g_root_inst = fs_create_instance(/*bdev=*/0,
                                      FS_DISK_OFFSET_SECTORS,
-                                     /*n_sectors=*/1024);
+                                     /*n_sectors=*/2048);
 }
 
 static int fs_write_super_inst(struct fs_instance *inst) {

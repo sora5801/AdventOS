@@ -632,6 +632,34 @@ void syscall_dispatch(struct registers *r) {
             kfree(kbuf);
             break;
         }
+        case SYS_TTY_CURSOR: {
+            /* Place the console cursor at (row=a, col=b) in BOTH the
+             * VGA text grid AND the framebuffer console. Used by the
+             * vi-style editor (session 46) to redraw in place without
+             * scrolling everything up. */
+            extern void vga_set_cursor(int, int);
+            extern void fbcon_set_cursor(int, int);
+            vga_set_cursor((int)a, (int)b);
+            fbcon_set_cursor((int)a, (int)b);
+            ret = 0;
+            break;
+        }
+        case SYS_TTY_CLEAR: {
+            extern void vga_clear(void);
+            extern void fbcon_clear(void);
+            vga_clear();
+            fbcon_clear();
+            ret = 0;
+            break;
+        }
+        case SYS_TTY_CLEAR_EOL: {
+            extern void vga_clear_to_eol(void);
+            extern void fbcon_clear_to_eol(void);
+            vga_clear_to_eol();
+            fbcon_clear_to_eol();
+            ret = 0;
+            break;
+        }
         case SYS_FB_MMAP: {
             /* Map the framebuffer's physical pages into the calling
              * task's PD with USER+WRITABLE flags, at a fresh user VA

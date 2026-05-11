@@ -102,7 +102,7 @@ echo "[5/7] build user programs"
 
 USER_PROGS=(hello count sh cat echo httpd ed init
             wc head tail grep sort uniq tee tr seq date kill ls pwd
-            nc wget telnet irc ircd gui beep usbtest)
+            nc wget telnet irc ircd gui beep usbtest vi)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -142,12 +142,11 @@ if [ "$sz" -lt "$fs_offset" ]; then
 fi
 cat fs.img >> os.img
 
-# Pad up to (fs_lba + 1024) sectors so SYS_FS_WRITE can grow files
-# past the initial mkfs payload. The kernel's fs.c caps the FS area
-# at 1024 sectors past the superblock; QEMU's raw drive treats the
-# file's size as the disk's size, so any write beyond it is silently
-# discarded — that's what bit us in session 19 before this padding.
-final_size=$(( (fs_lba + 1024) * 512 ))
+# Pad up to (fs_lba + 2048) sectors so SYS_FS_WRITE can grow files
+# past the initial mkfs payload. Session 46 bumped from 1024 → 2048
+# (the kernel-side FS bitmap cap was bumped to match) to fit the
+# growing user-program set including vi.elf.
+final_size=$(( (fs_lba + 2048) * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$final_size" ]; then
     truncate -s "$final_size" os.img

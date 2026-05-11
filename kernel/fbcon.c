@@ -176,6 +176,49 @@ void fbcon_set_color(uint32_t fg, uint32_t bg) {
     g_bg = bg;
 }
 
+/* Direct cursor placement + clear-to-EOL — used by the vi editor
+ * (session 46) for in-place screen updates. Without a way to home
+ * to (row, col), vi would have to scroll the whole screen on every
+ * keystroke. */
+void fbcon_set_cursor(int row, int col) {
+    if (!g_enabled) return;
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    if ((uint32_t)row >= g_rows) row = (int)g_rows - 1;
+    if ((uint32_t)col >= g_cols) col = (int)g_cols - 1;
+    g_cur_row = (uint32_t)row;
+    g_cur_col = (uint32_t)col;
+}
+
+void fbcon_clear_to_eol(void) {
+    if (!g_enabled) return;
+    /* Fill cells from current col to the right edge with bg color. */
+    extern uint32_t fbcon_glyph_w_get(void);
+    extern uint32_t fbcon_glyph_h_get(void);
+    uint32_t gw = fbcon_glyph_w_get();
+    uint32_t gh = fbcon_glyph_h_get();
+    uint32_t x = g_cur_col * gw;
+    uint32_t y = g_cur_row * gh;
+    uint32_t w = g_width - x;
+    fbcon_fill_rect(x, y, w, gh, g_bg);
+}
+
+uint32_t fbcon_glyph_w_get(void) {
+    /* GW is a file-scope constant in fbcon.c proper — re-derive it
+     * here from the cols/width ratio so we don't have to extern it. */
+    return g_width / (g_cols ? g_cols : 1);
+}
+uint32_t fbcon_glyph_h_get(void) {
+    return g_height / (g_rows ? g_rows : 1);
+}
+
+/* Cursor row/col getters so user-mode wrappers can read state if
+ * they need to fall back to "where am I" queries. */
+int fbcon_cur_row(void) { return (int)g_cur_row; }
+int fbcon_cur_col(void) { return (int)g_cur_col; }
+int fbcon_cols(void)    { return (int)g_cols; }
+int fbcon_rows(void)    { return (int)g_rows; }
+
 void fbcon_init(void) {
     if (g_enabled) return;
     const struct vbe_state *v = vbe_state();

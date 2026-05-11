@@ -966,6 +966,49 @@ static void selftest(void) {
         printf("  final notes.txt (%d bytes):\n%s", n, rbuf);
     }
 
+    puts("[t9b] vi: modal editor round-trip (open, edit, :wq, verify)\n");
+    {
+        /* Seed a small file then drive vi via injected keystrokes:
+         *   G          → go to last line
+         *   o          → open new line below + enter INSERT
+         *   inserted   → typed text
+         *   ESC        → leave INSERT
+         *   :wq<CR>    → write + quit
+         * After vi exits, re-read the file and confirm the new line. */
+        const char *initial = "alpha\nbeta\ngamma\n";
+        sys_fs_write("vitest.txt", initial, (uint32_t)strlen(initial));
+
+        char script[64];
+        int  sn = 0;
+        script[sn++] = 'G';                          /* goto last line */
+        script[sn++] = 'o';                          /* open below + INSERT */
+        const char *typed = "delta from vi";
+        for (int i = 0; typed[i]; i++) script[sn++] = typed[i];
+        script[sn++] = 0x1B;                         /* ESC */
+        script[sn++] = ':'; script[sn++] = 'w'; script[sn++] = 'q'; script[sn++] = '\n';
+        tty_inject(script, sn);
+
+        int pid = sys_fork();
+        if (pid == 0) {
+            const char *argv[] = { "vi.elf", "vitest.txt", 0 };
+            sys_exec("vi.elf", argv);
+            sys_exit(127);
+        }
+        int code = 0;
+        sys_wait(&code);
+        /* vi cleared the screen on exit — print a fresh banner so the
+         * selftest output stays readable. */
+        sys_tty_cursor(0, 0);
+        printf("  vi exited code=%d\n", code);
+
+        int fd = sys_open("vitest.txt");
+        char rbuf[128];
+        int  n = sys_read(fd, rbuf, sizeof(rbuf) - 1);
+        sys_close(fd);
+        rbuf[n] = 0;
+        printf("  final vitest.txt (%d bytes):\n%s", n, rbuf);
+    }
+
     puts("[t10] job control: SIGSTOP / SIGCONT / SIGTERM\n");
     {
         int pid = sys_fork();

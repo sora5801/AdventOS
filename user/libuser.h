@@ -87,6 +87,9 @@ typedef unsigned int   size_t;
 #define SYS_BLOCK_INFO   57
 #define SYS_BLOCK_READ   58
 #define SYS_BLOCK_WRITE  59
+#define SYS_TTY_CURSOR    60
+#define SYS_TTY_CLEAR     61
+#define SYS_TTY_CLEAR_EOL 62
 
 /* Block-device ABI — must match kernel/syscall.h exactly. */
 struct sys_block_info {
@@ -215,6 +218,13 @@ int      sys_audio_play(const void *pcm, int n);
 int      sys_block_info (int dev_idx, struct sys_block_info *out);
 int      sys_block_read (int dev_idx, unsigned int lba, unsigned int n, void *buf);
 int      sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const void *buf);
+
+/* Screen-positioning primitives — used by the vi editor (session 46).
+ * AdventOS's VGA / fbcon consoles don't interpret ANSI escapes, so
+ * cursor placement + line clearing is exposed directly. */
+int      sys_tty_cursor   (int row, int col);
+int      sys_tty_clear    (void);
+int      sys_tty_clear_eol(void);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

@@ -83,6 +83,15 @@
 #define SYS_BLOCK_WRITE  59 /* (eax=59, ebx=struct sys_block_args *) -> 0 / -1.
                               Writes n_blocks blocks from buf to lba. */
 
+#define SYS_TTY_CURSOR    60 /* (eax=60, ebx=row, ecx=col) -> 0. Places the
+                                console cursor at (row, col) in both the VGA
+                                text grid and (if active) the framebuffer
+                                console. Subsequent puts continue from there. */
+#define SYS_TTY_CLEAR     61 /* (eax=61) -> 0. Clears the whole console + homes
+                                the cursor. */
+#define SYS_TTY_CLEAR_EOL 62 /* (eax=62) -> 0. Clears from cursor to end of
+                                line. Cursor position unchanged. */
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;

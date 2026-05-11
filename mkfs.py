@@ -94,6 +94,8 @@ USER_PROGRAMS = [
     ('httpsget.elf',   'user/_obj/httpsget.bin',   None),
     # Session 41: USB Mass Storage round-trip test.
     ('usbtest.elf',    'user/_obj/usbtest.bin',    None),
+    # Session 46: vi-like modal editor.
+    ('vi.elf',         'user/_obj/vi.bin',         None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

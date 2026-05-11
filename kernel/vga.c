@@ -102,6 +102,17 @@ void vga_set_cursor(int row, int col) {
     update_cursor_hw();
 }
 
+/* Clear from the current cursor position to the end of the line.
+ * Used by the vi-style editor (session 46) for in-place screen
+ * updates — without a way to clear residual chars, every redraw
+ * would leak stale glyphs on lines that got shorter. */
+void vga_clear_to_eol(void) {
+    uint16_t blank = make_cell(' ', cur_color);
+    for (int col = cursor_col; col < VGA_WIDTH; col++) {
+        VGA_BUFFER[cursor_row * VGA_WIDTH + col] = blank;
+    }
+}
+
 void vga_init(void) {
     cursor_row = cursor_col = 0;
     vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
