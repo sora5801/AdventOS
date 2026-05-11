@@ -186,6 +186,13 @@ struct window {
     draw_fn  draw;
     click_fn click;
     key_fn   key;
+    /* Session 61: distinguish "button-style" apps from "drag-style".
+     * Button-style apps (Calc, Notepad) only want a click event on
+     * the down-edge — repeated dispatches while the button is held
+     * would re-fire the action every frame.  Drag-style apps (Paint)
+     * explicitly opt in so the canvas can keep painting under a held
+     * mouse.  Default 0 = button-style. */
+    int      wants_drag;
     int      state[16];    /* per-app scratchpad */
 };
 
@@ -292,6 +299,114 @@ static int hit_close_button(struct window *w, int px, int py) {
 static int hit_title_bar(struct window *w, int px, int py) {
     return (px >= w->x + 1 && px < w->x + w->w - CLOSE_W - 3 &&
             py >= w->y + 1 && py < w->y + TITLE_H);
+}
+
+/* ---- Text-field widget (session 61) -----------------------------
+ *
+ * A reusable single-line edit primitive. The buffer is caller-owned
+ * (passed in at init), so the same widget code drives both the
+ * Calculator's 64-byte expression line and the Notepad's 1024-byte
+ * scrollback. The widget tracks:
+ *
+ *   - len:    current valid bytes (0..cap-1)
+ *   - cap:    total buffer size (so the NUL terminator lives at
+ *             buf[len] and never overflows)
+ *
+ * Editing is "append-only with backspace" — no caret-position cursor
+ * movement.  Arrow keys would require parsing escape sequences out
+ * of the keyboard ring (which sys_kbd_poll surfaces a byte at a time)
+ * and the WM's top-level loop currently treats a bare ESC as
+ * "quit"; we deferred that complexity.  For a calculator and a
+ * notebook-jot-pad, append + backspace covers the actual use case.
+ *
+ * Rendering: a 1-px border (blue when focused, grey when not), text
+ * in a fixed-pitch glyph stream, and a blinking `_` cursor at the
+ * end of the text — but only when the widget is focused, so the
+ * unfocused windows on the desktop don't strobe in unison. */
+
+#define TF_MAX 1024
+
+struct text_field {
+    char *buf;          /* not owned; caller supplies storage */
+    int   cap;          /* sizeof(buf) — buf[cap-1] is the NUL slot */
+    int   len;          /* current string length, not counting NUL */
+};
+
+static void tf_init(struct text_field *tf, char *buf, int cap) {
+    tf->buf = buf;
+    tf->cap = cap;
+    tf->len = 0;
+    if (cap > 0) buf[0] = 0;
+}
+
+static void tf_clear(struct text_field *tf) {
+    tf->len = 0;
+    if (tf->cap > 0) tf->buf[0] = 0;
+}
+
+static void tf_append(struct text_field *tf, char c) {
+    if (tf->len >= tf->cap - 1) return;     /* leave room for NUL */
+    tf->buf[tf->len++] = c;
+    tf->buf[tf->len]    = 0;
+}
+
+static void tf_backspace(struct text_field *tf) {
+    if (tf->len == 0) return;
+    tf->len--;
+    tf->buf[tf->len] = 0;
+}
+
+/* Returns 1 if the key was ENTER (so callers can submit), 0 otherwise.
+ * Backspace mappings: 0x08 (Ctrl-H, what raw mode usually emits) and
+ * 0x7F (DEL, what some terminals send) both delete the previous char.
+ * Newline accepts both LF (0x0A) and CR (0x0D) for cross-platform
+ * convenience. */
+static int tf_handle_key(struct text_field *tf, int key) {
+    if (key == '\n' || key == '\r')      return 1;
+    if (key == 0x08 || key == 0x7F) { tf_backspace(tf); return 0; }
+    if (key >= 0x20 && key < 0x7F) { tf_append(tf, (char)key); return 0; }
+    return 0;
+}
+
+/* Render the field at (x, y) with the given content size (w, h).
+ * `focused` controls the border color + cursor visibility; `frame`
+ * is the WM's frame counter, used to blink the cursor at ~2 Hz. */
+static void tf_draw(const struct text_field *tf,
+                    int x, int y, int w, int h,
+                    int focused, int frame) {
+    uint32_t bg     = 0xFFFFFFu;
+    uint32_t border = focused ? 0x4080E0u : 0x808080u;
+    uint32_t fg     = 0x101010u;
+
+    fill_rect(x, y, w, h, bg);
+    rect_outline(x, y, w, h, border);
+    if (focused) {
+        /* Double-thickness border = clearer focus cue without needing
+         * a separate "focused-bg" color that'd clash on dark themes. */
+        rect_outline(x + 1, y + 1, w - 2, h - 2, border);
+    }
+
+    /* Glyphs are 8x8 monospace.  If the text outruns the visible
+     * width, scroll the right edge into view by chopping from the
+     * left so the cursor stays on-screen. */
+    int char_cap = (w - 8) / FONT_W;
+    if (char_cap < 1) char_cap = 1;
+    int start = 0;
+    if (tf->len + 1 > char_cap) {
+        start = tf->len + 1 - char_cap;
+    }
+
+    int tx = x + 4;
+    int ty = y + (h - FONT_H) / 2;
+    for (int i = start; i < tf->len; i++) {
+        draw_glyph(tx + (i - start) * FONT_W, ty, tf->buf[i], fg);
+    }
+
+    int blink_on = (frame / 15) & 1;            /* ~2 Hz at 60 fps */
+    if (focused && blink_on) {
+        int cx = tx + (tf->len - start) * FONT_W;
+        draw_glyph(cx, ty, '_', fg);
+    }
 }
 
 /* ---- Apps -------------------------------------------------------- */
@@ -442,6 +557,381 @@ static void tasks_draw(struct window *w, int frame) {
     }
 }
 
+/* ---- Calculator app (session 61) -------------------------------
+ *
+ * Single-line expression input, eval-on-Enter, button grid for mouse-
+ * only operation, full keyboard support too.  The evaluator is a tiny
+ * recursive-descent parser:
+ *
+ *   expr   := term  (('+' | '-') term)*
+ *   term   := factor (('*' | '/') factor)*
+ *   factor := number | '-' factor | '(' expr ')'
+ *
+ * Integer arithmetic only — adding decimals would mean dragging in a
+ * floating-point representation, which is currently out of scope on
+ * this freestanding userland.  Division by zero returns 0 with the
+ * error flag set; any unparsed trailing input also flags an error.
+ *
+ * On every evaluation the result is printed to stdout (visible to
+ * the t44 selftest via captured fork pipes); the on-screen display
+ * shows it as "= <n>" in the result box. */
+
+static char  g_calc_buf[64];
+static struct text_field g_calc_tf;
+static int   g_calc_inited;
+static int   g_calc_have_result;
+static int   g_calc_result;
+static int   g_calc_err;
+
+struct calc_p {
+    const char *p;
+    int         err;
+};
+static void calc_skip_ws(struct calc_p *cp) {
+    while (*cp->p == ' ' || *cp->p == '\t') cp->p++;
+}
+static int calc_expr(struct calc_p *cp);
+
+static int calc_factor(struct calc_p *cp) {
+    calc_skip_ws(cp);
+    if (*cp->p == '(') {
+        cp->p++;
+        int v = calc_expr(cp);
+        calc_skip_ws(cp);
+        if (*cp->p != ')') { cp->err = 1; return 0; }
+        cp->p++;
+        return v;
+    }
+    int neg = 0;
+    if (*cp->p == '-') { neg = 1; cp->p++; calc_skip_ws(cp); }
+    if (!(*cp->p >= '0' && *cp->p <= '9')) { cp->err = 1; return 0; }
+    int v = 0;
+    while (*cp->p >= '0' && *cp->p <= '9') {
+        v = v * 10 + (*cp->p - '0');
+        cp->p++;
+    }
+    return neg ? -v : v;
+}
+static int calc_term(struct calc_p *cp) {
+    int v = calc_factor(cp);
+    for (;;) {
+        calc_skip_ws(cp);
+        if (*cp->p == '*') { cp->p++; v = v * calc_factor(cp); }
+        else if (*cp->p == '/') {
+            cp->p++;
+            int r = calc_factor(cp);
+            if (r == 0) { cp->err = 1; return 0; }
+            v = v / r;
+        }
+        else break;
+    }
+    return v;
+}
+static int calc_expr(struct calc_p *cp) {
+    int v = calc_term(cp);
+    for (;;) {
+        calc_skip_ws(cp);
+        if (*cp->p == '+')      { cp->p++; v += calc_term(cp); }
+        else if (*cp->p == '-') { cp->p++; v -= calc_term(cp); }
+        else break;
+    }
+    return v;
+}
+
+static void calc_evaluate(void) {
+    struct calc_p cp = { g_calc_tf.buf, 0 };
+    int v = calc_expr(&cp);
+    calc_skip_ws(&cp);
+    if (cp.err || *cp.p != 0 || g_calc_tf.len == 0) {
+        g_calc_err = 1;
+        g_calc_have_result = 0;
+        printf("calc: '%s' = ERROR\n", g_calc_tf.buf);
+    } else {
+        g_calc_result = v;
+        g_calc_have_result = 1;
+        g_calc_err = 0;
+        printf("calc: '%s' = %d\n", g_calc_tf.buf, v);
+    }
+}
+
+static void calc_lazy_init(void) {
+    if (g_calc_inited) return;
+    tf_init(&g_calc_tf, g_calc_buf, (int)sizeof(g_calc_buf));
+    g_calc_inited = 1;
+}
+
+/* Button grid table — 4 columns, 4 rows of operators/digits + a
+ * full-width "=" bar at the bottom. */
+static const char g_calc_btn[4][4] = {
+    { '7', '8', '9', '/' },
+    { '4', '5', '6', '*' },
+    { '1', '2', '3', '-' },
+    { '0', '.', 'C', '+' },
+};
+
+/* Pixel offsets within the window content (relative to body origin,
+ * i.e. (w->x + 0, w->y + TITLE_H)). Shared between draw + click so
+ * hit-tests match render exactly. */
+#define CALC_PAD          8
+#define CALC_FIELD_H     22
+#define CALC_RESULT_H    22
+#define CALC_BTN_H       24
+#define CALC_GAP          4
+
+static void calc_layout(struct window *w, int *bx, int *by, int *bw,
+                        int *ry, int *by1, int *eq_y, int *bw1) {
+    *bx = CALC_PAD;
+    *by = CALC_PAD;
+    *bw = w->w - 2 * CALC_PAD;
+    *ry = *by + CALC_FIELD_H + CALC_GAP;
+    *by1 = *ry + CALC_RESULT_H + CALC_GAP;
+    *bw1 = (*bw - 3) / 4;
+    *eq_y = *by1 + 4 * (CALC_BTN_H + 1);
+}
+
+static void calc_draw(struct window *w, int frame) {
+    calc_lazy_init();
+
+    int bx, by, bw, ry, by1, eq_y, bw1;
+    calc_layout(w, &bx, &by, &bw, &ry, &by1, &eq_y, &bw1);
+
+    int X = w->x, Y = w->y + TITLE_H;
+
+    tf_draw(&g_calc_tf, X + bx, Y + by, bw, CALC_FIELD_H,
+            w->focused, frame);
+
+    /* Result line — light grey, displays "= N" or "ERROR" or empty. */
+    fill_rect(X + bx, Y + ry, bw, CALC_RESULT_H, 0xF0F0F0u);
+    rect_outline(X + bx, Y + ry, bw, CALC_RESULT_H, 0x808080u);
+    int ty = Y + ry + (CALC_RESULT_H - FONT_H) / 2;
+    if (g_calc_err) {
+        draw_str(X + bx + 6, ty, "ERROR", 0xC03030u);
+    } else if (g_calc_have_result) {
+        draw_str(X + bx + 6, ty, "= ", 0x202020u);
+        draw_int(X + bx + 6 + 2 * FONT_W, ty, g_calc_result, 0x202020u);
+    }
+
+    /* 4x4 button grid. */
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            int x = X + bx + c * (bw1 + 1);
+            int y = Y + by1 + r * (CALC_BTN_H + 1);
+            uint32_t bgc = (g_calc_btn[r][c] == 'C') ? 0xE0A030u : 0xD0D0D0u;
+            fill_rect(x, y, bw1, CALC_BTN_H, bgc);
+            rect_outline(x, y, bw1, CALC_BTN_H, 0x606060u);
+            char s[2] = { g_calc_btn[r][c], 0 };
+            draw_str(x + (bw1 - FONT_W) / 2,
+                     y + (CALC_BTN_H - FONT_H) / 2,
+                     s, 0x101010u);
+        }
+    }
+
+    /* Equals bar — full-width, vivid blue. */
+    fill_rect(X + bx, Y + eq_y, bw, CALC_BTN_H, 0x4080E0u);
+    rect_outline(X + bx, Y + eq_y, bw, CALC_BTN_H, 0x305080u);
+    draw_str(X + bx + (bw - FONT_W) / 2,
+             Y + eq_y + (CALC_BTN_H - FONT_H) / 2,
+             "=", 0xFFFFFFu);
+}
+
+/* (lx, ly) are window-local coords with origin at (w->x + 0,
+ * w->y + TITLE_H), as the WM passes to click handlers. */
+static void calc_click(struct window *w, int lx, int ly, int btns) {
+    /* Only fire on the initial down-edge — the WM also forwards drag
+     * clicks here, which we don't want for buttons. The down-edge
+     * detection happens in handle_mouse; this app always gets the
+     * "is currently held" view, so guard explicitly. */
+    (void)btns;
+    calc_lazy_init();
+
+    int bx, by, bw, ry, by1, eq_y, bw1;
+    calc_layout(w, &bx, &by, &bw, &ry, &by1, &eq_y, &bw1);
+    (void)by; (void)ry;
+
+    if (ly >= eq_y && ly < eq_y + CALC_BTN_H) {
+        calc_evaluate();
+        return;
+    }
+    if (ly < by1 || ly >= by1 + 4 * (CALC_BTN_H + 1)) return;
+    int r = (ly - by1) / (CALC_BTN_H + 1);
+    int c = (lx - bx) / (bw1 + 1);
+    if (r < 0 || r >= 4 || c < 0 || c >= 4) return;
+
+    char ch = g_calc_btn[r][c];
+    if (ch == 'C') {
+        tf_clear(&g_calc_tf);
+        g_calc_have_result = 0;
+        g_calc_err = 0;
+    } else {
+        tf_append(&g_calc_tf, ch);
+        g_calc_err = 0;
+        g_calc_have_result = 0;
+    }
+}
+
+static void calc_key(struct window *w, int key) {
+    (void)w;
+    calc_lazy_init();
+    /* '=' as a keyboard shortcut for "evaluate". Real calculators
+     * often treat = and Enter the same way. */
+    if (key == '=' || key == '\r' || key == '\n') {
+        calc_evaluate();
+        return;
+    }
+    int submitted = tf_handle_key(&g_calc_tf, key);
+    if (submitted) calc_evaluate();
+    else {
+        /* Editing — drop any stale result so the user isn't misled. */
+        g_calc_have_result = 0;
+        g_calc_err = 0;
+    }
+}
+
+/* ---- Notepad app (session 61) -----------------------------------
+ *
+ * Multi-line text buffer with a "Save" button at the bottom that
+ * writes the current contents to /notepad.txt. The text-field widget
+ * does the editing — for notepad we re-purpose it as a "scratchpad
+ * string" since the editing primitives (append, backspace, ENTER as
+ * a regular character) are identical to a single-line field, just
+ * with no enforced length limit and \n meaning "newline".
+ *
+ * Rendering is line-wrapped: walk the buffer, on \n or wrap-column
+ * advance the cursor row. */
+
+static char  g_notepad_buf[1024];
+static struct text_field g_notepad_tf;
+static int   g_notepad_inited;
+static int   g_notepad_saved_msg_frames;   /* show "SAVED" for N frames */
+
+static void notepad_lazy_init(void) {
+    if (g_notepad_inited) return;
+    tf_init(&g_notepad_tf, g_notepad_buf, (int)sizeof(g_notepad_buf));
+    g_notepad_inited = 1;
+}
+
+static void notepad_save(void) {
+    /* Persist the current buffer to /notepad.txt. The selftest reads
+     * it back to verify the round-trip. */
+    int rc = sys_fs_write("/notepad.txt",
+                          g_notepad_tf.buf, (uint32_t)g_notepad_tf.len);
+    printf("notepad: saved %d bytes to /notepad.txt (rc=%d)\n",
+           g_notepad_tf.len, rc);
+    g_notepad_saved_msg_frames = 60;        /* ~1s at 60 fps */
+}
+
+static void notepad_draw(struct window *w, int frame) {
+    notepad_lazy_init();
+
+    int pad = 8;
+    int bx = w->x + pad;
+    int by = w->y + TITLE_H + pad;
+    int bw = w->w - 2 * pad;
+    int bh = w->h - TITLE_H - 2 * pad - 28;  /* leave a button strip */
+
+    /* Text-area background. */
+    fill_rect(bx, by, bw, bh, 0xFFFFFFu);
+    rect_outline(bx, by, bw, bh, w->focused ? 0x4080E0u : 0x808080u);
+    if (w->focused) rect_outline(bx + 1, by + 1, bw - 2, bh - 2, 0x4080E0u);
+
+    /* Word-wrap and newline-aware rendering. */
+    int char_cap = (bw - 8) / FONT_W;
+    if (char_cap < 1) char_cap = 1;
+    int max_rows = (bh - 4) / FONT_H;
+    if (max_rows < 1) max_rows = 1;
+    int row = 0, col = 0;
+    int last_x = bx + 4, last_y = by + 2;
+    for (int i = 0; i < g_notepad_tf.len && row < max_rows; i++) {
+        char c = g_notepad_tf.buf[i];
+        if (c == '\n') {
+            row++; col = 0;
+            last_x = bx + 4;
+            last_y = by + 2 + row * FONT_H;
+            continue;
+        }
+        if (col >= char_cap) {
+            row++; col = 0;
+            last_x = bx + 4;
+            last_y = by + 2 + row * FONT_H;
+            if (row >= max_rows) break;
+        }
+        int gx = bx + 4 + col * FONT_W;
+        int gy = by + 2 + row * FONT_H;
+        draw_glyph(gx, gy, c, 0x101010u);
+        last_x = gx + FONT_W;
+        last_y = gy;
+        col++;
+    }
+    /* Blinking cursor at the insertion point. */
+    int blink_on = (frame / 15) & 1;
+    if (w->focused && blink_on && row < max_rows) {
+        draw_glyph(last_x, last_y, '_', 0x101010u);
+    }
+
+    /* Footer row: "Save" button + char count + transient SAVED label. */
+    int fy = w->y + w->h - 28;
+    fill_rect(bx, fy + 2, 60, 22, 0x40C060u);
+    rect_outline(bx, fy + 2, 60, 22, 0x205040u);
+    draw_str(bx + (60 - 4 * FONT_W) / 2,
+             fy + 2 + (22 - FONT_H) / 2,
+             "Save", 0xFFFFFFu);
+
+    char counter[32];
+    int ci = 0;
+    const char *pfx = "  ";
+    for (int j = 0; pfx[j]; j++) counter[ci++] = pfx[j];
+    counter[ci++] = '(';
+    int v = g_notepad_tf.len;
+    if (v == 0) counter[ci++] = '0';
+    else {
+        char tmp[8]; int tn = 0;
+        while (v) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+        while (tn--) counter[ci++] = tmp[tn];
+    }
+    counter[ci++] = ' '; counter[ci++] = 'c'; counter[ci++] = 'h'; counter[ci++] = ')';
+    counter[ci] = 0;
+    draw_str(bx + 70, fy + 2 + (22 - FONT_H) / 2,
+             counter, 0xC0C0C0u);
+
+    if (g_notepad_saved_msg_frames > 0) {
+        draw_str(bx + bw - 6 * FONT_W,
+                 fy + 2 + (22 - FONT_H) / 2,
+                 "SAVED!", 0x40C060u);
+        g_notepad_saved_msg_frames--;
+    }
+}
+
+static void notepad_click(struct window *w, int lx, int ly, int btns) {
+    (void)btns;
+    int pad = 8;
+    /* The draw path computes the footer in SCREEN coords as
+     *   fy_screen = w->y + (w->h - 28)
+     * but click handlers receive body-local coords with origin at
+     * (w->x, w->y + TITLE_H), so the same row in body-local is
+     *   ly = (w->h - 28) - TITLE_H = w->h - 46
+     * The Save button is +2px below that and 22px tall, matching
+     * the fill_rect in notepad_draw. */
+    int fy = w->h - 28 - TITLE_H;
+    if (lx >= pad && lx < pad + 60 &&
+        ly >= fy + 2 && ly < fy + 24) {
+        notepad_save();
+        return;
+    }
+}
+
+static void notepad_key(struct window *w, int key) {
+    (void)w;
+    notepad_lazy_init();
+    /* In notepad ENTER is just another character — append a literal
+     * '\n' and keep going.  Ctrl-S would be nicer but we don't have
+     * a modifier-key path through sys_kbd_poll. */
+    if (key == '\r' || key == '\n') {
+        tf_append(&g_notepad_tf, '\n');
+        return;
+    }
+    tf_handle_key(&g_notepad_tf, key);
+}
+
 /* ---- Event dispatch + main loop --------------------------------- */
 
 static void desktop_draw(int mx, int my, int btn, int frame) {
@@ -513,11 +1003,13 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
             if (w->y + w->h > (int)g_h) w->y = (int)g_h - w->h;
         }
     } else if ((btns & 0x1) && g_drag_idx < 0) {
-        /* Continuous drag-paint on focused window — Paint relies on it. */
+        /* Continuous drag-paint on focused window — Paint opts into
+         * this; button-style apps (Calc, Notepad) don't, so a held
+         * click on a Save button only fires once on the down-edge. */
         int idx = win_focused_idx();
         if (idx >= 0) {
             struct window *w = &g_wins[idx];
-            if (w->click && my > w->y + TITLE_H) {
+            if (w->click && w->wants_drag && my > w->y + TITLE_H) {
                 int lx = mx - w->x;
                 int ly = my - (w->y + TITLE_H);
                 w->click(w, lx, ly, btns);
@@ -573,47 +1065,97 @@ static int g_selftest_mode = 0;
 struct script_step {
     int at_frame;
     int x, y, btns;
+    /* Optional keystroke string: at this frame, inject these bytes
+     * into the kernel keyboard ring so sys_kbd_poll returns them on
+     * the next iteration of the WM event loop. NULL = no injection.
+     * Session 61 added this to drive the text-field widget without
+     * needing a physical keyboard. */
+    const char *keys;
 };
 
-/* For t39: open four windows, click into Paint's canvas (NOT its
- * title bar — that'd start a drag instead of paint), drag-paint a
- * few cells of red, then click Hello's title bar to bring it to the
- * front (focused-blue title). Pixel-exact assertions in t39 grep the
- * captured printf output for known coords:
+/* For t39 + t44: a single scripted timeline that drives both the
+ * mouse-only Paint demo AND the new text-input apps (Calc, Notepad).
  *
- *   Paint at  (300, 200)  size 360x280, title-h=18, body offset=(8,26)
+ *   Frames 10-65:  Paint click + Hello title-bar drag (t39 coverage,
+ *                  unchanged from session 57).
+ *   Frames 80-150: Calc click + type "12+34" + ENTER → expect "= 46"
+ *                  in stdout, plus the on-screen result.
+ *   Frames 160-230: Notepad click + type "hi from gui" + click Save →
+ *                   /notepad.txt holds the typed bytes, verified by
+ *                   the t44 selftest after the WM exits.
+ *
+ * Pixel-exact assertions in t39 still grep these coords:
+ *   Paint at  (300, 200)  size 360x280, body offset=(8,26)
  *     canvas top-left = (308, 226), cell size = 4
  *     cell (3, 1)    = pixels (320..323, 230..233)
- *
  *   Hello at  (60, 60)    size 320x120, title bar y=61..77
  *     focused title color = 0x305080
- *
- * Script frame numbers are spaced so each event has a few frames of
- * "settling" before the next — the WM has a 16 ms tick, so even a
- * mis-aligned click would still arrive on a later frame. */
+ */
 static struct script_step g_script[] = {
-    /* Frame  X    Y    Btns — what we're doing */
-    {  10,   200,  150,  0 },   /* idle parking, outside all windows */
-    {  20,   322,  230,  1 },   /* click inside Paint canvas → cell (3,1) red */
-    {  30,   322,  230,  1 },   /* hold the click another frame */
-    {  40,   322,  230,  0 },   /* release */
-    {  50,   100,  70,   1 },   /* click Hello title bar → raise + focus */
-    {  60,   100,  70,   0 },   /* release */
-    {  -1,    0,    0,   0 },
+    /* Frame  X    Y    Btns Keys                  — note */
+    {   5,   500, 400,   0,  0  },                   /* park */
+    {  20,   322, 230,   1,  0  },                   /* Paint cell click */
+    {  30,   322, 230,   1,  0  },                   /* hold */
+    {  40,   322, 230,   0,  0  },                   /* release */
+    {  50,   100, 70,    1,  0  },                   /* Hello drag */
+    {  60,   100, 70,    0,  0  },                   /* release */
+
+    /* ---- Calculator coverage (window @ 60, 200 size 240x300) ---- */
+    {  80,   100, 230,   1,  0  },                   /* click into Calc text field */
+    {  85,   100, 230,   0,  0  },                   /* release → window now focused */
+    {  95,   100, 230,   0,  "12+34" },              /* type the expression */
+    { 105,   100, 230,   0,  "\n" },                 /* ENTER = evaluate */
+
+    /* ---- Notepad coverage (window @ 310, 490 size 360x180) ---- */
+    { 130,   400, 540,   1,  0  },                   /* click into Notepad */
+    { 135,   400, 540,   0,  0  },                   /* release */
+    { 145,   400, 540,   0,  "hi from gui!" },       /* type a line */
+    { 165,   324, 658,   1,  0  },                   /* click Save button */
+    { 175,   324, 658,   0,  0  },                   /* release */
+
+    /* Re-raise Hello so t39's "hello title bar = focused-blue"
+     * pixel assertion holds at end-of-script. Without this, Notepad
+     * would still be focused and Hello's title bar would read as
+     * unfocused grey. */
+    { 185,   100,  70,   1,  0  },
+    { 195,   100,  70,   0,  0  },
+
+    /* Sentinel — at_frame < 0 ends the table. */
+    {  -1,    0,    0,   0,  0  },
 };
+
+/* Track the highest script index we've already applied so each
+ * step's keystrokes fire EXACTLY ONCE — the naive "find last step
+ * with at_frame <= frame" approach would re-inject every frame past
+ * the trigger, dumping the same string into the keyboard ring sixty
+ * times a second. */
+static int g_last_script_idx = -1;
 
 static void script_apply(int frame, int *mx, int *my, int *btns) {
     int last = -1;
     for (int i = 0; g_script[i].at_frame >= 0; i++) {
         if (g_script[i].at_frame <= frame) last = i;
     }
-    if (last >= 0) {
-        *mx   = g_script[last].x;
-        *my   = g_script[last].y;
-        *btns = g_script[last].btns;
-        /* Apply via SYS_MOUSE_INJECT so the rest of the system sees
-         * the same state too. */
-        sys_mouse_inject(*mx, *my, *btns);
+    if (last < 0) return;
+
+    /* Mouse position holds at the latest applied step's value — that
+     * matches "the user's hand is wherever it was." */
+    *mx   = g_script[last].x;
+    *my   = g_script[last].y;
+    *btns = g_script[last].btns;
+    sys_mouse_inject(*mx, *my, *btns);
+
+    /* Keystrokes are one-shot: inject each new row's bytes the first
+     * frame it becomes the active step. */
+    if (last != g_last_script_idx) {
+        for (int i = g_last_script_idx + 1; i <= last; i++) {
+            const char *keys = g_script[i].keys;
+            if (keys) {
+                int kn = 0; while (keys[kn]) kn++;
+                if (kn > 0) tty_inject(keys, kn);
+            }
+        }
+        g_last_script_idx = last;
     }
 }
 
@@ -644,14 +1186,23 @@ int main(int argc, char **argv) {
                  hello_draw, 0, 0);
     spawn_window("Clock",  420,  60, 260, 140,
                  clock_draw, 0, 0);
-    spawn_window("Paint",  300, 200, 360, 280,
+    spawn_window("Calc",    60, 200, 240, 270,
+                 calc_draw, calc_click, calc_key);
+    int paint_idx = spawn_window("Paint",  310, 200, 360, 280,
                  paint_draw, paint_click, 0);
+    g_wins[paint_idx].wants_drag = 1;        /* drag-to-paint */
+    spawn_window("Notepad",310, 490, 360, 180,
+                 notepad_draw, notepad_click, notepad_key);
     spawn_window("Tasks",  680, 220, 280, 240,
                  tasks_draw, 0, 0);
 
     int frame = 0;
     int prev_btns = 0;
-    int max_frames = g_selftest_mode ? 80 : 600;
+    /* Selftest now runs longer (was 80 frames in session 57) — the
+     * Calc + Notepad coverage scripted in g_script[] extends to
+     * frame ~175, and we want a few settling frames past the last
+     * Save click to redraw the "SAVED" footer overlay. */
+    int max_frames = g_selftest_mode ? 200 : 600;
 
     for (;;) {
         int ms[4] = {0,0,0,0};

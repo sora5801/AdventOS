@@ -2758,6 +2758,112 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t44] GUI text input: Calc evaluator + Notepad save-to-disk\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 61 added a text-field widget plus two apps that use
+         * it: Calc (single-line expression input) and Notepad (multi-
+         * line scratchpad with Save-to-/notepad.txt).
+         *
+         * The WM's selftest mode now drives ~200 frames of scripted
+         * mouse + keyboard events.  After Paint (t39 coverage):
+         *
+         *   * click into Calc's text field
+         *   * tty_inject("12+34") then ENTER     → calc evaluates to 46
+         *   * click into Notepad's text area
+         *   * tty_inject("hi from gui!")          → 12 chars in the buffer
+         *   * click the green Save button         → /notepad.txt written
+         *
+         * t44 forks gui.elf with selftest, captures stdout, then reads
+         * /notepad.txt back from disk.  The Calc proof is the "calc:
+         * '12+34' = 46" printf inside calc_evaluate(); the Notepad proof
+         * is both the "notepad: saved 12 bytes" printf AND the on-disk
+         * round-trip.  Two independent witnesses for each app.
+         *
+         * Headless QEMU without VBE prints "no framebuffer" and exits 0
+         * — we report that as SKIP (mirroring how t39 handles it). */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for gui.elf capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "gui.elf", "selftest", 0 };
+                sys_exec("gui.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+            static char captured[3072];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            int find_no_fb = 0;
+            for (int i = 0; i < total - 14; i++) {
+                if (captured[i] == 'n' &&
+                    memcmp(captured + i, "no framebuffer", 14) == 0) {
+                    find_no_fb = 1; break;
+                }
+            }
+
+            if (find_no_fb) {
+                puts("  SKIP  no framebuffer in this QEMU instance\n");
+            } else {
+                /* Look for both apps' single-line "I ran" witnesses. */
+                int find_calc = 0, find_notepad = 0;
+                for (int i = 0; i < total - 32; i++) {
+                    if (!find_calc &&
+                        memcmp(captured + i, "calc: '12+34' = 46", 18) == 0)
+                        find_calc = 1;
+                    if (!find_notepad &&
+                        memcmp(captured + i, "notepad: saved 12 bytes", 23) == 0)
+                        find_notepad = 1;
+                }
+                EXPECT(find_calc,
+                       "Calc: keyboard injected '12+34' + ENTER, eval = 46");
+                EXPECT(find_notepad,
+                       "Notepad: Save click wrote 12-byte buffer to /notepad.txt");
+
+                /* Confirm the on-disk content is exactly the typed
+                 * string.  This is the real proof — even if the printf
+                 * lied, the file's bytes are objective ground truth. */
+                int fd = sys_open("/notepad.txt");
+                EXPECT(fd >= 0, "/notepad.txt exists after Save click");
+                if (fd >= 0) {
+                    char buf[64];
+                    int rn = sys_read(fd, buf, (int)sizeof(buf) - 1);
+                    sys_close(fd);
+                    if (rn > 0) buf[rn] = 0;
+                    printf("  /notepad.txt (%d bytes): '%s'\n", rn, buf);
+                    EXPECT(rn == 12,
+                           "file size matches the 12-char buffer length");
+                    EXPECT(rn == 12 &&
+                           memcmp(buf, "hi from gui!", 12) == 0,
+                           "file content == 'hi from gui!' (typed via text field)");
+                }
+            }
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \
