@@ -2405,6 +2405,108 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t41] RSA: PKCS#1 v1.5 sign + verify (libcrypto/bignum + libcrypto/rsa)\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* The actual cryptographic work lives in rsatest.elf (it
+         * links libcrypto for SHA-256 + bignum + rsa). We fork+exec
+         * it and grep the captured output for the structured PASS
+         * lines it emits.
+         *
+         * Coverage:
+         *   - Verify an openssl-signed message (cross-impl check)
+         *   - Sign the same message and byte-compare to openssl's
+         *     PKCS#1 v1.5 output (the scheme is deterministic — any
+         *     off-by-one in padding, modpow, or CRT setup diverges)
+         *   - Verify our own sig (transitive sanity)
+         *   - Tampered-sig + wrong-msg negative tests
+         *   - Generate a fresh 512-bit keypair via Miller-Rabin,
+         *     sign + verify (closes the keygen loop) */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for rsatest capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "rsatest.elf", 0 };
+                sys_exec("rsatest.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from rsatest.elf  (exit=%d)\n",
+                   total, code);
+            puts("  ---- rsatest.elf output ----\n");
+            sys_write(1, captured, total);
+            puts("  ----------------------------\n");
+
+            int v_openssl = 0, sig_match = 0, v_roundtrip = 0;
+            int neg_tamper = 0, neg_msg = 0, kg_sign = 0, kg_verify = 0;
+            for (int i = 0; i < total; i++) {
+                if (!v_openssl && i + 41 <= total &&
+                    memcmp(captured + i,
+                           "PASS  verify openssl-signed message", 35) == 0)
+                    v_openssl = 1;
+                if (!sig_match && i + 40 <= total &&
+                    memcmp(captured + i,
+                           "PASS  our sig == openssl sig", 28) == 0)
+                    sig_match = 1;
+                if (!v_roundtrip && i + 36 <= total &&
+                    memcmp(captured + i,
+                           "PASS  verify our own sig roundtrip", 34) == 0)
+                    v_roundtrip = 1;
+                if (!neg_tamper && i + 30 <= total &&
+                    memcmp(captured + i,
+                           "PASS  tampered sig rejected", 27) == 0)
+                    neg_tamper = 1;
+                if (!neg_msg && i + 36 <= total &&
+                    memcmp(captured + i,
+                           "PASS  wrong-message sig rejected", 32) == 0)
+                    neg_msg = 1;
+                if (!kg_sign && i + 30 <= total &&
+                    memcmp(captured + i,
+                           "PASS  sign with fresh key", 25) == 0)
+                    kg_sign = 1;
+                if (!kg_verify && i + 30 <= total &&
+                    memcmp(captured + i,
+                           "PASS  verify fresh-key sig", 26) == 0)
+                    kg_verify = 1;
+            }
+
+            EXPECT(v_openssl,   "verify openssl-signed message (RFC 8017 §8.2.2)");
+            EXPECT(sig_match,   "deterministic sign output matches openssl byte-for-byte");
+            EXPECT(v_roundtrip, "verify our own sig (sign → verify roundtrip)");
+            EXPECT(neg_tamper,  "tampered-signature negative test rejects");
+            EXPECT(neg_msg,     "wrong-message negative test rejects");
+            EXPECT(kg_sign,     "fresh 512-bit keygen + sign succeeds");
+            EXPECT(kg_verify,   "verify with freshly-generated public key");
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \

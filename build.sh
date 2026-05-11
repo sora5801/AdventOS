@@ -125,7 +125,7 @@ done
 # Crypto-using programs link against the libcrypto static archive
 # in addition to libuser. Kept separate from USER_PROGS so the
 # basic programs don't pay the libcrypto link cost.
-TLS_PROGS=(cryptotest httpsd httpsget login sshd ssh)
+TLS_PROGS=(cryptotest httpsd httpsget login sshd ssh rsatest)
 for name in "${TLS_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi

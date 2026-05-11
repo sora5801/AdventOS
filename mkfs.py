@@ -105,6 +105,8 @@ USER_PROGRAMS = [
     # Session 57: ptrace-based debugger + its toy target.
     ('dbg.elf',        'user/_obj/dbg.bin',        None),
     ('dbgtest.elf',    'user/_obj/dbgtest.bin',    None),
+    # Session 58: RSA-PKCS#1 v1.5 sign/verify exerciser.
+    ('rsatest.elf',    'user/_obj/rsatest.bin',    None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
