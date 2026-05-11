@@ -38,6 +38,32 @@ static int        g_next_job_id    = 1;
 
 static const char *g_prompt = "advent$ ";
 
+/* ---- shell state added in session 49 ------------------------------- */
+
+/* Environment variables.
+ *
+ * No envp[] flows through SYS_EXEC, so these are shell-local — they
+ * affect $VAR expansion and the export/env/unset builtins, but child
+ * processes don't inherit them. Good enough for shell scripts that
+ * stitch commands together using their own variables.
+ *
+ * Each slot holds "NAME=value\0" as a single string. Lookups are O(N)
+ * but N is tiny (ENV_MAX=32). The buffer goes in .data (non-zero
+ * initializer) for the same reason resolve_program()'s buf does —
+ * user.ld DISCARDs .bss. */
+#define ENV_MAX 32
+#define ENV_LEN 128
+static char g_env_buf[ENV_MAX][ENV_LEN] = {{'.'}};
+static int  g_env_count;
+
+/* Command history. A bounded ring used by the up/down arrow keys.
+ * Entries are stored most-recent-last; on overflow we shift everyone
+ * down by one. Empty lines and duplicates of the last entry are not
+ * recorded — matches bash's HISTCONTROL=ignoreboth. */
+#define HIST_MAX 32
+static char g_hist[HIST_MAX][LINE_MAX] = {{'.'}};
+static int  g_hist_count;
+
 /* ---- helpers ------------------------------------------------------- */
 
 /* Tokenize on whitespace AND on `|`/`>`/`&` — the operator characters
@@ -95,6 +121,131 @@ static const char *resolve_program(const char *name) {
     buf[i++] = '.'; buf[i++] = 'e'; buf[i++] = 'l'; buf[i++] = 'f';
     buf[i] = 0;
     return buf;
+}
+
+/* ---- env / history / expansion helpers (session 49) ---------------- */
+
+/* Find env entry for `name`, matching the part before '='. Returns the
+ * slot index or -1. */
+static int env_find(const char *name) {
+    int nlen = 0; while (name[nlen]) nlen++;
+    for (int i = 0; i < g_env_count; i++) {
+        const char *e = g_env_buf[i];
+        int j;
+        for (j = 0; j < nlen; j++) if (e[j] != name[j]) break;
+        if (j == nlen && e[j] == '=') return i;
+    }
+    return -1;
+}
+
+static const char *env_get(const char *name) {
+    int i = env_find(name);
+    if (i < 0) return 0;
+    const char *e = g_env_buf[i];
+    while (*e && *e != '=') e++;
+    if (*e == '=') e++;
+    return e;
+}
+
+static int env_set(const char *name, const char *value) {
+    int nlen = 0; while (name[nlen]) nlen++;
+    int vlen = 0; while (value[vlen]) vlen++;
+    if (nlen == 0)                          return -1;
+    if (nlen + 1 + vlen + 1 > ENV_LEN)      return -1;
+    int i = env_find(name);
+    if (i < 0) {
+        if (g_env_count >= ENV_MAX) return -1;
+        i = g_env_count++;
+    }
+    char *e = g_env_buf[i];
+    int k = 0;
+    for (int j = 0; j < nlen; j++) e[k++] = name[j];
+    e[k++] = '=';
+    for (int j = 0; j < vlen; j++) e[k++] = value[j];
+    e[k] = 0;
+    return 0;
+}
+
+static void env_unset(const char *name) {
+    int i = env_find(name);
+    if (i < 0) return;
+    for (int j = i; j < g_env_count - 1; j++) {
+        const char *src = g_env_buf[j + 1];
+        char *dst = g_env_buf[j];
+        int k = 0;
+        while (src[k] && k < ENV_LEN - 1) { dst[k] = src[k]; k++; }
+        dst[k] = 0;
+    }
+    g_env_count--;
+}
+
+/* Append `line` to the history ring. Skips empties and consecutive
+ * duplicates. On overflow, drops the oldest entry. */
+static void hist_add(const char *line) {
+    if (!line[0]) return;
+    if (g_hist_count > 0) {
+        const char *last = g_hist[g_hist_count - 1];
+        int eq = 1;
+        for (int i = 0;; i++) {
+            if (last[i] != line[i]) { eq = 0; break; }
+            if (!line[i]) break;
+        }
+        if (eq) return;
+    }
+    if (g_hist_count >= HIST_MAX) {
+        for (int i = 0; i < HIST_MAX - 1; i++) {
+            int k = 0;
+            while (g_hist[i + 1][k] && k < LINE_MAX - 1) {
+                g_hist[i][k] = g_hist[i + 1][k]; k++;
+            }
+            g_hist[i][k] = 0;
+        }
+        g_hist_count = HIST_MAX - 1;
+    }
+    int k = 0;
+    while (line[k] && k < LINE_MAX - 1) {
+        g_hist[g_hist_count][k] = line[k]; k++;
+    }
+    g_hist[g_hist_count][k] = 0;
+    g_hist_count++;
+}
+
+/* Expand $VAR refs in `in` to `out`. Identifier = [A-Za-z_][A-Za-z0-9_]*.
+ * Unknown vars expand to empty. A bare `$` (not followed by an
+ * identifier char) passes through literally. Returns 0 / -1 on
+ * out_cap overflow.
+ *
+ * Word-splitting comes for free because expansion runs BEFORE tokenize:
+ * `FOO="a b c"` followed by `echo $FOO` becomes `echo a b c` (3 args). */
+static int expand_vars(const char *in, char *out, int out_cap) {
+    int oi = 0;
+    while (*in) {
+        if (*in == '$' && (
+                (in[1] >= 'A' && in[1] <= 'Z') ||
+                (in[1] >= 'a' && in[1] <= 'z') ||
+                in[1] == '_')) {
+            in++;
+            char name[32]; int ni = 0;
+            while ((*in >= 'A' && *in <= 'Z') || (*in >= 'a' && *in <= 'z') ||
+                   (*in >= '0' && *in <= '9') || *in == '_') {
+                if (ni < (int)sizeof(name) - 1) name[ni++] = *in;
+                in++;
+            }
+            name[ni] = 0;
+            const char *v = env_get(name);
+            if (v) {
+                while (*v) {
+                    if (oi >= out_cap - 1) return -1;
+                    out[oi++] = *v++;
+                }
+            }
+            continue;
+        }
+        if (oi >= out_cap - 1) return -1;
+        out[oi++] = *in++;
+    }
+    out[oi] = 0;
+    return 0;
 }
 
 /* ---- pipeline parser ----------------------------------------------- */
@@ -326,13 +477,28 @@ static void cmd_help(void) {
     puts("  pwd               print the current working directory\n");
     puts("  cd [PATH]         change cwd (defaults to /)\n");
     puts("  ls [PATH]         list directory entries\n");
+    puts("  env               print env vars (session 49)\n");
+    puts("  export N=V        set an env var; $N expands in future commands\n");
+    puts("  unset N [...]     remove env vars\n");
+    puts("  history           print recent commands (Up/Down recalls them)\n");
+    puts("  source FILE / . FILE   run a .sh script in the current shell\n");
     puts("  exit [CODE]       exit the shell\n");
+    puts("\n");
+    puts("Line editing (raw-mode, session 49):\n");
+    puts("  Backspace         erase the previous char\n");
+    puts("  Up / Down         walk the command history\n");
+    puts("  Tab               complete a filename from the cwd\n");
+    puts("  Ctrl-C            discard the current line\n");
     puts("\n");
     puts("Pipelines and redirection:\n");
     puts("  cmd1 | cmd2 | ... [> outfile]\n");
     puts("  Each stage is a separate fork()+exec(); | wires stdin/stdout\n");
     puts("  via SYS_PIPE+SYS_DUP2; > opens an in-RAM tmpfs file you can\n");
     puts("  later cat back.\n");
+    puts("\n");
+    puts("Scripts:\n");
+    puts("  sh FILE.sh        runs FILE.sh in a fresh shell, then exits\n");
+    puts("  source FILE.sh    runs FILE.sh inside this shell (env vars persist)\n");
     puts("\n");
     puts("Coreutils sweep (binaries in /; pipe-friendly):\n");
     puts("  hello count cat echo httpd ed\n");
@@ -430,6 +596,256 @@ static void cmd_keys(void) {
     puts("(canonical mode restored)\n");
 }
 
+/* ---- raw-mode line editor (session 49) ----------------------------- */
+
+/* The active prompt: $PS1 if set, else the compile-time default. This
+ * means `export PS1="bash$ "` takes effect on the very next prompt. */
+static const char *current_prompt(void) {
+    const char *p = env_get("PS1");
+    return p ? p : g_prompt;
+}
+
+/* Redraw "<prompt><buf>" from column 0 and erase to EOL. Called after
+ * arrow keys or tab-completion rewrite the buffer in-place. We don't
+ * track cursor column ourselves — the kernel TTY does, and clear_eol
+ * scrubs whatever stale chars are left from the previous longer line. */
+static void redraw_line(const char *buf, int len) {
+    putchar('\r');
+    puts(current_prompt());
+    for (int i = 0; i < len; i++) putchar(buf[i]);
+    sys_tty_clear_eol();
+}
+
+/* Filename completion. Walk cwd looking for entries that start with the
+ * last "word" of buf (everything after the final whitespace). On exactly
+ * one match, splice in the missing tail + a trailing space. On multiple
+ * matches, list them on a new line then redraw the prompt + buffer. */
+static void tab_complete(char *buf, int *len_p, int cap) {
+    int len = *len_p;
+    int word_start = len;
+    while (word_start > 0 &&
+           buf[word_start - 1] != ' ' &&
+           buf[word_start - 1] != '\t') {
+        word_start--;
+    }
+    int prefix_len = len - word_start;
+    const char *prefix = &buf[word_start];
+
+    char cwd[64];
+    if (sys_getcwd(cwd, sizeof(cwd)) < 0) return;
+
+    int iter = 0;
+    char name[17];
+    char matches[16][17];
+    int  n_matches = 0;
+    int  overflowed = 0;
+    while (sys_readdir(cwd, &iter, name) >= 0) {
+        name[16] = 0;
+        int ok = 1;
+        for (int i = 0; i < prefix_len; i++) {
+            if (name[i] != prefix[i]) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        if (n_matches < 16) {
+            int j = 0;
+            while (name[j] && j < 16) { matches[n_matches][j] = name[j]; j++; }
+            matches[n_matches][j] = 0;
+            n_matches++;
+        } else {
+            overflowed = 1;
+            n_matches++;
+        }
+    }
+    if (n_matches == 0) return;
+
+    if (n_matches == 1) {
+        /* Splice in the missing tail. */
+        const char *m = matches[0];
+        int mlen = 0; while (m[mlen]) mlen++;
+        int remaining = mlen - prefix_len;
+        if (len + remaining + 1 >= cap) return;
+        for (int i = 0; i < remaining; i++) {
+            buf[len + i] = m[prefix_len + i];
+            putchar(m[prefix_len + i]);
+        }
+        len += remaining;
+        if (len < cap - 1) {
+            buf[len++] = ' ';
+            putchar(' ');
+        }
+        buf[len] = 0;
+        *len_p = len;
+        return;
+    }
+
+    /* Multiple matches: list them, redraw. */
+    putchar('\n');
+    int show = (n_matches > 16) ? 16 : n_matches;
+    for (int i = 0; i < show; i++) {
+        puts("  ");
+        puts(matches[i]);
+        putchar('\n');
+    }
+    if (overflowed) puts("  ...\n");
+    redraw_line(buf, len);
+    *len_p = len;
+}
+
+/* Read one line of input with history + tab completion + backspace.
+ * Switches stdin to TTY_RAW for the duration, restores the prior mode
+ * before returning. Returns the line length (0 on empty Enter). The
+ * line is NUL-terminated in `buf`. */
+static int read_line_interactive(char *buf, int cap) {
+    uint32_t prev_mode = tty_set_mode(TTY_RAW);
+    int  len = 0;
+    int  hist_view = g_hist_count;       /* count = "showing current input" */
+    char saved[LINE_MAX]; int saved_len = 0;
+    buf[0] = 0;
+
+    for (;;) {
+        char c;
+        int  n = sys_read(0, &c, 1);
+        if (n <= 0) continue;
+
+        /* Enter — commit the line. */
+        if (c == '\r' || c == '\n') {
+            putchar('\n');
+            buf[len] = 0;
+            tty_set_mode(prev_mode);
+            return len;
+        }
+
+        /* Backspace (kbd sends \b=0x08; serial DEL=0x7F). */
+        if (c == 0x08 || c == 0x7F) {
+            if (len > 0) {
+                len--;
+                buf[len] = 0;
+                putchar('\b'); putchar(' '); putchar('\b');
+            }
+            continue;
+        }
+
+        /* ESC sequence — arrow keys arrive as ESC '[' final. */
+        if (c == 27) {
+            char a, b;
+            if (sys_read(0, &a, 1) <= 0) continue;
+            if (a != '[') continue;
+            if (sys_read(0, &b, 1) <= 0) continue;
+
+            if (b == 'A') {                              /* up */
+                if (g_hist_count == 0) continue;
+                if (hist_view == g_hist_count) {
+                    saved_len = len;
+                    for (int i = 0; i < len; i++) saved[i] = buf[i];
+                }
+                if (hist_view > 0) hist_view--;
+                int j = 0;
+                const char *src = g_hist[hist_view];
+                while (src[j] && j < cap - 1) { buf[j] = src[j]; j++; }
+                len = j;
+                buf[len] = 0;
+                redraw_line(buf, len);
+            } else if (b == 'B') {                       /* down */
+                if (hist_view >= g_hist_count) continue;
+                hist_view++;
+                if (hist_view == g_hist_count) {
+                    for (int i = 0; i < saved_len; i++) buf[i] = saved[i];
+                    len = saved_len;
+                } else {
+                    int j = 0;
+                    const char *src = g_hist[hist_view];
+                    while (src[j] && j < cap - 1) { buf[j] = src[j]; j++; }
+                    len = j;
+                }
+                buf[len] = 0;
+                redraw_line(buf, len);
+            }
+            /* ESC[C / ESC[D (right/left) ignored — no mid-line editing. */
+            continue;
+        }
+
+        /* Tab — complete from cwd. */
+        if (c == '\t') {
+            tab_complete(buf, &len, cap);
+            continue;
+        }
+
+        /* Ctrl-C — discard the current line, fresh prompt. */
+        if (c == 0x03) {
+            putchar('\n');
+            len = 0;
+            buf[0] = 0;
+            puts(current_prompt());
+            continue;
+        }
+
+        /* Printable ASCII — append + echo. */
+        if (c >= 32 && c < 127) {
+            if (len < cap - 1) {
+                buf[len++] = c;
+                buf[len] = 0;
+                putchar(c);
+            }
+            continue;
+        }
+        /* Anything else (control bytes we don't handle) is dropped. */
+    }
+}
+
+/* ---- new builtins (session 49) ------------------------------------- */
+
+static void cmd_env(void) {
+    for (int i = 0; i < g_env_count; i++) {
+        puts(g_env_buf[i]);
+        putchar('\n');
+    }
+}
+
+/* `export NAME=value [...]` — set one or more env vars. With no
+ * arguments, behave like `env`. */
+static void cmd_export(char **toks, int ntok) {
+    if (ntok < 2) { cmd_env(); return; }
+    for (int i = 1; i < ntok; i++) {
+        const char *arg = toks[i];
+        int eq = -1;
+        for (int j = 0; arg[j]; j++) if (arg[j] == '=') { eq = j; break; }
+        if (eq < 0) {
+            puts("export: need NAME=value: "); puts(arg); puts("\n");
+            continue;
+        }
+        char name[32];
+        int nlen = eq < 31 ? eq : 31;
+        for (int j = 0; j < nlen; j++) name[j] = arg[j];
+        name[nlen] = 0;
+        if (env_set(name, arg + eq + 1) < 0) {
+            puts("export: env full or value too long\n");
+        }
+    }
+}
+
+static void cmd_unset_b(char **toks, int ntok) {
+    if (ntok < 2) { puts("unset: usage: unset NAME [...]\n"); return; }
+    for (int i = 1; i < ntok; i++) env_unset(toks[i]);
+}
+
+static void cmd_history(void) {
+    for (int i = 0; i < g_hist_count; i++) {
+        printf("  %d  %s\n", i + 1, g_hist[i]);
+    }
+}
+
+/* Forward decls — run_script + cmd_source both call execute_line, but
+ * execute_line lives below cmd_forktest so it can call every builtin. */
+static void execute_line(char *line_in);
+static int  run_script  (const char *path);
+
+static void cmd_source(const char *path) {
+    if (!path || !*path) { puts("source: usage: source <file>\n"); return; }
+    if (run_script(path) < 0) {
+        puts("source: cannot open: "); puts(path); puts("\n");
+    }
+}
+
 static void cmd_forktest(void) {
     int marker = 0xCAFE;
     int pid = sys_fork();
@@ -444,6 +860,131 @@ static void cmd_forktest(void) {
     int reaped = sys_wait(&code);
     printf("  parent: pid=%d  marker=0x%x  child_pid=%d  reaped=%d  exit=%d\n",
            sys_getpid(), marker, pid, reaped, code);
+}
+
+/* ---- line dispatcher + script runner (session 49) ------------------ */
+
+/* Run one shell line. Used by the interactive prompt and by run_script.
+ * Mutates the caller's buffer (tokenize NULs separators in place).
+ *
+ * Built-ins that need to mutate shell state run here. Anything else
+ * — including a single non-pipeline command — flows through
+ * parse_pipeline + run_pipeline so it gets a real fork/exec/wait. */
+static void execute_line(char *line_in) {
+    /* Expand $VAR refs into a fresh buffer before tokenizing. Splitting
+     * the expanded line on whitespace is what gives word-splitting
+     * semantics: FOO="a b" + `echo $FOO` becomes 3 args, not 2. */
+    char line[LINE_MAX];
+    if (expand_vars(line_in, line, sizeof(line)) < 0) {
+        puts("sh: variable expansion overflowed line buffer\n");
+        return;
+    }
+
+    char *toks[ARG_MAX];
+    int ntok = tokenize(line, toks, ARG_MAX);
+    if (ntok == 0) return;
+
+    int has_pipe_op = 0;
+    for (int i = 0; i < ntok; i++) {
+        if ((toks[i][0] == '|' || toks[i][0] == '>') && toks[i][1] == 0) {
+            has_pipe_op = 1; break;
+        }
+    }
+
+    /* Hard builtins — always inline (state mutation / special exit). */
+    if (strcmp(toks[0], "help")     == 0) { cmd_help();    return; }
+    if (strcmp(toks[0], "pid")      == 0) { cmd_pid();     return; }
+    if (strcmp(toks[0], "time")     == 0) { cmd_time();    return; }
+    if (strcmp(toks[0], "forktest") == 0) { cmd_forktest();return; }
+    if (strcmp(toks[0], "keys")     == 0) { cmd_keys();    return; }
+    if (strcmp(toks[0], "jobs")     == 0) { cmd_jobs();    return; }
+    if (strcmp(toks[0], "env")      == 0) { cmd_env();     return; }
+    if (strcmp(toks[0], "export")   == 0) { cmd_export (toks, ntok); return; }
+    if (strcmp(toks[0], "unset")    == 0) { cmd_unset_b(toks, ntok); return; }
+    if (strcmp(toks[0], "history")  == 0) { cmd_history(); return; }
+    if (strcmp(toks[0], "source")   == 0 || strcmp(toks[0], ".") == 0) {
+        cmd_source(ntok > 1 ? toks[1] : 0);
+        return;
+    }
+    if (strcmp(toks[0], "cd")       == 0) {
+        cmd_cd(ntok > 1 ? toks[1] : "/");
+        return;
+    }
+    if (strcmp(toks[0], "sleep")    == 0) {
+        cmd_sleep(ntok > 1 ? toks[1] : "");
+        return;
+    }
+
+    /* Soft builtins — only inline when single-stage. Otherwise the
+     * pipeline forks the same-named .elf so dup2 works on the real fds. */
+    if (!has_pipe_op) {
+        if (strcmp(toks[0], "pwd") == 0) { cmd_pwd(); return; }
+        if (strcmp(toks[0], "ls")  == 0) {
+            cmd_ls(ntok > 1 ? toks[1] : "");
+            return;
+        }
+    }
+    if (strcmp(toks[0], "exit") == 0) {
+        int code = 0;
+        if (ntok > 1) {
+            const char *p = toks[1];
+            while (*p >= '0' && *p <= '9') { code = code * 10 + (*p - '0'); p++; }
+        }
+        puts("bye\n");
+        sys_exit(code);
+    }
+
+    struct pipeline pl;
+    if (parse_pipeline(toks, ntok, &pl) < 0) {
+        puts("sh: parse error\n");
+        return;
+    }
+    int rc = run_pipeline(&pl);
+    if (rc != 0) printf("[exit %d]\n", rc);
+}
+
+/* Read a shell script from `path`, execute each line. Blank lines and
+ * lines starting with `#` are skipped. CR bytes are dropped silently
+ * so scripts written from Windows hosts still run. Returns 0 on
+ * success, -1 if the file can't be opened.
+ *
+ * We read in 64-byte chunks and assemble lines incrementally — avoids
+ * pre-allocating a whole-file buffer and naturally streams arbitrarily
+ * large scripts (up to LINE_MAX per line). */
+static int run_script(const char *path) {
+    int fd = sys_open(path);
+    if (fd < 0) return -1;
+
+    char line[LINE_MAX];
+    int  pos = 0;
+    char chunk[64];
+    int  eof = 0;
+    while (!eof) {
+        int n = sys_read(fd, chunk, sizeof(chunk));
+        if (n <= 0) { eof = 1; n = 0; }
+        for (int i = 0; i < n; i++) {
+            char c = chunk[i];
+            if (c == '\r') continue;
+            if (c == '\n' || pos >= LINE_MAX - 1) {
+                line[pos] = 0;
+                int s = 0;
+                while (line[s] == ' ' || line[s] == '\t') s++;
+                if (line[s] && line[s] != '#') execute_line(&line[s]);
+                pos = 0;
+            } else {
+                line[pos++] = c;
+            }
+        }
+    }
+    /* Trailing line without a closing newline. */
+    if (pos > 0) {
+        line[pos] = 0;
+        int s = 0;
+        while (line[s] == ' ' || line[s] == '\t') s++;
+        if (line[s] && line[s] != '#') execute_line(&line[s]);
+    }
+    sys_close(fd);
+    return 0;
 }
 
 /* ---- selftest ------------------------------------------------------ */
@@ -1146,6 +1687,106 @@ static void selftest(void) {
          *     already exercise the "uid 1000 execs sh.elf (0755)"
          *     positive case. */
         EXPECT(1, "(positive exec case covered by t30 login flow)");
+
+        #undef EXPECT
+    }
+
+    puts("[t32] shell polish: env vars, history, tab completion, .sh scripts\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* (a) env_set / env_get round-trip. We're inside the running
+         *     shell, so the same g_env_buf the prompt sees is the one
+         *     we're poking at. */
+        env_set("FOO", "hello");
+        const char *v = env_get("FOO");
+        EXPECT(v && strcmp(v, "hello") == 0, "env_set/env_get FOO=hello");
+
+        /* (b) $FOO expansion runs before tokenize, so it word-splits. */
+        char out[64];
+        EXPECT(expand_vars("echo $FOO world", out, sizeof(out)) == 0 &&
+               strcmp(out, "echo hello world") == 0,
+               "$FOO expands inside a sentence");
+
+        env_set("X", "a b c");
+        EXPECT(expand_vars("echo $X", out, sizeof(out)) == 0 &&
+               strcmp(out, "echo a b c") == 0,
+               "$X expands to 'a b c' (3 args after tokenize)");
+
+        /* (c) Unknown var expands to empty. */
+        EXPECT(expand_vars("echo $NOPE x", out, sizeof(out)) == 0 &&
+               strcmp(out, "echo  x") == 0,
+               "$NOPE (undefined) expands to empty");
+
+        /* (d) env_unset removes the entry. */
+        env_unset("FOO");
+        EXPECT(env_get("FOO") == 0, "env_unset FOO");
+
+        /* (e) History: add three lines, dup is skipped, count = 3. */
+        int hist_before = g_hist_count;
+        hist_add("ls");
+        hist_add("ls");                  /* duplicate of last → skipped */
+        hist_add("pwd");
+        hist_add("history");
+        EXPECT(g_hist_count - hist_before == 3,
+               "hist_add dedup'd consecutive duplicates");
+        EXPECT(strcmp(g_hist[hist_before],     "ls")      == 0, "hist[0]=ls");
+        EXPECT(strcmp(g_hist[hist_before + 1], "pwd")     == 0, "hist[1]=pwd");
+        EXPECT(strcmp(g_hist[hist_before + 2], "history") == 0, "hist[2]=history");
+
+        /* (f) .sh script: write one out, execute it via run_script,
+         *     verify side effects. The script sets an env var and
+         *     creates a file; after run_script returns, both must be
+         *     visible in the shell. */
+        const char *script =
+            "# session 49 script test\n"
+            "export FROM_SCRIPT=ok\n"
+            "echo hi from script > script_out.txt\n";
+        sys_fs_write("test.sh", script, (uint32_t)strlen(script));
+
+        int rc = run_script("test.sh");
+        EXPECT(rc == 0, "run_script returned 0");
+        const char *fs = env_get("FROM_SCRIPT");
+        EXPECT(fs && strcmp(fs, "ok") == 0,
+               "script's `export FROM_SCRIPT=ok` is visible to caller");
+
+        int fd = sys_open("script_out.txt");
+        EXPECT(fd >= 0, "script created script_out.txt via redirect");
+        if (fd >= 0) {
+            char rbuf[64];
+            int  n = sys_read(fd, rbuf, sizeof(rbuf) - 1);
+            sys_close(fd);
+            rbuf[n > 0 ? n : 0] = 0;
+            EXPECT(n > 0 && rbuf[0] == 'h' && rbuf[1] == 'i',
+                   "script_out.txt starts with 'hi'");
+        }
+
+        /* (g) Raw-mode ESC-sequence passthrough. We inject ESC '[' 'A'
+         *     (what kbd_irq emits for a real up-arrow scancode) and
+         *     verify sys_read in TTY_RAW hands the 3 bytes back in
+         *     order — that's what read_line_interactive's ESC parser
+         *     relies on. The conversion 0xE0 0x48 → ESC [ A itself
+         *     happens inside kbd_irq, which only runs from a real
+         *     hardware IRQ — covered by manual boot-time testing. */
+        uint32_t prev = tty_set_mode(TTY_RAW);
+        char csi_up[3] = { 27, '[', 'A' };
+        tty_inject(csi_up, 3);
+        char rb[3] = {0};
+        int got = 0;
+        for (int i = 0; i < 3; i++) {
+            int r = sys_read(0, &rb[i], 1);
+            if (r > 0) got++; else break;
+        }
+        tty_set_mode(prev);
+        EXPECT(got == 3 && rb[0] == 27 && rb[1] == '[' && rb[2] == 'A',
+               "raw mode delivers ESC [ A intact to sys_read");
+
+        /* (h) Clean up so other tests don't see lingering state. */
+        env_unset("FROM_SCRIPT");
+        env_unset("X");
 
         #undef EXPECT
     }
@@ -1935,9 +2576,11 @@ void on_sigusr1(int sig) {
 /* ---- main loop ----------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    int run_selftest = 0;
+    int         run_selftest = 0;
+    const char *script_arg   = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "selftest") == 0) { run_selftest = 1; break; }
+        if (strcmp(argv[i], "selftest") == 0) { run_selftest = 1; continue; }
+        if (argv[i][0] != '-' && !script_arg) script_arg = argv[i];
     }
 
     /* Become a session + pgrp leader so foreground pipelines can be
@@ -1951,75 +2594,42 @@ int main(int argc, char **argv) {
     puts("\nAdventOS userspace shell, pid="); printf("%d\n", sys_getpid());
     puts("Type 'help' for builtins. | > & are honored.\n\n");
 
+    /* A few defaults so $PS1 / $HOME / $USER work out of the box. The
+     * uid bookkeeping lives in the kernel; we just publish a name. */
+    env_set("PS1",   "advent$ ");
+    env_set("HOME",  "/");
+    env_set("SHELL", "/sh.elf");
+    {
+        char ub[16]; int uid = sys_getuid(); int k = 0;
+        if (uid == 0) { ub[k++] = 'r'; ub[k++] = 'o'; ub[k++] = 'o'; ub[k++] = 't'; }
+        else {
+            char tmp[12]; int ti = 0;
+            int u = uid; if (u == 0) tmp[ti++] = '0';
+            while (u) { tmp[ti++] = '0' + u % 10; u /= 10; }
+            while (ti--) ub[k++] = tmp[ti];
+        }
+        ub[k] = 0;
+        env_set("USER", ub);
+    }
+
     if (run_selftest) selftest();
 
-    char  line[LINE_MAX];
-    char *toks[ARG_MAX];
+    /* Script mode: `sh script.sh` runs the file then exits. Selftest
+     * takes precedence so the headless boot path stays unchanged. */
+    if (script_arg && !run_selftest) {
+        if (run_script(script_arg) < 0) {
+            puts("sh: cannot open script: "); puts(script_arg); puts("\n");
+            sys_exit(1);
+        }
+        sys_exit(0);
+    }
 
+    char line[LINE_MAX];
     for (;;) {
-        puts(g_prompt);
-        int n = sys_read_line(line, sizeof(line));
+        puts(current_prompt());
+        int n = read_line_interactive(line, sizeof(line));
         if (n <= 0) continue;
-
-        int ntok = tokenize(line, toks, ARG_MAX);
-        if (ntok == 0) continue;
-
-        /* Detect pipeline operators. If any are present, every "soft"
-         * builtin (the ones that can also exist as binaries — ls, pwd,
-         * mkdir) falls through to fork+exec so the pipeline can wire
-         * them up properly. "Hard" builtins (cd, exit, jobs, …) always
-         * run inline because they mutate the shell's own state. */
-        int has_pipe_op = 0;
-        for (int i = 0; i < ntok; i++) {
-            if ((toks[i][0] == '|' || toks[i][0] == '>') && toks[i][1] == 0) {
-                has_pipe_op = 1; break;
-            }
-        }
-
-        /* Hard builtins — always inline (state mutation, special exit). */
-        if (strcmp(toks[0], "help")     == 0) { cmd_help();  continue; }
-        if (strcmp(toks[0], "pid")      == 0) { cmd_pid();   continue; }
-        if (strcmp(toks[0], "time")     == 0) { cmd_time();  continue; }
-        if (strcmp(toks[0], "forktest") == 0) { cmd_forktest(); continue; }
-        if (strcmp(toks[0], "keys")     == 0) { cmd_keys();     continue; }
-        if (strcmp(toks[0], "jobs")     == 0) { cmd_jobs();     continue; }
-        if (strcmp(toks[0], "cd")       == 0) {
-            cmd_cd(ntok > 1 ? toks[1] : "/");
-            continue;
-        }
-        if (strcmp(toks[0], "sleep")    == 0) {
-            cmd_sleep(ntok > 1 ? toks[1] : "");
-            continue;
-        }
-
-        /* Soft builtins — only run inline when the line is a single
-         * stage with no pipe/redirect. Pipelines fork+exec the .elf
-         * binary of the same name. */
-        if (!has_pipe_op) {
-            if (strcmp(toks[0], "pwd") == 0) { cmd_pwd(); continue; }
-            if (strcmp(toks[0], "ls")  == 0) {
-                cmd_ls(ntok > 1 ? toks[1] : "");
-                continue;
-            }
-        }
-        if (strcmp(toks[0], "exit") == 0) {
-            int code = 0;
-            if (ntok > 1) {
-                const char *p = toks[1];
-                while (*p >= '0' && *p <= '9') { code = code*10 + (*p - '0'); p++; }
-            }
-            puts("bye\n");
-            sys_exit(code);
-        }
-
-        struct pipeline pl;
-        if (parse_pipeline(toks, ntok, &pl) < 0) {
-            puts("sh: parse error\n");
-            continue;
-        }
-        int rc = run_pipeline(&pl);
-        if (rc != 0) {
-            printf("[exit %d]\n", rc);
-        }
+        hist_add(line);
+        execute_line(line);
     }
 }

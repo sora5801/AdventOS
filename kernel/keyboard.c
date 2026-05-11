@@ -16,6 +16,13 @@ static volatile uint32_t kbd_tail;
 static int shift_down;
 static int caps_lock;
 
+/* Session 49: track 0xE0 prefix for "extended" scancodes.
+ * The dedicated arrow cluster, Home/End/Ins/Del, and the right-side
+ * Ctrl/Alt all send 0xE0 followed by their normal scancode. We use
+ * this to distinguish the arrow cluster from the numpad (which sends
+ * the same raw scancodes — 0x48/0x4B/0x4D/0x50 — without prefix). */
+static int e0_prefix;
+
 /* Scancode set 1 -> ASCII, lowercase */
 static const char scancode_lower[128] = {
     /* 0x00 */  0,    27,  '1', '2', '3', '4', '5', '6',
@@ -58,16 +65,44 @@ static int is_letter(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
+/* Push a 3-byte ANSI CSI sequence: ESC '[' <final>.
+ * For arrow keys: A=up, B=down, C=right, D=left. The shell parses
+ * these in raw mode to drive history navigation. */
+static void push_csi(char final) {
+    buf_push(27);           /* ESC */
+    buf_push('[');
+    buf_push(final);
+}
+
 static void kbd_irq(struct registers *r) {
     (void)r;
     uint8_t sc = inb(KBD_DATA_PORT);
 
-    /* Modifier keys */
-    if (sc == 0x2A || sc == 0x36) { shift_down = 1; return; }   /* shift down */
-    if (sc == 0xAA || sc == 0xB6) { shift_down = 0; return; }   /* shift up   */
-    if (sc == 0x3A) { caps_lock = !caps_lock; return; }         /* caps lock  */
+    /* 0xE0 is a one-byte prefix marking the next scancode as "extended"
+     * (right-side modifiers, dedicated arrow cluster, etc). Latch it
+     * and wait for the next byte. */
+    if (sc == 0xE0) { e0_prefix = 1; return; }
 
-    if (sc & 0x80) return;            /* ignore other key releases */
+    /* Modifier keys (both halves of the key set the same shift flag). */
+    if (sc == 0x2A || sc == 0x36) { shift_down = 1; e0_prefix = 0; return; }   /* shift down */
+    if (sc == 0xAA || sc == 0xB6) { shift_down = 0; e0_prefix = 0; return; }   /* shift up   */
+    if (sc == 0x3A) { caps_lock = !caps_lock; e0_prefix = 0; return; }         /* caps lock  */
+
+    if (sc & 0x80) { e0_prefix = 0; return; }   /* ignore other key releases */
+
+    /* Extended scancodes (after 0xE0). We only care about the arrow
+     * cluster — emit ANSI CSI sequences for them, drop everything else. */
+    if (e0_prefix) {
+        e0_prefix = 0;
+        switch (sc) {
+            case 0x48: push_csi('A'); return;   /* up arrow    */
+            case 0x50: push_csi('B'); return;   /* down arrow  */
+            case 0x4D: push_csi('C'); return;   /* right arrow */
+            case 0x4B: push_csi('D'); return;   /* left arrow  */
+            /* TODO: Home/End/Del/PgUp/PgDn would go here. */
+            default: return;
+        }
+    }
 
     char c = scancode_lower[sc & 0x7F];
     if (!c) return;
@@ -86,6 +121,7 @@ static void kbd_irq(struct registers *r) {
 void keyboard_init(void) {
     kbd_head = kbd_tail = 0;
     shift_down = caps_lock = 0;
+    e0_prefix = 0;
 
     isr_register_irq(1, kbd_irq);
     pic_clear_mask(1);
