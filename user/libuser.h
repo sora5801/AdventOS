@@ -90,6 +90,11 @@ typedef unsigned int   size_t;
 #define SYS_TTY_CURSOR    60
 #define SYS_TTY_CLEAR     61
 #define SYS_TTY_CLEAR_EOL 62
+#define SYS_GETUID        63
+#define SYS_GETGID        64
+#define SYS_SETUID        65
+#define SYS_SETGID        66
+#define SYS_FS_OWNER      67
 
 /* Block-device ABI — must match kernel/syscall.h exactly. */
 struct sys_block_info {
@@ -225,6 +230,18 @@ int      sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const vo
 int      sys_tty_cursor   (int row, int col);
 int      sys_tty_clear    (void);
 int      sys_tty_clear_eol(void);
+
+/* Process credentials (session 47). uid 0 = root. SYS_SETUID is
+ * privileged: only a uid-0 task can switch to a different uid;
+ * a non-root task may only "setuid" to its own uid (no-op).
+ * Returns 0 / -1. uid/gid inherit across fork and survive exec. */
+int      sys_getuid(void);
+int      sys_getgid(void);
+int      sys_setuid(int uid);
+int      sys_setgid(int gid);
+/* (uid << 16) | gid for the file at `path`, or -1 if missing.
+ * Used by `ls` to display owner info and by `stat`-style tools. */
+int      sys_fs_owner(const char *path);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

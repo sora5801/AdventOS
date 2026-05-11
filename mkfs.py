@@ -96,6 +96,9 @@ USER_PROGRAMS = [
     ('usbtest.elf',    'user/_obj/usbtest.bin',    None),
     # Session 46: vi-like modal editor.
     ('vi.elf',         'user/_obj/vi.bin',         None),
+    # Session 47: multi-user + login.
+    ('login.elf',      'user/_obj/login.bin',      None),
+    ('id.elf',         'user/_obj/id.bin',         None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
@@ -109,7 +112,28 @@ RAW_BLOBS = [
 DATA_FILES = [
     ('hello.txt', 'fs/hello.txt', None),
     ('inittab',   'fs/inittab',   'etc'),
+    ('passwd',    'fs/passwd',    'etc'),     # session 47
 ]
+
+# Session 47: generate /etc/passwd at build time. Format per line:
+#   name:salt$sha256_hex:uid:gid:home:shell
+# salt is 8 ASCII chars; password hash = sha256(salt || password) in
+# lowercase hex. login.elf verifies by recomputing the hash.
+USERS = [
+    # (name,  password, uid,  gid,  home, shell)
+    ('root',  'root',   0,    0,    '/',  'sh.elf'),
+    ('guest', 'guest',  1000, 1000, '/',  'sh.elf'),
+]
+USER_SALTS = ['ABCDef01', 'GH23ij45']
+
+def gen_passwd_file():
+    import hashlib
+    lines = []
+    for i, (name, password, uid, gid, home, shell) in enumerate(USERS):
+        salt = USER_SALTS[i % len(USER_SALTS)]
+        h = hashlib.sha256((salt + password).encode('ascii')).hexdigest()
+        lines.append(f'{name}:{salt}${h}:{uid}:{gid}:{home}:{shell}')
+    return '\n'.join(lines) + '\n'
 
 
 def make_elf(code, entry_va):
@@ -139,9 +163,16 @@ def pad_to_sector(data):
     return data
 
 
-def encode_entry(name, start, size, type_, parent):
+def encode_entry(name, start, size, type_, parent, uid=0, gid=0):
+    """fs_entry layout (32 bytes):
+         name[16] + start_sector(4) + size(4) + type(1) + parent_dir(1)
+         + uid(2) + gid(2) + reserved[2]
+    Session 47 carved uid+gid out of what used to be 6 reserved bytes.
+    Files baked by mkfs default to root (uid=0, gid=0); runtime
+    creators stamp the calling task's uid/gid via fs.c. """
     name_b = name.encode('ascii').ljust(FS_NAME_MAX, b'\x00')[:FS_NAME_MAX]
-    return name_b + struct.pack('<IIBB6x', start, size, type_, parent)
+    return name_b + struct.pack('<IIBBHH2x', start, size, type_, parent,
+                                 uid & 0xFFFF, gid & 0xFFFF)
 
 
 def build_image(directories, user_programs, raw_blobs, data_files,
@@ -216,6 +247,16 @@ def build_image(directories, user_programs, raw_blobs, data_files,
 
 def build():
     """Build the boot disk filesystem image (fs.img)."""
+    # Session 47: regenerate /etc/passwd on every build so the
+    # hashes always match the USERS table. Open in BINARY mode so
+    # the on-disk file uses LF line endings on every host platform —
+    # Python's default text mode CRLF-translates on Windows, which
+    # bakes a stray \r into the last field of each user record and
+    # makes login.elf's parsed shell name "sh.elf\r" instead of
+    # "sh.elf". The exec then fails with -ENOENT.
+    os.makedirs('fs', exist_ok=True)
+    open('fs/passwd', 'wb').write(gen_passwd_file().encode('ascii'))
+
     print(f"        layout: superblock @ sector 0..{FS_SUPER_SECTORS - 1}, "
           f"data @ sector {FS_SUPER_SECTORS}+")
     build_image(DIRECTORIES, USER_PROGRAMS, RAW_BLOBS, DATA_FILES,

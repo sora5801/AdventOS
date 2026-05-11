@@ -301,6 +301,32 @@ int sys_tty_clear_eol(void) {
     return ret;
 }
 
+int sys_getuid(void) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_GETUID) : "memory");
+    return ret;
+}
+int sys_getgid(void) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_GETGID) : "memory");
+    return ret;
+}
+int sys_setuid(int uid) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_SETUID), "b"(uid) : "memory");
+    return ret;
+}
+int sys_setgid(int gid) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_SETGID), "b"(gid) : "memory");
+    return ret;
+}
+int sys_fs_owner(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_FS_OWNER), "b"(path) : "memory");
+    return ret;
+}
+
 int sys_pipe(int fds[2]) {
     int ret;
     __asm__ volatile ("int $0x80"

@@ -53,7 +53,9 @@ struct fs_entry {
     uint32_t size;                /* bytes (files only; 0 for dirs) */
     uint8_t  type;                /* FS_TYPE_* */
     uint8_t  parent_dir;          /* entry idx of parent dir, or FS_DIR_ROOT */
-    uint8_t  reserved[6];
+    uint16_t uid;                 /* file owner (session 47). 0 = root.   */
+    uint16_t gid;                 /* file group. Stamped on creation.     */
+    uint8_t  reserved[2];
 } __attribute__((packed));        /* 32 bytes */
 
 struct fs_super {
@@ -126,6 +128,8 @@ const char *fs_name(int idx);
 int         fs_count(void);
 uint8_t     fs_entry_type(int idx);
 int         fs_entry_parent(int idx);
+int         fs_entry_uid(int idx);
+int         fs_entry_gid(int idx);
 
 /* Whole-file write. Path semantics same as fs_open. Creates the file
  * if absent. Allocates a fresh contiguous sector run from the bitmap;

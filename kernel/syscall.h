@@ -92,6 +92,16 @@
 #define SYS_TTY_CLEAR_EOL 62 /* (eax=62) -> 0. Clears from cursor to end of
                                 line. Cursor position unchanged. */
 
+#define SYS_GETUID        63 /* (eax=63) -> current task's uid (0 = root). */
+#define SYS_GETGID        64 /* (eax=64) -> current task's gid. */
+#define SYS_SETUID        65 /* (eax=65, ebx=uid) -> 0 on success, -1 if not
+                                privileged. uid 0 (root) may set any uid;
+                                others may only setuid to their own uid (no-op). */
+#define SYS_SETGID        66 /* (eax=66, ebx=gid) -> 0 / -1. Same rules. */
+
+#define SYS_FS_OWNER      67 /* (eax=67, ebx=path) -> (uid << 16) | gid for the
+                                file at `path`, or -1 if it doesn't exist. */
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;

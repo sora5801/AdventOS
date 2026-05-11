@@ -795,6 +795,13 @@ struct task *task_fork(struct registers *parent_regs) {
     child->pgid = parent->pgid;
     child->sid  = parent->sid;
 
+    /* 5e. Inherit process credentials (session 47). uid/gid
+     *     survive fork verbatim; only an explicit SYS_SETUID
+     *     (from a uid-0 caller — login.elf is the canonical one)
+     *     changes them. */
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+
     /* 6. Splice into the round-robin ring under the scheduler lock —
      * APs may be picking from the ring concurrently. Transition
      * state to READY in the same critical section so the moment

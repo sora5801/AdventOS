@@ -660,6 +660,55 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
+        case SYS_GETUID: {
+            ret = (int)task_current()->uid;
+            break;
+        }
+        case SYS_GETGID: {
+            ret = (int)task_current()->gid;
+            break;
+        }
+        case SYS_SETUID: {
+            struct task *t = task_current();
+            uint32_t target = a;
+            if (target > 0xFFFFu) { ret = -1; break; }
+            if (t->uid == 0) {
+                /* root: may set any uid. */
+                t->uid = (uint16_t)target;
+                ret = 0;
+            } else if ((uint16_t)target == t->uid) {
+                /* No-op for non-root setting current uid. */
+                ret = 0;
+            } else {
+                ret = -1;
+            }
+            break;
+        }
+        case SYS_SETGID: {
+            struct task *t = task_current();
+            uint32_t target = a;
+            if (target > 0xFFFFu) { ret = -1; break; }
+            if (t->uid == 0) {
+                t->gid = (uint16_t)target;
+                ret = 0;
+            } else if ((uint16_t)target == t->gid) {
+                ret = 0;
+            } else {
+                ret = -1;
+            }
+            break;
+        }
+        case SYS_FS_OWNER: {
+            const char *path = (const char *)(uintptr_t)a;
+            if (!path) { ret = -1; break; }
+            int idx = fs_open(path);
+            if (idx < 0) { ret = -1; break; }
+            int uid = fs_entry_uid(idx);
+            int gid = fs_entry_gid(idx);
+            if (uid < 0 || gid < 0) { ret = -1; break; }
+            ret = (uid << 16) | (gid & 0xFFFF);
+            break;
+        }
         case SYS_FB_MMAP: {
             /* Map the framebuffer's physical pages into the calling
              * task's PD with USER+WRITABLE flags, at a fresh user VA

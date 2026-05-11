@@ -433,6 +433,13 @@ static int find_or_create_file_inst(struct fs_instance *inst, const char *path, 
     for (int i = 0; i < base_len; i++) e->name[i] = base[i];
     e->type       = FS_TYPE_FILE;
     e->parent_dir = (uint8_t)parent;
+    /* Stamp the calling task's uid/gid on the freshly-created file
+     * (session 47). For kernel callers — when there's no current task
+     * yet — task_current() may be NULL during early boot. Fall back
+     * to root (uid=gid=0) in that case. */
+    struct task *cur = task_current();
+    e->uid = cur ? cur->uid : 0;
+    e->gid = cur ? cur->gid : 0;
     return idx;
 }
 
@@ -485,6 +492,16 @@ int fs_entry_parent(int idx) {
     if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
         (uint32_t)idx >= g_root_inst->super.file_count) return -1;
     return (int)g_root_inst->super.files[idx].parent_dir;
+}
+int fs_entry_uid(int idx) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    return (int)g_root_inst->super.files[idx].uid;
+}
+int fs_entry_gid(int idx) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    return (int)g_root_inst->super.files[idx].gid;
 }
 
 uint32_t fs_free_sectors(void) {

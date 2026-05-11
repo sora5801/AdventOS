@@ -146,6 +146,15 @@ struct task {
      * = sid = pid). Children inherit both via fork. */
     uint32_t      pgid;
     uint32_t      sid;
+
+    /* Process credentials (session 47). uid 0 = root (the default
+     * for kernel-spawned tasks); /etc/passwd assigns >0 uids to
+     * regular users, and login.elf sets them via SYS_SETUID after
+     * a successful password check. uid/gid inherit across fork
+     * and survive exec — same as POSIX. SYS_SETUID is privileged
+     * to root (uid 0); a non-root task that tries it gets -1. */
+    uint16_t      uid;
+    uint16_t      gid;
 };
 
 #define USER_HEAP_START  0x40200000u

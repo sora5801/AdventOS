@@ -102,7 +102,7 @@ echo "[5/7] build user programs"
 
 USER_PROGS=(hello count sh cat echo httpd ed init
             wc head tail grep sort uniq tee tr seq date kill ls pwd
-            nc wget telnet irc ircd gui beep usbtest vi)
+            nc wget telnet irc ircd gui beep usbtest vi id)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -115,7 +115,7 @@ done
 # Crypto-using programs link against the libcrypto static archive
 # in addition to libuser. Kept separate from USER_PROGS so the
 # basic programs don't pay the libcrypto link cost.
-TLS_PROGS=(cryptotest httpsd httpsget)
+TLS_PROGS=(cryptotest httpsd httpsget login)
 for name in "${TLS_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
