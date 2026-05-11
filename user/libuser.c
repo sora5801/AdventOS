@@ -357,6 +357,15 @@ int sys_pipe(int fds[2]) {
     return ret;
 }
 
+int sys_openpty(int fds[2]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_OPENPTY), "b"(fds)
+                      : "memory");
+    return ret;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

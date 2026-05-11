@@ -98,6 +98,7 @@ typedef unsigned int   size_t;
 #define SYS_FS_MODE       68
 #define SYS_CHMOD         69
 #define SYS_CHOWN         70
+#define SYS_OPENPTY       71
 
 /* Block-device ABI — must match kernel/syscall.h exactly. */
 struct sys_block_info {
@@ -254,6 +255,13 @@ int      sys_fs_mode (const char *path);
  * Returns 0 on success, -1 on failure (no perm, path missing). */
 int      sys_chmod   (const char *path, int mode);
 int      sys_chown   (const char *path, int uid, int gid);
+
+/* Open a fresh pseudo-terminal pair (session 52). Writes the master
+ * fd into fds[0] and the slave fd into fds[1]. Bytes written to the
+ * master appear on slave's read; bytes written to slave appear on
+ * master's read. Used by sshd to set up a real-tty environment for
+ * the remote shell. Returns 0 on success, -1 if the pty table is full. */
+int      sys_openpty(int fds[2]);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

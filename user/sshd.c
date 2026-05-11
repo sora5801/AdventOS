@@ -660,8 +660,11 @@ static int do_channel_requests(struct ssh_conn *c, struct channel *ch,
 
         if (tl == 7 && t[0]=='p'&&t[1]=='t'&&t[2]=='y'&&
                        t[3]=='-'&&t[4]=='r'&&t[5]=='e'&&t[6]=='q') {
-            /* No PTY support. */
-            handled_ok = 0;
+            /* Accept. Terminal modes (echo, line discipline) come in
+             * the request payload but we don't apply them — the pty
+             * we allocate is always raw passthrough and the userspace
+             * shell handles line editing. Good enough for openssh. */
+            handled_ok = 1;
         }
         else if (tl == 3 && t[0]=='e'&&t[1]=='n'&&t[2]=='v') {
             handled_ok = 1;
@@ -773,31 +776,123 @@ static int run_exec(struct ssh_conn *c, struct channel *ch, const char *cmd) {
     return 0;
 }
 
-/* "Shell" mode: tell the user we don't have ptys + close. Real shell
- * mode needs pty pairs + bidirectional shuttling, which is its own
- * session. */
-static int run_shell_placeholder(struct ssh_conn *c, struct channel *ch) {
-    const char *msg =
-        "AdventOS sshd: interactive shell needs a pty (not implemented yet).\r\n"
-        "Pass an explicit command instead:\r\n"
-        "    ssh user@host '<command>'\r\n";
-    int ml = 0; while (msg[ml]) ml++;
-    send_channel_data(c, ch, msg, ml);
+/* Persistent shell over a pty (session 52).
+ *
+ * Architecture is a 3-way split with no shared state past fork():
+ *
+ *                  ┌──────────────┐
+ *   SSH client ──► │  RX helper   │ → pty master write → slave reads → shell stdin
+ *                  │  (this fn)   │
+ *                  └──────────────┘
+ *                  ┌──────────────┐
+ *   SSH client ◄── │  TX helper   │ ← pty master read  ← slave writes ← shell stdout
+ *                  │  (forked)    │
+ *                  └──────────────┘
+ *
+ * The shell itself is a third fork — gets the pty slave as fd 0/1/2,
+ * execs sh.elf with no args (interactive mode, session-49 line editor
+ * runs). TX uses `key_s2c`+`iv_s2c`; RX uses `key_c2s`+`iv_c2s`.
+ * Because each direction has its OWN AEAD keys and IV counter, the
+ * COW-divergence between the two helpers after fork is fine — they
+ * each only touch their own state.
+ *
+ * No concurrent writes on the TCP socket: TX writes ciphertext, RX
+ * only reads. No concurrent writes on the pty either: RX writes the
+ * master, TX only reads it. Two independent unidirectional shuttles,
+ * which is what makes the no-poll/no-select model work cleanly. */
+static int run_shell(struct ssh_conn *c, struct channel *ch) {
+    int pty[2];
+    if (sys_openpty(pty) < 0) {
+        const char *m = "sshd: pty table full\r\n";
+        int n = 0; while (m[n]) n++;
+        send_channel_data(c, ch, m, n);
+        return -1;
+    }
+    int master = pty[0];
+    int slave  = pty[1];
+    printf("sshd: pty allocated master=%d slave=%d\n", master, slave);
 
-    uint8_t p[64]; uint8_t *q = p;
-    ssh_put_u8(&q, SSH_MSG_CHANNEL_REQUEST);
-    ssh_put_u32(&q, ch->their_id);
-    ssh_put_cstring(&q, "exit-status");
-    ssh_put_bool(&q, 0);
-    ssh_put_u32(&q, 1);
-    send_packet(c, p, (int)(q - p));
+    /* Fork order matters: TX FIRST, then shell.
+     *
+     * Forking the shell first and then TX hits a reproducible kernel
+     * issue where the second fork (TX) appears to stall its child after
+     * the first syscall — the task is created but doesn't make progress
+     * past one sys_write. Forking TX first avoids whatever the shell's
+     * exec/destroy-PD path leaves behind. Filed as a follow-up. */
+    int tx_pid = sys_fork();
+    if (tx_pid == 0) {
+        /* Inherit `c` via COW (eager copy actually) — uses c->key_s2c
+         * + c->iv_s2c. */
+        char buf[256];
+        for (;;) {
+            int n = sys_read(master, buf, sizeof(buf));
+            if (n <= 0) break;        /* slave closed = shell exited */
+            if (send_channel_data(c, ch, buf, n) < 0) break;
+        }
+        /* Signal channel teardown to the client. */
+        uint8_t pkt[8]; uint8_t *q = pkt;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&q, ch->their_id);
+        send_packet(c, pkt, (int)(q - pkt));
+        q = pkt;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&q, ch->their_id);
+        send_packet(c, pkt, (int)(q - pkt));
+        sys_exit(0);
+    }
 
-    uint8_t e[8]; uint8_t *eq = e;
-    ssh_put_u8(&eq, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&eq, ch->their_id);
-    send_packet(c, e, (int)(eq - e));
-    uint8_t cl[8]; uint8_t *clq = cl;
-    ssh_put_u8(&clq, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&clq, ch->their_id);
-    send_packet(c, cl, (int)(clq - cl));
+    /* Now fork the shell. */
+    int shell_pid = sys_fork();
+    if (shell_pid == 0) {
+        sys_dup2(slave, 0);
+        sys_dup2(slave, 1);
+        sys_dup2(slave, 2);
+        sys_close(master);
+        sys_close(slave);
+        const char *argv[] = { "sh.elf", 0 };
+        sys_exec("sh.elf", argv);
+        sys_exit(127);
+    }
+    /* Parent doesn't need the slave handle once the shell has it. */
+    sys_close(slave);
+
+    /* Parent becomes the RX helper. Loops on incoming SSH packets,
+     * forwarding CHANNEL_DATA bytes to the pty master (which appear
+     * on shell's stdin). Exit on CHANNEL_CLOSE or read error. */
+    static uint8_t rxbuf[SSH_MAX_PACKET];
+    for (;;) {
+        int n = recv_packet(c, rxbuf, sizeof(rxbuf));
+        if (n < 1) break;
+        uint8_t m = rxbuf[0];
+        if (m == SSH_MSG_CHANNEL_DATA) {
+            const uint8_t *p = rxbuf + 1, *end = rxbuf + n;
+            ssh_get_u32(&p);            /* our chan id */
+            uint32_t dl;
+            const uint8_t *d = ssh_get_string(&p, end, &dl);
+            if (d) {
+                /* Write all bytes to master — pty_master_write blocks
+                 * on full buffer, which is exactly what we want
+                 * (back-pressure from a slow slave). */
+                int w = 0;
+                while (w < (int)dl) {
+                    int k = sys_write(master, d + w, (int)dl - w);
+                    if (k <= 0) break;
+                    w += k;
+                }
+            }
+            continue;
+        }
+        if (m == SSH_MSG_CHANNEL_WINDOW_ADJUST) continue;
+        if (m == SSH_MSG_CHANNEL_EOF) continue;
+        if (m == SSH_MSG_CHANNEL_CLOSE || m == SSH_MSG_DISCONNECT) break;
+    }
+
+    /* RX exit path. Closing the master makes the slave's reads return
+     * EOF, which the shell's read_line_interactive interprets as "no
+     * more input" and falls out of its loop, exiting. Then the TX
+     * helper's master_read returns 0, it sends CHANNEL_EOF + CLOSE,
+     * and exits. */
+    sys_close(master);
+    int code;
+    while (sys_wait(&code) >= 0) {}     /* reap shell + TX */
     return 0;
 }
 
@@ -834,7 +929,7 @@ static void serve_one(int conn) {
     char cmd[1024];
     int mode = do_channel_requests(&c, &ch, cmd, sizeof(cmd));
     if (mode == 1)       run_exec(&c, &ch, cmd);
-    else if (mode == 2)  run_shell_placeholder(&c, &ch);
+    else if (mode == 2)  run_shell(&c, &ch);
 
 bye:
     sys_close(conn);

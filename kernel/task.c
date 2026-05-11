@@ -10,6 +10,7 @@
 #include "fs.h"
 #include "sock.h"
 #include "pipe.h"
+#include "pty.h"
 #include "tmpfs.h"
 #include "signal.h"
 #include "smp.h"
@@ -760,6 +761,8 @@ struct task *task_fork(struct registers *parent_regs) {
             case FD_PIPE_W: pipe_inc_write(parent->fds[i].obj_idx); break;
             case FD_TMPFS:  tmpfs_inc_ref (parent->fds[i].obj_idx); break;
             case FD_SOCK:   sock_inc_ref  (parent->fds[i].obj_idx); break;
+            case FD_PTY_M:  pty_inc_master(parent->fds[i].obj_idx); break;
+            case FD_PTY_S:  pty_inc_slave (parent->fds[i].obj_idx); break;
             default: break;
         }
     }

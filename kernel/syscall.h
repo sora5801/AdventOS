@@ -107,6 +107,9 @@
                                 Only the file's owner or root may chmod. */
 #define SYS_CHOWN         70 /* (eax=70, ebx=path, ecx=uid, edx=gid) -> 0 / -1.
                                 Only root may chown. */
+#define SYS_OPENPTY       71 /* (eax=71, ebx=int fds[2]) -> 0 / -1.
+                                fds[0] = master, fds[1] = slave. Refs both
+                                start at 1 (one fd per end). Session 52. */
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

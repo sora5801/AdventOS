@@ -34,6 +34,7 @@
 #include "tcp.h"
 #include "sock.h"
 #include "pipe.h"
+#include "pty.h"
 #include "tmpfs.h"
 #include "tty.h"
 #include "elf.h"
@@ -292,6 +293,7 @@ void kmain(uint32_t boot_drive) {
     tcp_init();
     sock_init();
     pipe_init();
+    pty_init();
     tmpfs_init();
     tty_init();
 

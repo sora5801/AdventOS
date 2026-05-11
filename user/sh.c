@@ -1874,6 +1874,50 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t34] pty pairs: kernel master/slave rings for SSH bidi shuttle\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Direct pty mechanics. sys_openpty must give us a real pair;
+         * bytes flow both directions through the two rings independently.
+         * This is the kernel surface sshd/ssh.elf build on top of for
+         * the in-shell SSH-2 shell mode. */
+        int pty[2];
+        int rc = sys_openpty(pty);
+        EXPECT(rc == 0, "sys_openpty returns 0");
+        if (rc == 0) {
+            const char ping[] = "hello-from-master\n";
+            int wn = sys_write(pty[0], ping, (int)sizeof(ping) - 1);
+            EXPECT(wn == (int)sizeof(ping) - 1, "write master 18 bytes");
+
+            char rbuf[32];
+            int rn = sys_read(pty[1], rbuf, sizeof(rbuf));
+            rbuf[rn > 0 ? rn : 0] = 0;
+            EXPECT(rn == (int)sizeof(ping) - 1 && memcmp(rbuf, ping, rn) == 0,
+                   "slave reads back what master wrote (m_to_s ring)");
+
+            const char pong[] = "hello-from-slave\n";
+            wn = sys_write(pty[1], pong, (int)sizeof(pong) - 1);
+            rn = sys_read(pty[0], rbuf, sizeof(rbuf));
+            rbuf[rn > 0 ? rn : 0] = 0;
+            EXPECT(rn == (int)sizeof(pong) - 1 && memcmp(rbuf, pong, rn) == 0,
+                   "master reads back what slave wrote (s_to_m ring)");
+
+            /* Closing one end propagates EOF to the other:
+             * after close(slave), master_read should return 0. */
+            sys_close(pty[1]);
+            char zbuf[8];
+            int eof_n = sys_read(pty[0], zbuf, sizeof(zbuf));
+            EXPECT(eof_n == 0, "master read returns 0 (EOF) after slave close");
+            sys_close(pty[0]);
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t9b] vi: modal editor round-trip (open, edit, :wq, verify)\n");
     {
         /* Seed a small file then drive vi via injected keystrokes:

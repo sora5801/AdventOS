@@ -376,6 +376,127 @@ static int do_exec_request(struct ssh_conn *c, uint32_t server_chan, const char 
     return 0;
 }
 
+/* `pty-req` — minimal payload, server ignores the terminal modes
+ * because our pty has no line discipline (raw passthrough). */
+static int do_pty_request(struct ssh_conn *c, uint32_t server_chan) {
+    uint8_t p[256];
+    uint8_t *pp = p;
+    ssh_put_u8(&pp, SSH_MSG_CHANNEL_REQUEST);
+    ssh_put_u32(&pp, server_chan);
+    ssh_put_cstring(&pp, "pty-req");
+    ssh_put_bool(&pp, 1);                   /* want_reply */
+    ssh_put_cstring(&pp, "xterm-256color"); /* TERM */
+    ssh_put_u32(&pp, 80);                   /* width chars */
+    ssh_put_u32(&pp, 24);                   /* height rows */
+    ssh_put_u32(&pp, 0);                    /* width pixels */
+    ssh_put_u32(&pp, 0);                    /* height pixels */
+    ssh_put_string(&pp, "", 0);             /* termios modes (empty) */
+    if (send_packet(c, p, (int)(pp - p)) < 0) return -1;
+    uint8_t r[64];
+    int n = recv_packet(c, r, sizeof(r));
+    if (n < 1 || r[0] != SSH_MSG_CHANNEL_SUCCESS) return -1;
+    return 0;
+}
+
+static int do_shell_request(struct ssh_conn *c, uint32_t server_chan) {
+    uint8_t p[64];
+    uint8_t *pp = p;
+    ssh_put_u8(&pp, SSH_MSG_CHANNEL_REQUEST);
+    ssh_put_u32(&pp, server_chan);
+    ssh_put_cstring(&pp, "shell");
+    ssh_put_bool(&pp, 1);
+    if (send_packet(c, p, (int)(pp - p)) < 0) return -1;
+    uint8_t r[64];
+    int n = recv_packet(c, r, sizeof(r));
+    if (n < 1 || r[0] != SSH_MSG_CHANNEL_SUCCESS) return -1;
+    return 0;
+}
+
+/* Bidirectional shuttle for shell mode (session 52). Fork a TX helper
+ * that reads local stdin and forwards it as CHANNEL_DATA; parent
+ * becomes RX, prints incoming CHANNEL_DATA to stdout, exits on CLOSE.
+ *
+ * Same architectural shape as sshd's run_shell — two unidirectional
+ * helpers, each using its own AEAD direction key, no shared state
+ * between them after fork. */
+static int run_shell_shuttle(struct ssh_conn *c, uint32_t server_chan) {
+    int tx_pid = sys_fork();
+    if (tx_pid == 0) {
+        /* TX child: read stdin, send as CHANNEL_DATA. Uses key_c2s
+         * (this side is "client to server" for sends). */
+        static char ibuf[1024];
+        for (;;) {
+            int n = sys_read(0, ibuf, sizeof(ibuf));
+            if (n <= 0) break;
+            uint8_t pkt[1024 + 32];
+            uint8_t *p = pkt;
+            ssh_put_u8(&p, SSH_MSG_CHANNEL_DATA);
+            ssh_put_u32(&p, server_chan);
+            ssh_put_string(&p, ibuf, n);
+            if (send_packet(c, pkt, (int)(p - pkt)) < 0) break;
+        }
+        /* Local stdin hit EOF or send failed — tell the peer. */
+        uint8_t pkt[8]; uint8_t *q = pkt;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&q, server_chan);
+        send_packet(c, pkt, (int)(q - pkt));
+        sys_exit(0);
+    }
+
+    /* Parent: RX side. Same packet handling as drain_session but with
+     * an extra side-effect that on CHANNEL_CLOSE we kill the TX helper
+     * so the parent's sys_wait below isn't left holding it open. */
+    int exit_status = -1;
+    int saw_close = 0;
+    for (;;) {
+        static uint8_t buf[SSH_MAX_PACKET];
+        int n = recv_packet(c, buf, sizeof(buf));
+        if (n < 1) break;
+        uint8_t m = buf[0];
+        if (m == SSH_MSG_CHANNEL_DATA || m == SSH_MSG_CHANNEL_EXTENDED_DATA) {
+            const uint8_t *p = buf + 1, *end = buf + n;
+            ssh_get_u32(&p);
+            if (m == SSH_MSG_CHANNEL_EXTENDED_DATA) ssh_get_u32(&p);
+            uint32_t dl;
+            const uint8_t *d = ssh_get_string(&p, end, &dl);
+            if (d) sys_write(1, d, (int)dl);
+            continue;
+        }
+        if (m == SSH_MSG_CHANNEL_REQUEST) {
+            const uint8_t *p = buf + 1, *end = buf + n;
+            ssh_get_u32(&p);
+            uint32_t tl;
+            const uint8_t *t = ssh_get_string(&p, end, &tl);
+            ssh_get_u8(&p);
+            if (t && tl == 11) {
+                int is_status = 1;
+                for (int i = 0; i < 11; i++) if (t[i] != "exit-status"[i]) { is_status = 0; break; }
+                if (is_status) exit_status = (int)ssh_get_u32(&p);
+            }
+            continue;
+        }
+        if (m == SSH_MSG_CHANNEL_WINDOW_ADJUST) continue;
+        if (m == SSH_MSG_CHANNEL_EOF)           continue;
+        if (m == SSH_MSG_CHANNEL_CLOSE) {
+            if (!saw_close) {
+                uint8_t cl[8]; uint8_t *q = cl;
+                ssh_put_u8(&q, SSH_MSG_CHANNEL_CLOSE);
+                ssh_put_u32(&q, server_chan);
+                send_packet(c, cl, (int)(q - cl));
+                saw_close = 1;
+            }
+            break;
+        }
+        if (m == SSH_MSG_DISCONNECT) break;
+    }
+
+    /* Kill the TX helper so we can reap it cleanly. SIGTERM tears it
+     * out of its blocking sys_read on stdin. */
+    sys_kill(tx_pid, SIGTERM);
+    int code;
+    sys_wait(&code);
+    return exit_status;
+}
+
 /* Drain CHANNEL_DATA / EOF / CLOSE / etc. until the connection ends.
  * Returns the exit-status reported by the server, or -1. */
 static int drain_session(struct ssh_conn *c, uint32_t server_chan) {
@@ -454,14 +575,16 @@ static int parse_ip_port(const char *s, unsigned char ip[4], int *port_out) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5) {
-        puts("usage: ssh <ip>[:port] <user> <password> <command>\n");
+    if (argc < 4) {
+        puts("usage: ssh <ip>[:port] <user> <password> [command]\n");
+        puts("  no command  -> request pty + shell, bidirectional shuttle\n");
+        puts("  command     -> one-shot exec, no pty\n");
         return 1;
     }
     const char *host = argv[1];
     const char *user = argv[2];
     const char *pass = argv[3];
-    const char *cmd  = argv[4];
+    const char *cmd  = argc >= 5 ? argv[4] : 0;
 
     unsigned char ip[4]; int port;
     if (parse_ip_port(host, ip, &port) < 0) {
@@ -501,11 +624,23 @@ int main(int argc, char **argv) {
     if (do_open_session(&c, &scid) < 0) {
         puts("ssh: CHANNEL_OPEN failed\n"); return 1;
     }
-    if (do_exec_request(&c, scid, cmd) < 0) {
-        puts("ssh: exec request failed\n"); return 1;
-    }
 
-    int rc = drain_session(&c, scid);
+    int rc;
+    if (cmd) {
+        if (do_exec_request(&c, scid, cmd) < 0) {
+            puts("ssh: exec request failed\n"); return 1;
+        }
+        rc = drain_session(&c, scid);
+    } else {
+        if (do_pty_request(&c, scid) < 0) {
+            puts("ssh: pty-req rejected\n"); return 1;
+        }
+        if (do_shell_request(&c, scid) < 0) {
+            puts("ssh: shell request rejected\n"); return 1;
+        }
+        puts("ssh: pty + shell allocated; entering interactive shuttle\n");
+        rc = run_shell_shuttle(&c, scid);
+    }
     sys_close(sk);
     printf("ssh: remote exit-status = %d\n", rc);
     return rc < 0 ? 0 : rc;

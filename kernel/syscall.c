@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "sock.h"
 #include "pipe.h"
+#include "pty.h"
 #include "tmpfs.h"
 #include "signal.h"
 #include "string.h"
@@ -59,6 +60,8 @@ static void release_fd(struct task_fd *e) {
         case FD_PIPE_R:  pipe_close_read  (e->obj_idx); break;
         case FD_PIPE_W:  pipe_close_write (e->obj_idx); break;
         case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
+        case FD_PTY_M:   pty_close_master (e->obj_idx); break;
+        case FD_PTY_S:   pty_close_slave  (e->obj_idx); break;
         default: break;     /* FD_FS / FD_STDIN / FD_STDOUT have no refcount */
     }
 }
@@ -274,6 +277,12 @@ void syscall_dispatch(struct registers *r) {
                 case FD_PIPE_R:
                     ret = pipe_read(e->obj_idx, buf, n);
                     break;
+                case FD_PTY_M:
+                    ret = pty_master_read(e->obj_idx, buf, n);
+                    break;
+                case FD_PTY_S:
+                    ret = pty_slave_read(e->obj_idx, buf, n);
+                    break;
                 default:
                     ret = -1;
                     break;
@@ -301,6 +310,12 @@ void syscall_dispatch(struct registers *r) {
                     break;
                 case FD_TMPFS:
                     ret = tmpfs_write(e->obj_idx, buf, (uint32_t)n);
+                    break;
+                case FD_PTY_M:
+                    ret = pty_master_write(e->obj_idx, buf, n);
+                    break;
+                case FD_PTY_S:
+                    ret = pty_slave_write(e->obj_idx, buf, n);
                     break;
                 default:
                     ret = -1;
@@ -412,6 +427,36 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
+        case SYS_OPENPTY: {
+            /* Same shape as SYS_PIPE — claim two fd slots, then a pty
+             * object, install both, write the fd ints back to user. */
+            int *ufds = (int *)(uintptr_t)a;
+            struct task *t = task_current();
+
+            int mfd = alloc_fd(t);
+            if (mfd < 0) { ret = -1; break; }
+            t->fds[mfd].kind    = FD_PTY_M;
+            t->fds[mfd].obj_idx = -1;
+            int sfd = alloc_fd(t);
+            if (sfd < 0) {
+                t->fds[mfd].kind = FD_FREE;
+                ret = -1; break;
+            }
+            int p = pty_new();
+            if (p < 0) {
+                t->fds[mfd].kind = FD_FREE;
+                t->fds[sfd].kind = FD_FREE;
+                ret = -1; break;
+            }
+            t->fds[mfd].kind    = FD_PTY_M;
+            t->fds[mfd].obj_idx = p;
+            t->fds[sfd].kind    = FD_PTY_S;
+            t->fds[sfd].obj_idx = p;
+            ufds[0] = mfd;
+            ufds[1] = sfd;
+            ret = 0;
+            break;
+        }
         case SYS_DUP2: {
             int oldfd = (int)a;
             int newfd = (int)b;
@@ -436,6 +481,8 @@ void syscall_dispatch(struct registers *r) {
                 case FD_PIPE_R:  pipe_inc_read  (t->fds[oldfd].obj_idx); break;
                 case FD_PIPE_W:  pipe_inc_write (t->fds[oldfd].obj_idx); break;
                 case FD_TMPFS:   tmpfs_inc_ref  (t->fds[oldfd].obj_idx); break;
+                case FD_PTY_M:   pty_inc_master (t->fds[oldfd].obj_idx); break;
+                case FD_PTY_S:   pty_inc_slave  (t->fds[oldfd].obj_idx); break;
                 /* Sockets and FS handles share via memcpy: there's no
                  * per-fd refcount today. fork()'s own dup-the-table
                  * behavior has the same semantics. */

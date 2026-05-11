@@ -35,6 +35,8 @@ enum {
     FD_PIPE_W,
     FD_TMPFS,
     FD_PROCFS,        /* synthesized /proc files; obj_idx = (kind<<16)|pid */
+    FD_PTY_M,         /* pseudo-terminal master (session 52); obj_idx = pty idx */
+    FD_PTY_S,         /* pseudo-terminal slave  (session 52); obj_idx = pty idx */
 };
 
 struct task_fd {
