@@ -826,6 +826,11 @@ int task_exec_inplace(struct registers *r,
      * fails we abort with the caller's address space untouched. */
     int fd = fs_open(path);
     if (fd < 0) return -2;
+    /* Session 48: require execute permission. Without this any user
+     * could turn an arbitrary readable file into a running program
+     * by exec'ing it. fs_check_perm returns 1 = allowed (incl. root
+     * bypass), 0 = denied, -1 = bad index. */
+    if (fs_check_perm(fd, FS_PERM_X) != 1) return -3;
 
     struct elf_load_result lr;
     int err = elf_load(fd, &lr);

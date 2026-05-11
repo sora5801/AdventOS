@@ -101,6 +101,12 @@
 
 #define SYS_FS_OWNER      67 /* (eax=67, ebx=path) -> (uid << 16) | gid for the
                                 file at `path`, or -1 if it doesn't exist. */
+#define SYS_FS_MODE       68 /* (eax=68, ebx=path) -> low 9 bits = rwxrwxrwx,
+                                or -1 if the file doesn't exist. */
+#define SYS_CHMOD         69 /* (eax=69, ebx=path, ecx=mode) -> 0 / -1.
+                                Only the file's owner or root may chmod. */
+#define SYS_CHOWN         70 /* (eax=70, ebx=path, ecx=uid, edx=gid) -> 0 / -1.
+                                Only root may chown. */
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

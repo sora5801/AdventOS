@@ -180,6 +180,14 @@ void syscall_dispatch(struct registers *r) {
              * .kind tells us which fd flavor to install. */
             struct vfs_inode ino;
             if (vfs_open(name, &ino) >= 0) {
+                /* Session 48: enforce read permission on disk-backed
+                 * entries. Other vfs kinds (procfs, tmpfs) skip the
+                 * check — procfs is informational and unprotected,
+                 * tmpfs files are per-process. */
+                if (ino.kind == FD_FS && fs_check_perm(ino.obj_idx, FS_PERM_R) == 0) {
+                    ret = -1;
+                    break;
+                }
                 t->fds[fd].kind    = ino.kind;
                 t->fds[fd].obj_idx = ino.obj_idx;
                 t->fds[fd].offset  = 0;
@@ -709,6 +717,43 @@ void syscall_dispatch(struct registers *r) {
             ret = (uid << 16) | (gid & 0xFFFF);
             break;
         }
+        case SYS_FS_MODE: {
+            const char *path = (const char *)(uintptr_t)a;
+            if (!path) { ret = -1; break; }
+            int idx = fs_open(path);
+            if (idx < 0) { ret = -1; break; }
+            ret = fs_entry_mode(idx);
+            break;
+        }
+        case SYS_CHMOD: {
+            /* Only the file's owner or root may chmod. */
+            const char *path = (const char *)(uintptr_t)a;
+            uint32_t mode = b;
+            if (!path) { ret = -1; break; }
+            int idx = fs_open(path);
+            if (idx < 0) { ret = -1; break; }
+            struct task *cur = task_current();
+            int owner = fs_entry_uid(idx);
+            if (cur->uid != 0 && cur->uid != (uint16_t)owner) {
+                ret = -1;
+                break;
+            }
+            ret = fs_chmod_idx(idx, (uint16_t)mode);
+            break;
+        }
+        case SYS_CHOWN: {
+            /* Only root may chown. */
+            const char *path = (const char *)(uintptr_t)a;
+            uint32_t new_uid = b;
+            uint32_t new_gid = c;
+            if (!path) { ret = -1; break; }
+            struct task *cur = task_current();
+            if (cur->uid != 0) { ret = -1; break; }
+            int idx = fs_open(path);
+            if (idx < 0) { ret = -1; break; }
+            ret = fs_chown_idx(idx, (uint16_t)new_uid, (uint16_t)new_gid);
+            break;
+        }
         case SYS_FB_MMAP: {
             /* Map the framebuffer's physical pages into the calling
              * task's PD with USER+WRITABLE flags, at a fresh user VA
@@ -1059,6 +1104,15 @@ void syscall_dispatch(struct registers *r) {
             int  i;
             for (i = 0; i < (int)sizeof(path) - 1 && uname[i]; i++) path[i] = uname[i];
             path[i] = 0;
+            /* Session 48: permission enforcement on overwrites. If the
+             * file already exists, require write permission. New-file
+             * creation skips the check — there's no enforceable
+             * "parent directory write" concept on a flat-ish FS. */
+            int existing = fs_open(path);
+            if (existing >= 0 && fs_check_perm(existing, FS_PERM_W) == 0) {
+                ret = -1;
+                break;
+            }
             ret = vfs_write_all(path, udata, n);
             break;
         }

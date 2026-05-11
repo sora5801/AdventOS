@@ -163,38 +163,47 @@ def pad_to_sector(data):
     return data
 
 
-def encode_entry(name, start, size, type_, parent, uid=0, gid=0):
+def encode_entry(name, start, size, type_, parent, uid=0, gid=0, mode=0o644):
     """fs_entry layout (32 bytes):
          name[16] + start_sector(4) + size(4) + type(1) + parent_dir(1)
-         + uid(2) + gid(2) + reserved[2]
-    Session 47 carved uid+gid out of what used to be 6 reserved bytes.
+         + uid(2) + gid(2) + mode(2)
+    Session 47 carved uid+gid out of the original 6-byte reserved
+    tail; session 48 carved mode out of the last 2 bytes.
     Files baked by mkfs default to root (uid=0, gid=0); runtime
-    creators stamp the calling task's uid/gid via fs.c. """
+    creators stamp the calling task's uid/gid via fs.c."""
     name_b = name.encode('ascii').ljust(FS_NAME_MAX, b'\x00')[:FS_NAME_MAX]
-    return name_b + struct.pack('<IIBBHH2x', start, size, type_, parent,
-                                 uid & 0xFFFF, gid & 0xFFFF)
+    return name_b + struct.pack('<IIBBHHH', start, size, type_, parent,
+                                 uid & 0xFFFF, gid & 0xFFFF, mode & 0xFFFF)
 
 
 def build_image(directories, user_programs, raw_blobs, data_files,
                  out_name, log_prefix):
     """Generic build — takes its own file lists + output filename. Used
     to produce fs.img (the boot disk) AND usbfs.img (the USB drive
-    image attached via -device usb-storage,drive=usbfs)."""
-    entries = []
+    image attached via -device usb-storage,drive=usbfs).
+
+    Session 48: each entry now carries a mode. Defaults:
+      directories  → 0o755 (rwxr-xr-x)
+      user_programs (ELFs) → 0o755 (executable for everyone)
+      raw_blobs (libc.bin) → 0o755 (executable-like; loader maps it)
+      data_files → 0o644 (rw-r--r--; readable to all, writable only by root)
+    """
+    entries = []      # (name, start_sector, size, type, parent_idx, mode)
     file_blobs = []
     next_sector = FS_SUPER_SECTORS
 
     dir_idx_by_name = {}
     for dname in directories:
         dir_idx_by_name[dname] = len(entries)
-        entries.append((dname, 0, 0, FS_TYPE_DIR, FS_DIR_ROOT))
+        entries.append((dname, 0, 0, FS_TYPE_DIR, FS_DIR_ROOT, 0o755))
 
-    def add_file(name, blob, raw_size, parent_dir_name):
+    def add_file(name, blob, raw_size, parent_dir_name, mode):
         nonlocal next_sector
         parent_idx = (FS_DIR_ROOT if parent_dir_name is None
                       else dir_idx_by_name[parent_dir_name])
         padded = pad_to_sector(blob)
-        entries.append((name, next_sector, raw_size, FS_TYPE_FILE, parent_idx))
+        entries.append((name, next_sector, raw_size, FS_TYPE_FILE,
+                         parent_idx, mode))
         file_blobs.append(padded)
         next_sector += len(padded) // SECTOR_SIZE
 
@@ -204,19 +213,19 @@ def build_image(directories, user_programs, raw_blobs, data_files,
                   file=sys.stderr); sys.exit(1)
         raw = open(bin_path, 'rb').read()
         elf = make_elf(raw, USER_VA)
-        add_file(fs_name, elf, len(elf), parent)
+        add_file(fs_name, elf, len(elf), parent, 0o755)
 
     for fs_name, src_path, parent in raw_blobs:
         if not os.path.exists(src_path):
             print(f"mkfs: {src_path} not found", file=sys.stderr); sys.exit(1)
         raw = open(src_path, 'rb').read()
-        add_file(fs_name, raw, len(raw), parent)
+        add_file(fs_name, raw, len(raw), parent, 0o755)
 
     for fs_name, src_path, parent in data_files:
         if not os.path.exists(src_path):
             print(f"mkfs: {src_path} not found", file=sys.stderr); sys.exit(1)
         raw = open(src_path, 'rb').read()
-        add_file(fs_name, raw, len(raw), parent)
+        add_file(fs_name, raw, len(raw), parent, 0o644)
 
     if len(entries) > FS_MAX_FILES:
         print(f"mkfs: {len(entries)} entries exceeds FS_MAX_FILES "
@@ -226,8 +235,9 @@ def build_image(directories, user_programs, raw_blobs, data_files,
     super_hdr = super_hdr.ljust(SECTOR_SIZE, b'\x00')
 
     entry_blob = b''
-    for (name, start, size, type_, parent) in entries:
-        entry_blob += encode_entry(name, start, size, type_, parent)
+    for (name, start, size, type_, parent, mode) in entries:
+        entry_blob += encode_entry(name, start, size, type_, parent,
+                                    mode=mode)
     entry_blob += b'\x00' * (FS_ENTRY_SIZE * (FS_MAX_FILES - len(entries)))
     entry_blob = entry_blob.ljust(FS_SUPER_SECTORS * SECTOR_SIZE - SECTOR_SIZE, b'\x00')
 
@@ -235,12 +245,12 @@ def build_image(directories, user_programs, raw_blobs, data_files,
     open(out_name, 'wb').write(fs)
 
     print(f"  {log_prefix:5} {len(fs)} bytes ({len(fs) // SECTOR_SIZE} sectors)")
-    for i, (name, start, size, type_, parent) in enumerate(entries):
+    for i, (name, start, size, type_, parent, mode) in enumerate(entries):
         kind = 'DIR ' if type_ == FS_TYPE_DIR else 'FILE'
         parent_str = '/' if parent == FS_DIR_ROOT else f"/{directories[parent]}"
         if type_ == FS_TYPE_FILE:
             print(f"        [{i:2}] {kind} {parent_str}/{name:<12} "
-                  f"sec {start}  ({size} bytes)")
+                  f"sec {start}  ({size} bytes, {mode:o})")
         else:
             print(f"        [{i:2}] {kind} {parent_str}/{name}")
 

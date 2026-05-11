@@ -346,7 +346,12 @@ static int alloc_slot_inst(struct fs_instance *inst) {
     e->size         = 0;
     e->type         = FS_TYPE_FREE;
     e->parent_dir   = FS_DIR_ROOT;
-    for (int i = 0; i < (int)sizeof(e->reserved); i++) e->reserved[i] = 0;
+    /* Session 47/48 carved uid + gid + mode out of what used to be
+     * 6 reserved bytes. No reserved field remains; zero each field
+     * explicitly so a recycled slot doesn't inherit stale state. */
+    e->uid          = 0;
+    e->gid          = 0;
+    e->mode         = 0;
     return idx;
 }
 
@@ -440,6 +445,10 @@ static int find_or_create_file_inst(struct fs_instance *inst, const char *path, 
     struct task *cur = task_current();
     e->uid = cur ? cur->uid : 0;
     e->gid = cur ? cur->gid : 0;
+    /* Default mode for newly-created files: 0644 (rw-r--r--).
+     * mkfs.py stamps ELFs as 0755 at build time; everything else
+     * created at runtime is data, not executable. */
+    e->mode = 0644u;
     return idx;
 }
 
@@ -502,6 +511,42 @@ int fs_entry_gid(int idx) {
     if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
         (uint32_t)idx >= g_root_inst->super.file_count) return -1;
     return (int)g_root_inst->super.files[idx].gid;
+}
+int fs_entry_mode(int idx) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    return (int)(g_root_inst->super.files[idx].mode & FS_MODE_RWX_MASK);
+}
+
+int fs_check_perm(int idx, int want) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    struct task *t = task_current();
+    /* Root (or kernel context with no current task) bypasses. */
+    if (!t || t->uid == 0) return 1;
+
+    struct fs_entry *e = &g_root_inst->super.files[idx];
+    int shift;
+    if (t->uid == e->uid)      shift = 6;    /* user tier */
+    else if (t->gid == e->gid) shift = 3;    /* group tier */
+    else                        shift = 0;    /* other tier */
+    int bits = (e->mode >> shift) & 0x7;
+    return ((bits & want) == want) ? 1 : 0;
+}
+
+int fs_chmod_idx(int idx, uint16_t mode) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    g_root_inst->super.files[idx].mode = mode & FS_MODE_RWX_MASK;
+    return fs_write_super_inst(g_root_inst);
+}
+
+int fs_chown_idx(int idx, uint16_t uid, uint16_t gid) {
+    if (!g_root_inst || !g_root_inst->initialized || idx < 0 ||
+        (uint32_t)idx >= g_root_inst->super.file_count) return -1;
+    g_root_inst->super.files[idx].uid = uid;
+    g_root_inst->super.files[idx].gid = gid;
+    return fs_write_super_inst(g_root_inst);
 }
 
 uint32_t fs_free_sectors(void) {

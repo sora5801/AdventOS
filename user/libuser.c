@@ -326,6 +326,27 @@ int sys_fs_owner(const char *path) {
     __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_FS_OWNER), "b"(path) : "memory");
     return ret;
 }
+int sys_fs_mode(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_FS_MODE), "b"(path) : "memory");
+    return ret;
+}
+int sys_chmod(const char *path, int mode) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CHMOD), "b"(path), "c"(mode)
+                      : "memory");
+    return ret;
+}
+int sys_chown(const char *path, int uid, int gid) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CHOWN), "b"(path), "c"(uid), "d"(gid)
+                      : "memory");
+    return ret;
+}
 
 int sys_pipe(int fds[2]) {
     int ret;

@@ -55,8 +55,27 @@ struct fs_entry {
     uint8_t  parent_dir;          /* entry idx of parent dir, or FS_DIR_ROOT */
     uint16_t uid;                 /* file owner (session 47). 0 = root.   */
     uint16_t gid;                 /* file group. Stamped on creation.     */
-    uint8_t  reserved[2];
-} __attribute__((packed));        /* 32 bytes */
+    uint16_t mode;                /* Unix-style rwxrwxrwx in low 9 bits   */
+                                  /* (session 48). Used by fs_check_perm. */
+} __attribute__((packed));        /* 32 bytes — no more reserved space */
+
+/* Mode bit constants — match POSIX <sys/stat.h> octal values. */
+#define FS_MODE_IRUSR  0400u
+#define FS_MODE_IWUSR  0200u
+#define FS_MODE_IXUSR  0100u
+#define FS_MODE_IRGRP  0040u
+#define FS_MODE_IWGRP  0020u
+#define FS_MODE_IXGRP  0010u
+#define FS_MODE_IROTH  0004u
+#define FS_MODE_IWOTH  0002u
+#define FS_MODE_IXOTH  0001u
+#define FS_MODE_RWX_MASK 0777u
+
+/* "want" bits passed to fs_check_perm — same encoding as the
+ * per-tier rwx triple (4=R, 2=W, 1=X). */
+#define FS_PERM_R  4
+#define FS_PERM_W  2
+#define FS_PERM_X  1
 
 struct fs_super {
     /* First 512 bytes (sector 0) */
@@ -130,6 +149,18 @@ uint8_t     fs_entry_type(int idx);
 int         fs_entry_parent(int idx);
 int         fs_entry_uid(int idx);
 int         fs_entry_gid(int idx);
+int         fs_entry_mode(int idx);    /* low 9 bits = rwxrwxrwx (session 48) */
+
+/* Permission check: does the calling task (uid/gid) have all of
+ * `want` (R | W | X bits) on entry `idx`? Returns 1 = allowed,
+ * 0 = denied, -1 = bad index. Root (uid 0) always allowed. */
+int         fs_check_perm(int idx, int want);
+
+/* Modify mode / owner on an existing entry. Both syscalls write
+ * the superblock through immediately. Caller must already have
+ * checked privilege (root for chown; root-or-owner for chmod). */
+int         fs_chmod_idx(int idx, uint16_t mode);
+int         fs_chown_idx(int idx, uint16_t uid, uint16_t gid);
 
 /* Whole-file write. Path semantics same as fs_open. Creates the file
  * if absent. Allocates a fresh contiguous sector run from the bitmap;

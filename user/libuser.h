@@ -95,6 +95,9 @@ typedef unsigned int   size_t;
 #define SYS_SETUID        65
 #define SYS_SETGID        66
 #define SYS_FS_OWNER      67
+#define SYS_FS_MODE       68
+#define SYS_CHMOD         69
+#define SYS_CHOWN         70
 
 /* Block-device ABI — must match kernel/syscall.h exactly. */
 struct sys_block_info {
@@ -242,6 +245,15 @@ int      sys_setgid(int gid);
 /* (uid << 16) | gid for the file at `path`, or -1 if missing.
  * Used by `ls` to display owner info and by `stat`-style tools. */
 int      sys_fs_owner(const char *path);
+
+/* Permission bits — low 9 bits = rwxrwxrwx. -1 if missing. */
+int      sys_fs_mode (const char *path);
+
+/* Change mode / owner of a disk file (session 48). chmod requires
+ * the caller be the file's owner or root; chown requires root.
+ * Returns 0 on success, -1 on failure (no perm, path missing). */
+int      sys_chmod   (const char *path, int mode);
+int      sys_chown   (const char *path, int uid, int gid);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

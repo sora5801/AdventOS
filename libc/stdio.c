@@ -78,6 +78,14 @@ static void put_hex(struct sink *s, uint32_t u, int upper) {
     while (i--) s->putc(s, buf[i]);
 }
 
+/* Session 48: octal. Used for Unix file modes — printf("%o", 0644) → "644". */
+static void put_oct(struct sink *s, uint32_t u) {
+    char buf[12]; int i = 0;
+    if (u == 0) { s->putc(s, '0'); return; }
+    while (u) { buf[i++] = (char)('0' + (u & 0x7)); u >>= 3; }
+    while (i--) s->putc(s, buf[i]);
+}
+
 static int do_format(struct sink *s, const char *fmt, va_list ap) {
     while (*fmt) {
         if (*fmt != '%') { s->putc(s, *fmt++); continue; }
@@ -94,6 +102,7 @@ static int do_format(struct sink *s, const char *fmt, va_list ap) {
             case 'u':           put_dec_unsigned(s, va_arg(ap, uint32_t)); break;
             case 'x':           put_hex         (s, va_arg(ap, uint32_t), 0); break;
             case 'X':           put_hex         (s, va_arg(ap, uint32_t), 1); break;
+            case 'o':           put_oct         (s, va_arg(ap, uint32_t)); break;
             case 'p': {
                 s->putc(s, '0'); s->putc(s, 'x');
                 put_hex(s, (uint32_t)(uintptr_t)va_arg(ap, void *), 0);
