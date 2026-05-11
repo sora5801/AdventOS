@@ -99,6 +99,9 @@ USER_PROGRAMS = [
     # Session 47: multi-user + login.
     ('login.elf',      'user/_obj/login.bin',      None),
     ('id.elf',         'user/_obj/id.bin',         None),
+    # Session 50: TLS-backed remote shell.
+    ('sshd.elf',       'user/_obj/sshd.bin',       None),
+    ('ssh.elf',        'user/_obj/ssh.bin',        None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

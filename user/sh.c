@@ -1791,6 +1791,96 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t33] sshd: TLS-backed remote shell loopback (login, exec, exit)\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Inittab started sshd in parallel with us; by t33 it has had
+         * plenty of time to bind + listen. Drive a full session: log in
+         * as `guest`, run `id`, exit. ssh.elf's stdout is piped back
+         * so we can assert on the substrings we expect to find.
+         *
+         * tty_inject is the same input-feeding mechanism t30 uses for
+         * login.elf. The kernel echo of the typed bytes goes to the
+         * screen, not into the captured pipe, so what we read back is
+         * just what ssh.elf wrote: server prompts + command output. */
+        const char *script = "guest\nguest\nid.elf\nexit\n";
+        tty_inject(script, (int)strlen(script));
+
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for ssh capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "ssh.elf", "127.0.0.1", 0 };
+                sys_exec("ssh.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            /* Drain the client's output into one big buffer. The whole
+             * session — handshake banners through the post-exit close
+             * notice — is well under 4 KiB. */
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+
+            int code = 0;
+            sys_wait(&code);
+
+            printf("  captured %d bytes from ssh.elf\n", total);
+            /* Hide nothing — the serial log is gold for diagnosing
+             * future regressions. */
+            puts("  ---- ssh.elf output ----\n");
+            sys_write(1, captured, total);
+            puts("  ------------------------\n");
+
+            /* Substring checks. memmem isn't available in libuser, so
+             * we just do a manual scan with per-pattern bounds checks
+             * (so a match at the very end of the buffer — typical for
+             * "bye\n" — isn't missed by a fixed loop bound). */
+            int find_welcome = 0, find_login = 0, find_uid = 0,
+                find_bye = 0, find_handshake = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_handshake && i + 10 <= total && captured[i] == 'T' &&
+                    memcmp(captured + i, "TLS 1.3 up", 10) == 0) find_handshake = 1;
+                if (!find_login && i + 6 <= total && captured[i] == 'l' &&
+                    memcmp(captured + i, "login:", 6) == 0) find_login = 1;
+                if (!find_welcome && i + 19 <= total && captured[i] == 'W' &&
+                    memcmp(captured + i, "Welcome to AdventOS", 19) == 0) find_welcome = 1;
+                if (!find_uid && i + 8 <= total && captured[i] == 'u' &&
+                    memcmp(captured + i, "uid=1000", 8) == 0) find_uid = 1;
+                if (!find_bye && i + 3 <= total && captured[i] == 'b' &&
+                    memcmp(captured + i, "bye", 3) == 0) find_bye = 1;
+            }
+
+            EXPECT(code == 0,        "ssh.elf exited 0");
+            EXPECT(find_handshake,   "client logged TLS 1.3 handshake OK");
+            EXPECT(find_login,       "server sent 'login:' prompt over TLS");
+            EXPECT(find_welcome,     "server sent welcome banner after auth");
+            EXPECT(find_uid,         "remote `id` printed uid=1000 (guest's uid)");
+            EXPECT(find_bye,         "server acknowledged exit with 'bye'");
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t9b] vi: modal editor round-trip (open, edit, :wq, verify)\n");
     {
         /* Seed a small file then drive vi via injected keystrokes:
@@ -2578,9 +2668,28 @@ void on_sigusr1(int sig) {
 int main(int argc, char **argv) {
     int         run_selftest = 0;
     const char *script_arg   = 0;
+    const char *c_cmd        = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "selftest") == 0) { run_selftest = 1; continue; }
+        if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            c_cmd = argv[i + 1];
+            i++;
+            continue;
+        }
         if (argv[i][0] != '-' && !script_arg) script_arg = argv[i];
+    }
+
+    /* `sh -c "cmd"` is meant to be a one-shot sub-shell — used by
+     * sshd to run remote commands. Run it BEFORE setsid + banner so
+     * we don't pollute the captured output or grab the tty's fg pgrp
+     * away from the parent that's piping us. */
+    if (c_cmd) {
+        char buf[LINE_MAX];
+        int j = 0;
+        while (c_cmd[j] && j < LINE_MAX - 1) { buf[j] = c_cmd[j]; j++; }
+        buf[j] = 0;
+        execute_line(buf);
+        sys_exit(0);
     }
 
     /* Become a session + pgrp leader so foreground pipelines can be

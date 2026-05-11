@@ -8,4 +8,5 @@
 
 once httpd.elf
 once httpsd.elf
+once sshd.elf
 once sh.elf selftest

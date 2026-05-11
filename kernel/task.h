@@ -4,7 +4,13 @@
 #include "../include/types.h"
 
 #define TASK_NAME_MAX  16
-#define TASK_MAX       16
+/* Bumped from 16 in session 50 — sshd forks deeply (sshd → per-conn
+ * child → sh.elf -c → command exec), and that's on top of init's
+ * resident httpd / httpsd / sshd daemons, the selftest sh, and the
+ * inbound ssh.elf client during the loopback test. Six concurrent
+ * processes in the pipeline plus kernel kthreads were enough to hit
+ * the old 16-slot ceiling. 32 leaves comfortable headroom. */
+#define TASK_MAX       32
 #define TASK_STACK_SZ  0x4000     /* 16 KiB per kernel task */
 /* Bumped from 8 in session 26 — a 4-stage pipeline opens 3 pipes (6 fds)
  * in the parent before forking; with stdin/stdout/stderr already at 0/1/2
