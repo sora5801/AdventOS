@@ -1983,6 +1983,67 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* sshd writes its ed25519 host-key seed to /etc/ssh_host_key
+         * at boot — fresh random on first run (no file yet), reloaded
+         * from disk on subsequent boots so the fingerprint a client
+         * sees in known_hosts stays stable.
+         *
+         * By the time the selftest runs, sshd is well past its
+         * load_or_generate_host_key() call. Verify:
+         *   - file exists
+         *   - is exactly 32 bytes (ed25519 seed)
+         *   - mode 0600 (only owner-readable)
+         *   - owner uid 0 (root) — the only account that should hold
+         *     the private host key seed. */
+        int mode = sys_fs_mode("/etc/ssh_host_key");
+        int own  = sys_fs_owner("/etc/ssh_host_key");
+        printf("  /etc/ssh_host_key mode=0%o owner=uid:%d gid:%d\n",
+               mode, (own >> 16) & 0xFFFF, own & 0xFFFF);
+        EXPECT(mode == 0600,             "host key mode = 0600 (owner-only)");
+        EXPECT(((own >> 16) & 0xFFFF) == 0, "host key owner uid = 0 (root)");
+
+        int fd = sys_open("/etc/ssh_host_key");
+        EXPECT(fd >= 0, "open /etc/ssh_host_key succeeds for root");
+        if (fd >= 0) {
+            unsigned char seed[64];
+            int n = sys_read(fd, seed, sizeof(seed));
+            sys_close(fd);
+            EXPECT(n == 32, "host key file is exactly 32 bytes (ed25519 seed)");
+
+            /* Sanity: at least SOME entropy — would be alarming if
+             * the on-disk seed were all zeros or all 0xff (signs of
+             * uninitialised storage rather than rand_bytes output). */
+            int n_zero = 0, n_ff = 0;
+            for (int i = 0; i < 32; i++) {
+                if (seed[i] == 0x00) n_zero++;
+                if (seed[i] == 0xFF) n_ff++;
+            }
+            EXPECT(n_zero < 30 && n_ff < 30, "host key bytes aren't uniform (looks like rand_bytes output)");
+        }
+
+        /* As a non-root user, opening the key file MUST fail —
+         * 0600 means only the owner reads it. Fork a guest-uid
+         * child and check. */
+        int pid = sys_fork();
+        if (pid == 0) {
+            sys_setuid(1000);
+            int g_fd = sys_open("/etc/ssh_host_key");
+            sys_exit(g_fd >= 0 ? 1 : 0);   /* 0 = correct denial */
+        }
+        int code = 0;
+        sys_wait(&code);
+        EXPECT(code == 0, "non-root open() of host key denied by 0600 mode");
+
+        #undef EXPECT
+    }
+
     puts("[t9b] vi: modal editor round-trip (open, edit, :wq, verify)\n");
     {
         /* Seed a small file then drive vi via injected keystrokes:

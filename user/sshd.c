@@ -43,17 +43,97 @@
 #define SSH_PORT     2222
 #define USERS_MAX    16
 
-/* ---- host keypair (seeded, persistent across reboots) ------------- */
-
-static const uint8_t HOSTKEY_SEED[32] = {
-    0x9C, 0x4D, 0x77, 0x18, 0xB2, 0xEE, 0x6A, 0x05,
-    0xFF, 0x91, 0x33, 0xC8, 0xDD, 0x44, 0xA0, 0x1B,
-    0x71, 0x5C, 0x9E, 0x82, 0x37, 0x60, 0xAB, 0xC4,
-    0x12, 0x88, 0xE9, 0x55, 0x4F, 0x06, 0xD3, 0x1E,
-};
+/* ---- host keypair (loaded from / written to /etc/ssh_host_key) ----
+ *
+ * Real Unix sshd writes its host private key to
+ * /etc/ssh/ssh_host_ed25519_key on first boot and reads it back
+ * thereafter, so the fingerprint a client sees in `known_hosts`
+ * stays stable across reboots — but is unique per install. We do
+ * the same, only with a flat 32-byte seed file (the ed25519 seed)
+ * because our libcrypto's keypair_from_seed re-derives the
+ * private key bytes deterministically.
+ *
+ * File: /etc/ssh_host_key, mode 0600, owner root.
+ *   exists  →  read 32-byte seed, derive keypair
+ *   missing →  rand_bytes(32), write file, derive keypair
+ *
+ * The previous session 51 design used a baked-in HOSTKEY_SEED
+ * constant — stable but with the same fingerprint on every install
+ * of AdventOS, which is what real sshd's first-boot generation
+ * exists to avoid. */
+#define HOSTKEY_PATH "/etc/ssh_host_key"
 
 static uint8_t g_host_pk[32];
 static uint8_t g_host_sk[64];
+
+static void hex_byte(uint8_t b, char out[2]) {
+    static const char *d = "0123456789abcdef";
+    out[0] = d[b >> 4];
+    out[1] = d[b & 0xF];
+}
+
+/* Print SHA-256(public-key) as 64 lowercase-hex chars — the OpenSSH
+ * "SHA256:<base64>" fingerprint without the base64 (libuser doesn't
+ * have a base64 encoder and a hex print is just as good for the
+ * across-reboots-stability sanity check this is for). */
+static void print_host_fingerprint(void) {
+    uint8_t digest[32];
+    struct sha256 s;
+    sha256_init(&s);
+    sha256_update(&s, g_host_pk, 32);
+    sha256_final(&s, digest);
+    char hex[65];
+    for (int i = 0; i < 32; i++) hex_byte(digest[i], hex + i*2);
+    hex[64] = 0;
+    printf("sshd: host key sha256: %s\n", hex);
+}
+
+/* Either load the existing seed from /etc/ssh_host_key or generate
+ * a fresh one and persist it. Either way, fills g_host_pk + g_host_sk.
+ *
+ * Returns 0 on success. If both read AND write fail (degenerate
+ * disk-full case), we still get a working (in-memory) keypair from
+ * rand_bytes — the warning to the operator says the fingerprint
+ * will reset on next boot. */
+static int load_or_generate_host_key(void) {
+    uint8_t seed[32];
+    int fd = sys_open(HOSTKEY_PATH);
+    if (fd >= 0) {
+        int n = sys_read(fd, seed, 32);
+        sys_close(fd);
+        if (n == 32) {
+            ed25519_keypair_from_seed(g_host_pk, g_host_sk, seed);
+            printf("sshd: loaded host key from %s\n", HOSTKEY_PATH);
+            return 0;
+        }
+        printf("sshd: %s present but %d bytes (need 32); regenerating\n",
+               HOSTKEY_PATH, n);
+    }
+
+    /* No usable file — generate a fresh seed and try to persist. */
+    rand_bytes(seed, 32);
+    ed25519_keypair_from_seed(g_host_pk, g_host_sk, seed);
+
+    if (sys_fs_write(HOSTKEY_PATH, seed, 32) < 0) {
+        puts("sshd: WARNING: could not write host key file; "
+             "fingerprint will reset on next boot\n");
+        return 0;
+    }
+    /* Tighten perms — only root may read the private seed. We're
+     * still uid 0 at this point (setuid happens per-connection,
+     * after this), and we're the owner since we just wrote it. */
+    if (sys_chmod(HOSTKEY_PATH, 0600) < 0) {
+        puts("sshd: warning: chmod 0600 failed on host key file\n");
+    }
+    /* Force the bcache out to disk NOW. Without this, a non-clean
+     * shutdown (qemu killed before the syncer's periodic flush)
+     * would lose the file, defeating the whole "stable across
+     * reboots" point. Writeback alone doesn't survive `kill -9`. */
+    int synced = (int)sys_bcache_sync();
+    printf("sshd: generated fresh host key (saved to %s, mode 0600, "
+           "%d block(s) synced)\n", HOSTKEY_PATH, synced);
+    return 0;
+}
 
 /* ---- pubkey-auth (session 53, RFC 4252 §7) ----------------------- */
 
@@ -1171,8 +1251,8 @@ int main(int argc, char **argv) {
     }
     printf("sshd: loaded %d users from /etc/passwd\n", g_n_users);
 
-    ed25519_keypair_from_seed(g_host_pk, g_host_sk, HOSTKEY_SEED);
-    puts("sshd: host key: ssh-ed25519 (seeded, persistent across reboots)\n");
+    load_or_generate_host_key();
+    print_host_fingerprint();
 
     /* Register the built-in demo pubkey for `guest`. The selftest's
      * ssh.elf @key mode derives the matching private key from the

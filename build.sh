@@ -142,11 +142,15 @@ if [ "$sz" -lt "$fs_offset" ]; then
 fi
 cat fs.img >> os.img
 
-# Pad up to (fs_lba + 2048) sectors so SYS_FS_WRITE can grow files
-# past the initial mkfs payload. Session 46 bumped from 1024 → 2048
-# (the kernel-side FS bitmap cap was bumped to match) to fit the
-# growing user-program set including vi.elf.
-final_size=$(( (fs_lba + 2048) * 512 ))
+# Pad up to (fs_lba + 4096) sectors so SYS_FS_WRITE can grow files
+# past the initial mkfs payload. Session 46 bumped 1024 → 2048;
+# session 54 bumps 2048 → 4096 to match the kernel-side FS bitmap
+# cap (kernel/fs.c::FS_BITMAP_BYTES_MAX). Crucial for files like
+# /etc/ssh_host_key that sshd creates AT RUNTIME — without enough
+# padding here QEMU silently drops writes past EOF, and the file's
+# data block reads -1 on the next boot even though the metadata
+# entry persists.
+final_size=$(( (fs_lba + 4096) * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$final_size" ]; then
     truncate -s "$final_size" os.img
