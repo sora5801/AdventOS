@@ -24,6 +24,7 @@
 #include "libuser.h"
 #include "../libcrypto/crypto.h"
 #include "../libcrypto/tls.h"
+#include "../libcrypto/x509.h"
 
 #define HOST_MAX 128
 #define PATH_MAX 256
@@ -172,10 +173,38 @@ int main(int argc, char **argv) {
     for (const char *p = host; *p; p++) {
         if (!((*p >= '0' && *p <= '9') || *p == '.')) { is_ip = 0; break; }
     }
+    /* Session 59 — opt-in CA chain validation.  If /etc/ssl/ contains
+     * any trusted CA cert, load them all into a store and hand the
+     * TLS layer a pointer; the layer will reject any presented cert
+     * that doesn't chain.  When the dir is empty (or the binary is
+     * run on a host with no trust store) we fall back to the
+     * traditional "trust any cert" behavior so we can still hit real
+     * public servers — the safety call is at the caller's level. */
+    static struct ca_store store;
+    ca_store_init(&store);
+    int n_ca = ca_store_load_from_etc_ssl(&store);
+    if (n_ca > 0) {
+        printf("httpsget: loaded %d CA root(s) from /etc/ssl/ — chain validation ON\n",
+               n_ca);
+    } else {
+        puts("httpsget: no CA roots found in /etc/ssl/ — chain validation OFF\n");
+    }
+
     struct tls_conn t;
     t.server_name = is_ip ? 0 : host;
+    /* Pass the store only if we actually loaded something — otherwise
+     * a stale empty store would reject every connection. */
+    t.ca_store     = n_ca > 0 ? &store : 0;
+    t.ca_store_now = 0;       /* RTC isn't NTP-synced yet (session 60 work) */
     int hs = tls_client_handshake_cert(&t, sk);
     if (hs != 0) {
+        /* rc=-115 specifically means x509_verify_chain rejected the
+         * presented cert.  Call it out explicitly so the t42 selftest
+         * can tell "the chain check did its job" from "the handshake
+         * blew up for some other reason." */
+        if (hs == -115) {
+            puts("httpsget: chain validation REJECTED server cert\n");
+        }
         printf("httpsget: TLS handshake failed (rc=%d)\n", hs);
         sys_close(sk);
         return 1;

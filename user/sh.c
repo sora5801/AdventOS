@@ -2507,6 +2507,146 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t42] X.509 cert chain validation against /etc/ssl/ CA store\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Two scenarios, both go through fork+exec+pipe-capture so we
+         * read structured PASS/FAIL strings out of httpsget.elf's
+         * stdout.
+         *
+         * Positive: connect to the CA-signed httpsd on port 4433 (the
+         * one inittab brought up). httpsget loads /etc/ssl/test-ca.der
+         * + server.der, verifies the chain, succeeds.
+         *
+         * Negative: spawn a "rogue" httpsd on port 4434 with the
+         *   --self-signed flag — it synthesizes a fresh cert at startup
+         *   that the CA store does NOT trust. httpsget connects, the
+         *   x509_verify_chain call inside the TLS Certificate handler
+         *   returns -1, the handshake aborts (rc=-115), httpsget
+         *   prints "chain validation REJECTED server cert" before
+         *   exiting non-zero.  That string is the key witness.
+         *
+         * Without the chain-validation code paths actually wired up,
+         * the negative test would erroneously PASS (httpsget would
+         * accept the self-signed cert exactly like the session-37
+         * "curl -k" semantics did). */
+
+        /* ---- positive ---- */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for positive httpsget capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "httpsget.elf",
+                                    "https://10.0.2.15:4433/", 0 };
+                sys_exec("httpsget.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+            static char captured[2048];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int code = 0; sys_wait(&code);
+
+            int find_loaded = 0, find_validation_on = 0, find_hs_ok = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_loaded && i + 17 <= total &&
+                    memcmp(captured + i, "loaded 2 CA root", 16) == 0)
+                    find_loaded = 1;
+                if (!find_validation_on && i + 21 <= total &&
+                    memcmp(captured + i, "chain validation ON", 19) == 0)
+                    find_validation_on = 1;
+                if (!find_hs_ok && i + 22 <= total &&
+                    memcmp(captured + i, "TLS 1.3 handshake OK", 20) == 0)
+                    find_hs_ok = 1;
+            }
+            EXPECT(find_loaded,        "CA store loaded test-ca.der + server.der from /etc/ssl/");
+            EXPECT(find_validation_on, "client reports chain validation ON");
+            EXPECT(find_hs_ok && code == 0,
+                   "CA-signed cert ACCEPTED — handshake completed + GET succeeded");
+        }
+
+        /* ---- negative: bring up a self-signed httpsd on 4434, then
+         * try httpsget against it with chain validation on. ---- */
+        int rogue_pid = sys_fork();
+        if (rogue_pid == 0) {
+            const char *a[] = { "httpsd.elf", "--self-signed",
+                                "--port", "4434", 0 };
+            sys_exec("httpsd.elf", a);
+            sys_exit(127);
+        }
+        sys_sleep_ms(150);    /* give the rogue server time to bind */
+
+        int pp2[2];
+        if (sys_pipe(pp2) < 0) {
+            puts("  FAIL  pipe() for negative httpsget capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp2[1], 1);
+                sys_dup2(pp2[1], 2);
+                sys_close(pp2[0]);
+                sys_close(pp2[1]);
+                const char *a[] = { "httpsget.elf",
+                                    "https://10.0.2.15:4434/", 0 };
+                sys_exec("httpsget.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp2[1]);
+            static char captured[2048];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp2[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp2[0]);
+            int code = 0; sys_wait(&code);
+
+            int find_rejected = 0, find_handshake_failed = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_rejected && i + 33 <= total &&
+                    memcmp(captured + i,
+                           "chain validation REJECTED server", 32) == 0)
+                    find_rejected = 1;
+                if (!find_handshake_failed && i + 22 <= total &&
+                    memcmp(captured + i, "TLS handshake failed", 20) == 0)
+                    find_handshake_failed = 1;
+            }
+            EXPECT(find_rejected,
+                   "rogue self-signed cert REJECTED — chain validation tripped");
+            EXPECT(find_handshake_failed && code != 0,
+                   "handshake aborted + httpsget exited non-zero");
+        }
+
+        /* Kill the rogue httpsd so it doesn't leak past the test. */
+        sys_kill(rogue_pid, SIGTERM);
+        sys_sleep_ms(50);
+        int code; while (sys_wait_nb(&code) > 0) {}
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \

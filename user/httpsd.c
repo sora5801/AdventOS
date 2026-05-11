@@ -30,6 +30,14 @@
 
 #define HTTPS_PORT  4433
 
+/* Session 59 — runtime knobs.  Default-on flow loads the CA-signed
+ * leaf cert from /etc/ssl/server.der; with --self-signed the server
+ * synthesizes a self-signed cert at runtime instead (so the t42 test
+ * can spin up a "rogue" httpsd to prove chain validation rejects it).
+ * --port N overrides the listen port. */
+static int  g_port           = HTTPS_PORT;
+static int  g_force_self_signed = 0;
+
 /* Deterministic seed for the ECDSA keypair. */
 static const unsigned char DEMO_SEED[32] = {
     0x21, 0x6E, 0x9F, 0x42, 0x07, 0xA8, 0x10, 0xC3,
@@ -92,22 +100,60 @@ static void serve_one(int conn) {
     sys_close(conn);
 }
 
-int main(void) {
+/* Try to load /etc/ssl/server.{der,key}; fall back to the
+ * old "synthesize a self-signed cert from DEMO_SEED" path if either
+ * file is missing.  Session 59 ships these files via mkfs so the
+ * chain-validating client in t42 has a real, CA-signed leaf to
+ * verify.  Returns 0 if the disk-loaded path succeeded. */
+static int load_cert_from_disk(void) {
+    int fd = sys_open("/etc/ssl/server.der");
+    if (fd < 0) return -1;
+    g_cert_len = sys_read(fd, g_cert, sizeof(g_cert));
+    sys_close(fd);
+    if (g_cert_len <= 0) return -1;
+
+    fd = sys_open("/etc/ssl/server.key");
+    if (fd < 0) return -1;
+    int kn = sys_read(fd, g_priv, sizeof(g_priv));
+    sys_close(fd);
+    if (kn != 32) return -1;
+
+    /* For ECDSA the public key is derived from the private scalar on
+     * demand by libcrypto; we don't need to populate g_pub for the
+     * handshake itself, but TLS_TRACE-style code paths read it. */
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--self-signed") == 0) g_force_self_signed = 1;
+        else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            g_port = atoi(argv[++i]);
+        }
+    }
     /* Build the keypair + cert once, before binding. Both stay in
      * .data and the fork()d child handlers inherit them via COW. */
-    p256_keypair_from_seed(g_pub, g_priv, DEMO_SEED);
-    g_cert_len = x509_build_self_signed_p256(
-        g_pub, g_priv, "AdventOS demo cert",
-        g_cert, sizeof(g_cert));
-    if (g_cert_len < 0) {
-        puts("httpsd: x509 build failed\n");
-        return 1;
+    if (!g_force_self_signed && load_cert_from_disk() == 0) {
+        printf("httpsd: loaded leaf cert from /etc/ssl/server.der "
+               "(%d bytes DER, CA-signed)\n", g_cert_len);
+    } else {
+        puts("httpsd: /etc/ssl/server.der missing — synthesizing "
+             "self-signed cert from DEMO_SEED\n");
+        p256_keypair_from_seed(g_pub, g_priv, DEMO_SEED);
+        g_cert_len = x509_build_self_signed_p256(
+            g_pub, g_priv, "AdventOS demo cert",
+            g_cert, sizeof(g_cert));
+        if (g_cert_len < 0) {
+            puts("httpsd: x509 build failed\n");
+            return 1;
+        }
+        printf("httpsd: built self-signed ECDSA-P256 cert (%d bytes DER)\n",
+               g_cert_len);
     }
-    printf("httpsd: built self-signed ECDSA-P256 cert (%d bytes DER)\n", g_cert_len);
 
     int srv = sys_socket();
     if (srv < 0) { puts("httpsd: socket failed\n"); return 1; }
-    if (sys_bind(srv, HTTPS_PORT) < 0) {
+    if (sys_bind(srv, g_port) < 0) {
         puts("httpsd: bind failed\n");
         sys_close(srv);
         return 1;
@@ -117,7 +163,8 @@ int main(void) {
         sys_close(srv);
         return 1;
     }
-    printf("httpsd: listening on TLS port %d (ECDSA-P256)\n", HTTPS_PORT);
+    printf("httpsd: listening on TLS port %d (ECDSA-P256, self-signed=%d)\n",
+           g_port, g_force_self_signed);
 
     for (;;) {
         int conn = sys_accept(srv);

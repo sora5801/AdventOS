@@ -29,6 +29,7 @@
 #define ADVENTOS_TLS_H
 
 #include "crypto.h"
+#include "x509.h"
 
 #define TLS_REC_CHANGE_CIPHER 20
 #define TLS_REC_ALERT         21
@@ -105,6 +106,16 @@ struct tls_conn {
      * public HTTPS servers either refuse the connection or serve
      * the wrong vhost's cert. NULL = no SNI extension emitted. */
     const char    *server_name;
+
+    /* Trust anchors for cert-chain validation (session 59). When non-
+     * NULL the client verifies the server's presented leaf cert against
+     * this store after extracting the public key for CertificateVerify.
+     * NULL preserves the "curl -k" semantics that real-world demos use
+     * to talk to arbitrary public servers without a trust store. */
+    const struct ca_store *ca_store;
+    /* Wall-clock time at handshake start, used for validity-date
+     * checks. 0 disables date validation. */
+    uint32_t       ca_store_now;
 
     /* Key schedule outputs */
     uint8_t  early_secret      [32];

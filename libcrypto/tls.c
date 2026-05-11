@@ -536,106 +536,10 @@ static int build_serverhello_body(struct tls_conn *c, uint8_t *body) {
 
 /* Build the CertificateVerify signature input per RFC 8446 §4.4.3:
  *   64 octets of 0x20  ||  "TLS 1.3, server CertificateVerify"
- *   ||  0x00  ||  transcript_hash[32]   = 130 bytes total. */
-/* DER reader. Each call: read a tag, decode its length, advance *p
- * past the header. On return *p points at the value bytes, *vl is
- * the value length, and the function return is the tag byte read.
- * Returns -1 on truncation or unsupported long-form lengths. */
-static int der_read_tlv(const uint8_t **p, const uint8_t *end, int *vl) {
-    if (*p >= end) return -1;
-    int tag = *(*p)++;
-    if (*p >= end) return -1;
-    int b = *(*p)++;
-    int len;
-    if ((b & 0x80) == 0) {
-        len = b;
-    } else {
-        int nlen = b & 0x7F;
-        if (nlen == 0 || nlen > 3 || *p + nlen > end) return -1;
-        len = 0;
-        for (int i = 0; i < nlen; i++) len = (len << 8) | *(*p)++;
-    }
-    if (*p + len > end) return -1;
-    *vl = len;
-    return tag;
-}
-
-/* Extract the server cert's SubjectPublicKeyInfo BIT STRING into
- * (out_alg, out_pk, out_pk_len). This walks the X.509 just far enough
- * to find the public-key bytes — not a general parser, but it covers
- * both Ed25519 (RFC 8410) and ECDSA-P256 (RFC 5480) certs we emit.
+ *   ||  0x00  ||  transcript_hash[32]   = 130 bytes total.
  *
- *   out_alg = 0x0807 (ed25519): out_pk = 32 raw bytes
- *   out_alg = 0x0403 (p256):    out_pk = 65 bytes (0x04 || X || Y)
- *
- * Returns 0 on success. The fragile-by-design path: a malformed cert
- * is rejected with -1; we do NOT attempt to handle every X.509 quirk
- * curl-style — just our two known cert shapes. */
-static int x509_extract_pubkey(const uint8_t *cert, int cert_len,
-                                int *out_alg,
-                                uint8_t *out_pk, int *out_pk_len) {
-    const uint8_t *p = cert, *end = cert + cert_len;
-    int vl;
-    /* outer SEQUENCE */
-    if (der_read_tlv(&p, end, &vl) != 0x30) return -1;
-    /* tbsCertificate SEQUENCE */
-    if (der_read_tlv(&p, end, &vl) != 0x30) return -1;
-    const uint8_t *tbs_end = p + vl;
-    /* [0] EXPLICIT version  (optional) — skip */
-    if (p < tbs_end && p[0] == 0xA0) {
-        if (der_read_tlv(&p, tbs_end, &vl) != 0xA0) return -1;
-        p += vl;
-    }
-    /* serialNumber INTEGER */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x02) return -1; p += vl;
-    /* signature AlgorithmIdentifier SEQUENCE */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
-    /* issuer Name */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
-    /* validity Validity */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
-    /* subject Name */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1; p += vl;
-    /* subjectPublicKeyInfo SEQUENCE { algorithm SEQUENCE, subjectPublicKey BIT STRING } */
-    if (der_read_tlv(&p, tbs_end, &vl) != 0x30) return -1;
-    const uint8_t *spki_end = p + vl;
-    /* algorithm SEQUENCE — read its OID to decide ed25519 vs p256 */
-    if (der_read_tlv(&p, spki_end, &vl) != 0x30) return -1;
-    const uint8_t *alg_end = p + vl;
-    /* algorithm.OID */
-    int otag = der_read_tlv(&p, alg_end, &vl);
-    if (otag != 0x06) return -1;
-    /* OIDs:
-     *   ed25519: 1.3.101.112  → 06 03 2B 65 70
-     *   p256:    1.2.840.10045.2.1 → 06 07 2A 86 48 CE 3D 02 01
-     */
-    int alg = 0;
-    if (vl == 3 && p[0] == 0x2B && p[1] == 0x65 && p[2] == 0x70) {
-        alg = 0x0807;
-    } else if (vl == 7 && p[0] == 0x2A && p[1] == 0x86 && p[2] == 0x48 &&
-               p[3] == 0xCE && p[4] == 0x3D && p[5] == 0x02 && p[6] == 0x01) {
-        alg = 0x0403;
-    } else {
-        return -1;
-    }
-    p = alg_end;     /* skip the rest of the algorithm SEQUENCE (curve params for p256) */
-    /* subjectPublicKey BIT STRING */
-    if (der_read_tlv(&p, spki_end, &vl) != 0x03) return -1;
-    /* BIT STRING starts with a "unused bits" byte (always 0 for our keys). */
-    if (vl < 1 || p[0] != 0x00) return -1;
-    int pk_bytes = vl - 1;
-    if (alg == 0x0807) {
-        if (pk_bytes != 32) return -1;
-        for (int i = 0; i < 32; i++) out_pk[i] = p[1 + i];
-        *out_pk_len = 32;
-    } else {     /* p256 — uncompressed point: 0x04 || X(32) || Y(32) = 65 bytes */
-        if (pk_bytes != 65 || p[1] != 0x04) return -1;
-        for (int i = 0; i < 65; i++) out_pk[i] = p[1 + i];
-        *out_pk_len = 65;
-    }
-    *out_alg = alg;
-    return 0;
-}
+ * (DER parsing moved to libcrypto/x509.c in session 59 — both the
+ * helper TLV reader and x509_extract_pubkey now live there.) */
 
 static void build_cv_sign_input(uint8_t out[130],
                                 const uint8_t transcript_hash[32])
@@ -990,15 +894,19 @@ static int parse_serverhello_extensions(
 }
 
 int tls_client_handshake_cert(struct tls_conn *c, int fd) {
-    /* Save caller-set inputs (so far: SNI) so we can zero the rest
+    /* Save caller-set inputs (SNI, CA store) so we can zero the rest
      * of the struct without losing them. Parallel to what
      * tls_server_handshake_cert does for cert_der / server_sk. */
     const char *server_name = c->server_name;
+    const struct ca_store *ca_store = c->ca_store;
+    uint32_t    ca_store_now = c->ca_store_now;
 
     for (int i = 0; i < (int)sizeof(*c); i++) ((uint8_t *)c)[i] = 0;
     c->fd = fd;
     c->is_server = 0;
     c->server_name = server_name;
+    c->ca_store    = ca_store;
+    c->ca_store_now = ca_store_now;
     sha256_init(&c->transcript);
 
     /* === 1. Send ClientHello === */
@@ -1129,6 +1037,28 @@ int tls_client_handshake_cert(struct tls_conn *c, int fd) {
                 if (x509_extract_pubkey(hs_buf + q, cd_len,
                                         &cert_alg, cert_pk, &cert_pk_len) < 0) return -114;
                 have_cert_pk = 1;
+
+                /* Session 59 — if the caller installed a CA store,
+                 * verify the cert's chain right now.  We only handle a
+                 * single leaf here (no intermediates); the test setup
+                 * uses a direct leaf-to-root chain, and most real
+                 * public certs have intermediates which we'd want to
+                 * parse out of the additional CertificateEntry list
+                 * entries on the wire — out of scope for this session.
+                 *
+                 * NOTE: validity-date checks are disabled (now=0)
+                 * because AdventOS doesn't have a wall-clock that's
+                 * NTP-synced. Once session 60 adds NTP, the caller
+                 * can pass a real `now` and we'll enforce
+                 * notBefore <= now <= notAfter. */
+                if (c->ca_store) {
+                    if (x509_verify_chain(hs_buf + q, cd_len,
+                                          0, 0, 0,
+                                          c->ca_store,
+                                          c->ca_store_now) != 0) {
+                        return -115;
+                    }
+                }
             }
             else if (mt == TLS_HS_CERT_VERIFY) {
                 /* CertificateVerify is signed over the running

@@ -48,9 +48,12 @@ OUT_IMG           = 'fs.img'
 # Directory layout. Build the entries in this order; parent_dir
 # references resolve to the table index (assigned by enumerate).
 # Top-level: /etc, /bin, plus the executable binaries living at root.
+# Directories. Strings are top-level; (name, parent) tuples nest one
+# level deep (session 59 added /etc/ssl to ship the CA roots).
 DIRECTORIES = [
     'etc',
-    'mnt',     # session 42 — USB drive mounts here at /mnt/usb
+    'mnt',                   # session 42 — USB drive mounts here at /mnt/usb
+    ('ssl', 'etc'),          # session 59 — CA root store + httpsd server cert/key
 ]
 
 # (on-disk filename, source binary path, parent directory name or None for root)
@@ -128,6 +131,15 @@ DATA_FILES = [
     # adding more here costs ~2 KB each.
     ('dbgtest.syms', 'user/_obj/dbgtest.syms', None),
     ('dbg.syms',     'user/_obj/dbg.syms',     None),
+    # Session 59 — CA root store + httpsd's leaf cert + key. The
+    # test fixture: `test-ca.der` is a self-signed P-256 CA generated
+    # offline with openssl. `server.der` is httpsd's leaf cert signed
+    # by that CA. `server.key` is the raw 32-byte ECDSA scalar.
+    # httpsget loads test-ca.der as the trust anchor and validates
+    # the chain on every connect.
+    ('test-ca.der', 'fs/etc/ssl/test-ca.der', 'ssl'),
+    ('server.der',  'fs/etc/ssl/server.der',  'ssl'),
+    ('server.key',  'fs/etc/ssl/server.key',  'ssl', 0o600),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
@@ -208,9 +220,21 @@ def build_image(directories, user_programs, raw_blobs, data_files,
     next_sector = FS_SUPER_SECTORS
 
     dir_idx_by_name = {}
-    for dname in directories:
+    for d in directories:
+        # Top-level dirs are bare strings under root. Nested dirs are
+        # (name, parent_name) tuples — parent must already have been
+        # emitted earlier in the list. Session 59 added /etc/ssl this
+        # way so the CA store and server cert/key live there.
+        if isinstance(d, tuple):
+            dname, parent_name = d
+            parent_idx = dir_idx_by_name[parent_name]
+        else:
+            dname, parent_idx = d, FS_DIR_ROOT
+        # Subdirectories are looked up by their bare name (not the
+        # full path) — the existing directory table is flat and
+        # cross-checks via parent_dir.
         dir_idx_by_name[dname] = len(entries)
-        entries.append((dname, 0, 0, FS_TYPE_DIR, FS_DIR_ROOT, 0o755))
+        entries.append((dname, 0, 0, FS_TYPE_DIR, parent_idx, 0o755))
 
     def add_file(name, blob, raw_size, parent_dir_name, mode):
         nonlocal next_sector
@@ -236,11 +260,20 @@ def build_image(directories, user_programs, raw_blobs, data_files,
         raw = open(src_path, 'rb').read()
         add_file(fs_name, raw, len(raw), parent, 0o755)
 
-    for fs_name, src_path, parent in data_files:
+    for entry in data_files:
+        # Allow either (name, src, parent) for the standard 0o644 case
+        # or (name, src, parent, mode) for files that need a tighter
+        # permission — the session-59 server.key wants 0o600 so guests
+        # can't peek at httpsd's private key.
+        if len(entry) == 4:
+            fs_name, src_path, parent, mode = entry
+        else:
+            fs_name, src_path, parent = entry
+            mode = 0o644
         if not os.path.exists(src_path):
             print(f"mkfs: {src_path} not found", file=sys.stderr); sys.exit(1)
         raw = open(src_path, 'rb').read()
-        add_file(fs_name, raw, len(raw), parent, 0o644)
+        add_file(fs_name, raw, len(raw), parent, mode)
 
     if len(entries) > FS_MAX_FILES:
         print(f"mkfs: {len(entries)} entries exceeds FS_MAX_FILES "
