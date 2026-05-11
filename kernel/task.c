@@ -908,6 +908,14 @@ static void close_all_fds(struct task *t) {
             case FD_PIPE_R:  pipe_close_read  (e->obj_idx); break;
             case FD_PIPE_W:  pipe_close_write (e->obj_idx); break;
             case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
+            /* Pty refcounts: without these, a SIGTERM'd task (e.g. an
+             * sshd TX child being torn down for rekey) leaves its end
+             * of the pty held forever, and the OTHER end's read never
+             * sees EOF. Forks of pty fds increment in copy_fd_table
+             * (see FD_PTY_M / FD_PTY_S cases above); decrement on
+             * any exit path here. */
+            case FD_PTY_M:   pty_close_master (e->obj_idx); break;
+            case FD_PTY_S:   pty_close_slave  (e->obj_idx); break;
             default: break;
         }
         e->kind    = FD_FREE;

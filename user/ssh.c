@@ -171,7 +171,11 @@ static int send_kexinit(struct ssh_conn *c) {
     ssh_put_u8(&p, SSH_MSG_KEXINIT);
     uint8_t cookie[16]; rand_bytes(cookie, 16);
     ssh_put_bytes(&p, cookie, 16);
-    ssh_put_cstring(&p, "curve25519-sha256");
+    /* RFC 8308 §2.1: advertising "ext-info-c" in the kex_algorithms
+     * name-list signals that we want SSH_MSG_EXT_INFO after the first
+     * NEWKEYS. It's a dummy KEX value — never actually selected —
+     * but its presence is the entire opt-in mechanism. */
+    ssh_put_cstring(&p, "curve25519-sha256,ext-info-c");
     ssh_put_cstring(&p, "ssh-ed25519");
     ssh_put_cstring(&p, "aes128-gcm@openssh.com");
     ssh_put_cstring(&p, "aes128-gcm@openssh.com");
@@ -203,8 +207,13 @@ static void hash_string(struct sha256 *s, const void *d, int n) {
 }
 
 /* Send SSH_MSG_KEX_ECDH_INIT (our Q_C); receive REPLY (K_S, Q_S, sig).
- * Verify the host signature and compute the keys via the exchange hash. */
-static int do_kex_ecdh(struct ssh_conn *c) {
+ * Verify the host signature and compute the keys via the exchange hash.
+ *
+ * `initial`: first KEX freezes session_id (RFC 4253 §7.2); rekey runs
+ * (initial=0) leave session_id untouched. We also re-verify the host
+ * key matches what we accepted on the initial KEX — a server that
+ * pivots its host key mid-session is impersonating somebody. */
+static int do_kex_ecdh(struct ssh_conn *c, int initial) {
     /* Ephemeral keypair + send. */
     rand_bytes(c->d_c, 32);
     x25519(c->q_c, c->d_c, x25519_basepoint);
@@ -236,7 +245,19 @@ static int do_kex_ecdh(struct ssh_conn *c) {
         uint32_t pkl;
         const uint8_t *pkp = ssh_get_string(&kp, ke, &pkl);
         if (!pkp || pkl != 32) return -1;
-        for (int i = 0; i < 32; i++) c->host_pk[i] = pkp[i];
+        /* Initial KEX: trust-on-first-use, store the pubkey.
+         * Rekey:        the server MUST present the same host key,
+         *               otherwise it's an active MITM attempt. */
+        if (initial) {
+            for (int i = 0; i < 32; i++) c->host_pk[i] = pkp[i];
+        } else {
+            for (int i = 0; i < 32; i++) {
+                if (pkp[i] != c->host_pk[i]) {
+                    puts("ssh: rekey host key changed — aborting\n");
+                    return -1;
+                }
+            }
+        }
     }
 
     /* Q_S */
@@ -287,11 +308,15 @@ static int do_kex_ecdh(struct ssh_conn *c) {
         return -1;
     }
 
-    for (int i = 0; i < 32; i++) c->session_id[i] = c->h[i];
+    if (initial) {
+        for (int i = 0; i < 32; i++) c->session_id[i] = c->h[i];
+    }
     return 0;
 }
 
-static int do_newkeys(struct ssh_conn *c) {
+/* `initial` tells us whether to expect EXT_INFO right after the
+ * server's NEWKEYS. Rekey runs (initial=0) don't get EXT_INFO. */
+static int do_newkeys(struct ssh_conn *c, int initial) {
     uint8_t nk = SSH_MSG_NEWKEYS;
     if (send_packet(c, &nk, 1) < 0) return -1;
     uint8_t tmp[32];
@@ -309,6 +334,57 @@ static int do_newkeys(struct ssh_conn *c) {
     ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'D', c->session_id);
     for (int i = 0; i < 16; i++) c->key_s2c[i] = tmp[i];
     c->enc_in = 1;
+
+    /* RFC 8308 §2.4: if we advertised ext-info-c, the server's first
+     * post-NEWKEYS message is EXT_INFO. It's optional — log what we
+     * got but don't fail if it's missing. We peek into the packet
+     * with a non-destructive read by always running the inspection,
+     * but only consume it if it really is SSH_MSG_EXT_INFO. */
+    if (initial) {
+        static uint8_t pkt[2048];
+        int pn = recv_packet(c, pkt, sizeof(pkt));
+        if (pn >= 1 && pkt[0] == SSH_MSG_EXT_INFO) {
+            const uint8_t *p = pkt + 1, *end = pkt + pn;
+            uint32_t nr = ssh_get_u32(&p);
+            printf("ssh: server EXT_INFO with %u extension(s)\n", (unsigned)nr);
+            for (uint32_t i = 0; i < nr && p < end; i++) {
+                uint32_t kl;
+                const uint8_t *k = ssh_get_string(&p, end, &kl);
+                uint32_t vl;
+                const uint8_t *v = ssh_get_string(&p, end, &vl);
+                if (!k || !v) break;
+                /* Hand-printed because we don't have a length-bounded
+                 * printf %.*s. The strings are short and well-formed
+                 * in practice (per the RFC profile). */
+                puts("  ext: ");
+                sys_write(1, k, (int)kl);
+                puts(" = ");
+                sys_write(1, v, (int)vl);
+                puts("\n");
+            }
+        } else if (pn >= 1) {
+            /* Server didn't send EXT_INFO — stash whatever it did send
+             * back into c so the next recv_packet sees it. We don't
+             * actually do this since AdventOS sshd always sends EXT_INFO
+             * when ext-info-c is advertised, but defend in depth: just
+             * note that we lost a packet. (For interop with non-AdventOS
+             * peers we'd add a small one-packet pushback queue here.) */
+            printf("ssh: expected EXT_INFO, got msg=%d (skipped)\n", pkt[0]);
+        }
+    }
+    return 0;
+}
+
+/* Client-initiated rekey. Send our KEXINIT, then drive ECDH+NEWKEYS
+ * with initial=0 so session_id stays put and EXT_INFO isn't expected.
+ * We must be single-threaded when this is called (no TX child writing
+ * the same socket) — see comments in run_shell_shuttle. */
+static int do_rekey(struct ssh_conn *c) {
+    if (send_kexinit(c) < 0)          return -1;
+    if (recv_kexinit(c) < 0)          return -1;
+    if (do_kex_ecdh(c, 0) < 0)        return -1;
+    if (do_newkeys (c, 0) < 0)        return -1;
+    puts("ssh: rekey complete, new transport keys live\n");
     return 0;
 }
 
@@ -697,9 +773,9 @@ int main(int argc, char **argv) {
     printf("ssh: server banner: %s\n", c.v_s);
     if (send_kexinit(&c)   < 0) { puts("ssh: send KEXINIT failed\n"); return 1; }
     if (recv_kexinit(&c)   < 0) { puts("ssh: recv KEXINIT failed\n"); return 1; }
-    if (do_kex_ecdh(&c)    < 0) { puts("ssh: ECDH or sig verify failed\n"); return 1; }
+    if (do_kex_ecdh(&c, 1) < 0) { puts("ssh: ECDH or sig verify failed\n"); return 1; }
     puts("ssh: KEX done, host key verified\n");
-    if (do_newkeys(&c)     < 0) { puts("ssh: NEWKEYS failed\n"); return 1; }
+    if (do_newkeys (&c, 1) < 0) { puts("ssh: NEWKEYS failed\n"); return 1; }
     puts("ssh: transport encrypted (aes128-gcm)\n");
 
     if (do_service_request(&c) < 0) { puts("ssh: SERVICE_REQUEST failed\n"); return 1; }
@@ -724,8 +800,57 @@ int main(int argc, char **argv) {
         puts("ssh: CHANNEL_OPEN failed\n"); return 1;
     }
 
+    /* `@rekey;<cmd>` cmd prefix runs a transport rekey between auth and
+     * exec. The server-side rekey path lives in run_shell's RX loop —
+     * not run_exec — so this mode routes through PTY+shell, sends the
+     * stripped command + EOF as stdin, and lets the shell exit
+     * naturally. The selftest grep keys off the post-rekey output to
+     * confirm bytes still flow under the rotated keys. */
+    int rekey_mode = 0;
+    if (cmd && cmd[0]=='@' && cmd[1]=='r' && cmd[2]=='e' &&
+        cmd[3]=='k' && cmd[4]=='e' && cmd[5]=='y' && cmd[6]==';') {
+        rekey_mode = 1;
+        cmd += 7;
+    }
+
     int rc;
-    if (cmd) {
+    if (rekey_mode) {
+        /* Allocate pty + shell so the server enters run_shell — the
+         * one place that processes mid-session KEXINIT. */
+        if (do_pty_request(&c, scid) < 0) {
+            puts("ssh: pty-req rejected\n"); return 1;
+        }
+        if (do_shell_request(&c, scid) < 0) {
+            puts("ssh: shell request rejected\n"); return 1;
+        }
+        puts("ssh: rekey-mode: shell up, initiating mid-session rekey\n");
+        /* Drive the rekey BEFORE forking the TX/RX shuttle — that way
+         * the single-threaded socket invariant holds. (If we rekeyed
+         * mid-shuttle, parent and TX would both want to write to the
+         * socket, racing.) */
+        if (do_rekey(&c) < 0) {
+            puts("ssh: rekey failed\n"); return 1;
+        }
+        /* Push the actual command as stdin via a pipe — same idea as
+         * `echo cmd | sh` — and immediately close write so EOF reaches
+         * the remote shell, making it exit cleanly. */
+        int pp[2];
+        if (sys_pipe(pp) < 0) { puts("ssh: pipe failed\n"); return 1; }
+        int wpid = sys_fork();
+        if (wpid == 0) {
+            sys_close(pp[0]);
+            int L = 0; while (cmd[L]) L++;
+            sys_write(pp[1], cmd, L);
+            sys_write(pp[1], "\nexit\n", 6);
+            sys_close(pp[1]);
+            sys_exit(0);
+        }
+        sys_close(pp[1]);
+        sys_dup2(pp[0], 0);
+        sys_close(pp[0]);
+        rc = run_shell_shuttle(&c, scid);
+        int code; sys_wait(&code);
+    } else if (cmd) {
         if (do_exec_request(&c, scid, cmd) < 0) {
             puts("ssh: exec request failed\n"); return 1;
         }

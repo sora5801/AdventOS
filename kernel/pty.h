@@ -35,6 +35,11 @@
 #define PTY_MAX     4
 #define PTY_BUF_SZ  4096
 
+/* Per-pty line-discipline mode bits (session 56).
+ * Default at allocation: ISIG on, others off — matches what makes
+ * Ctrl-C interrupt a running command in an SSH-pty shell. */
+#define PTY_MODE_ISIG    0x01   /* Ctrl-C/Z/\ -> SIGINT/SIGTSTP/SIGQUIT */
+
 void pty_init(void);
 
 /* Allocate a fresh pty with master_refs=1, slave_refs=1. Returns the
@@ -62,5 +67,14 @@ int  pty_slave_read (int idx, void *buf, int n);
  * side has closed (writes would land in /dev/null). */
 int  pty_master_write(int idx, const void *buf, int n);
 int  pty_slave_write (int idx, const void *buf, int n);
+
+/* Line-discipline support (session 56). Each pty tracks a foreground
+ * process group; ISIG mode (default ON) intercepts Ctrl-C/Z/\ on
+ * master writes and delivers SIGINT/SIGTSTP/SIGQUIT to fg_pgrp
+ * instead of passing the byte through to the slave reader. */
+void pty_set_fg_pgrp(int idx, int pgid);
+int  pty_get_fg_pgrp(int idx);
+void pty_set_mode   (int idx, int mode);
+int  pty_get_mode   (int idx);
 
 #endif

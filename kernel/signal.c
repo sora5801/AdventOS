@@ -103,7 +103,9 @@ int signal_send_pgrp(uint32_t pgid, int sig) {
     if (pgid == 0)              return -1;     /* would hit kernel tasks */
 
     int delivered = 0;
-    for (uint32_t i = 0; i < 16; i++) {
+    /* TASK_MAX was 16 when this was written, then bumped to 32 in
+     * session 50; the literal 16 here was a silent latent bug. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *t = task_at(i);
         if (!t)                        continue;
         if (t->pgid != pgid)           continue;
@@ -151,19 +153,42 @@ void signal_check_and_deliver(struct registers *r) {
         if (act == ACT_IGN)  return;
         if (act == ACT_CONT) return;     /* wakeup already happened in signal_send */
         if (act == ACT_STOP) {
+            extern int  bkl_held(void);
+            extern void bkl_lock(void);
+            extern void bkl_unlock(void);
             extern void schedule(void);
             t->state = TASK_STATE_STOPPED;
+            /* Same BKL handoff as the ACT_TERM path — schedule() may
+             * not return for a long time (SIGCONT-driven wakeup), so
+             * we must not hold the BKL across it. Re-take if we held
+             * it on entry so the syscall tail's matching bkl_unlock
+             * is balanced. */
+            int had_bkl = bkl_held();
+            if (had_bkl) bkl_unlock();
             schedule();                  /* yield until SIGCONT flips us READY */
+            if (had_bkl) bkl_lock();
             /* When CONT'd, control resumes here. Fall through to the
              * iret tail in the calling syscall stub — the task picks
              * up at the same EIP it was about to return to. */
             return;
         }
-        /* ACT_TERM: behave as if the task called sys_exit(128+sig). */
+        /* ACT_TERM: behave as if the task called sys_exit(128+sig).
+         *
+         * BKL handoff: when this fires inside the syscall tail (the
+         * common case), syscall_dispatch is still holding the BKL and
+         * the bkl_unlock() at its end will never run because we don't
+         * return — schedule() context-switches and this task becomes
+         * a zombie. Without releasing here, the lock would leak and
+         * the next task on this CPU would spin forever in bkl_lock.
+         * From IRQ context bkl_held() is false; the check is safe in
+         * both call sites. */
         kprintf("[sig] pid=%u terminated by signal %d\n",
                 (unsigned)t->id, sig);
         extern void task_exit_current(int);
         task_exit_current(128 + sig);
+        extern int  bkl_held(void);
+        extern void bkl_unlock(void);
+        if (bkl_held()) bkl_unlock();
         extern void schedule(void);
         schedule();
         for (;;) __asm__ volatile ("hlt");

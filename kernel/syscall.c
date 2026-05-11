@@ -983,14 +983,31 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_TCSETPGRP: {
-            /* fd in `a` ignored — we have one TTY. */
-            tty_set_fg_pgrp((uint32_t)b);
+            /* For the console TTY (fd 0 / FD_STDIN), set the global
+             * tty fg_pgrp. For a pty slave fd, set THAT pty's per-pty
+             * fg_pgrp — which is what pty_master_write consults for
+             * Ctrl-C/Z/\ signal delivery (session 56). */
+            int fd = (int)a;
+            uint32_t pgid = (uint32_t)b;
+            struct task *t = task_current();
+            if (fd >= 0 && fd < TASK_MAX_FDS &&
+                t->fds[fd].kind == FD_PTY_S) {
+                pty_set_fg_pgrp(t->fds[fd].obj_idx, (int)pgid);
+            } else {
+                tty_set_fg_pgrp(pgid);
+            }
             ret = 0;
             break;
         }
         case SYS_TCGETPGRP: {
-            (void)a;
-            ret = (int32_t)tty_get_fg_pgrp();
+            int fd = (int)a;
+            struct task *t = task_current();
+            if (fd >= 0 && fd < TASK_MAX_FDS &&
+                t->fds[fd].kind == FD_PTY_S) {
+                ret = pty_get_fg_pgrp(t->fds[fd].obj_idx);
+            } else {
+                ret = (int32_t)tty_get_fg_pgrp();
+            }
             break;
         }
         case SYS_FS_FREE_SECTORS: {

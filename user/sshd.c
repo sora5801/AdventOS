@@ -448,6 +448,12 @@ struct ssh_conn {
     uint8_t iv_c2s [12];
     uint8_t key_s2c[16];
     uint8_t iv_s2c [12];
+
+    /* Session 56: ext-info (RFC 8308). Client signals support by
+     * advertising "ext-info-c" in its KEXINIT kex_algorithms list;
+     * server then sends SSH_MSG_EXT_INFO right after its first
+     * NEWKEYS with key/value pairs like server-sig-algs. */
+    int     client_wants_ext_info;
 };
 
 /* ---- packet layer ------------------------------------------------- */
@@ -601,10 +607,43 @@ static int send_kexinit(struct ssh_conn *c) {
     return send_packet(c, c->i_s, c->i_s_len);
 }
 
+/* Look for "ext-info-c" in the comma-separated name-list starting
+ * at `list[0..list_len)`. RFC 8308 §2.1 says a client signals
+ * ext-info support by including this token in any name-list it
+ * sends to the server (in practice it's added to kex_algorithms). */
+static int name_list_contains(const uint8_t *list, int list_len,
+                               const char *needle) {
+    int nlen = 0; while (needle[nlen]) nlen++;
+    for (int i = 0; i + nlen <= list_len; i++) {
+        if (i > 0 && list[i - 1] != ',') continue;
+        int match = 1;
+        for (int j = 0; j < nlen; j++) {
+            if (list[i + j] != (uint8_t)needle[j]) { match = 0; break; }
+        }
+        if (!match) continue;
+        if (i + nlen == list_len || list[i + nlen] == ',') return 1;
+    }
+    return 0;
+}
+
 static int recv_kexinit(struct ssh_conn *c) {
     int n = recv_packet(c, c->i_c, sizeof(c->i_c));
     if (n < 1 || c->i_c[0] != SSH_MSG_KEXINIT) return -1;
     c->i_c_len = n;
+
+    /* Walk past the message-type byte + 16-byte cookie to the FIRST
+     * name-list (kex_algorithms) and scan it for "ext-info-c". This
+     * is the entire ext-info advertisement; the server side just has
+     * to remember to send EXT_INFO once after NEWKEYS. */
+    if (n >= 1 + 16 + 4) {
+        int o = 1 + 16;
+        int ll = ((int)c->i_c[o] << 24) | ((int)c->i_c[o+1] << 16) |
+                 ((int)c->i_c[o+2] << 8) | (int)c->i_c[o+3];
+        o += 4;
+        if (o + ll <= n) {
+            c->client_wants_ext_info = name_list_contains(c->i_c + o, ll, "ext-info-c");
+        }
+    }
     /* We don't verify intersection — if the client picks an algo we
      * can't do, KEX will fail downstream and we'll send DISCONNECT. */
     return 0;
@@ -623,8 +662,16 @@ static void hash_string(struct sha256 *s, const void *data, int n) {
 }
 
 /* Receive SSH_MSG_KEX_ECDH_INIT (Q_C), do the ECDH, build and send
- * SSH_MSG_KEX_ECDH_REPLY with K_S + Q_S + signature(H). */
-static int do_kex_ecdh(struct ssh_conn *c) {
+ * SSH_MSG_KEX_ECDH_REPLY with K_S + Q_S + signature(H).
+ *
+ * `initial` distinguishes the very first KEX from a rekey:
+ *   - first time, session_id is "frozen" to H per RFC 4253 §7.2 — it
+ *     becomes the per-connection identifier that survives all later
+ *     rekeys (e.g. for pubkey signatures that hash session_id in).
+ *   - on subsequent KEX runs, H still becomes the new "exchange hash"
+ *     used as IV/key derivation salt, but session_id stays at its
+ *     original value. */
+static int do_kex_ecdh(struct ssh_conn *c, int initial) {
     uint8_t buf[256];
     int n = recv_packet(c, buf, sizeof(buf));
     if (n < 1 || buf[0] != SSH_MSG_KEX_ECDH_INIT) return -1;
@@ -669,9 +716,11 @@ static int do_kex_ecdh(struct ssh_conn *c) {
     sha256_update(&sh, c->k_mpint, c->k_mpint_len);
     sha256_final(&sh, c->h);
 
-    /* First handshake — session_id is "frozen" to H. We never rekey,
-     * so this is also the final value. */
-    for (int i = 0; i < 32; i++) c->session_id[i] = c->h[i];
+    /* RFC 4253 §7.2: on the first KEX, session_id is frozen to H and
+     * never changes again for the lifetime of the connection. */
+    if (initial) {
+        for (int i = 0; i < 32; i++) c->session_id[i] = c->h[i];
+    }
 
     /* Sign H with the host key. */
     uint8_t sig_raw[64];
@@ -695,9 +744,23 @@ static int do_kex_ecdh(struct ssh_conn *c) {
     return send_packet(c, reply, (int)(rp - reply));
 }
 
-/* ---- NEWKEYS ----------------------------------------------------- */
-
-static int do_newkeys(struct ssh_conn *c) {
+/* ---- NEWKEYS -----------------------------------------------------
+ *
+ * Sub-protocol after KEX completes:
+ *
+ *   server -> client : NEWKEYS               (cleartext)
+ *   client -> server : NEWKEYS               (cleartext)
+ *   from-here-on    : encrypted under new keys
+ *
+ * RFC 4253 §7.3: each side switches to its outbound keys immediately
+ * after sending its own NEWKEYS, and to its inbound keys immediately
+ * after receiving the peer's. We model that with two `enc_*` flags
+ * the (send|recv)_packet wrappers consult.
+ *
+ * For rekey the dance is identical except we DO NOT re-send EXT_INFO
+ * — RFC 8308 §2.3 explicitly says it's "after the server's first
+ * SSH_MSG_NEWKEYS". */
+static int do_newkeys(struct ssh_conn *c, int initial) {
     uint8_t nk = SSH_MSG_NEWKEYS;
     if (send_packet(c, &nk, 1) < 0) return -1;
 
@@ -709,7 +772,8 @@ static int do_newkeys(struct ssh_conn *c) {
     for (int i = 0; i < 16; i++) c->key_s2c[i] = tmp[i];
     c->enc_out = 1;
 
-    /* Wait for client NEWKEYS (still in cleartext mode at this point). */
+    /* Wait for client NEWKEYS (we keep enc_in on its prior setting
+     * until that arrives — initial KEX it's 0, rekey it's 1). */
     uint8_t buf[16];
     int n = recv_packet(c, buf, sizeof(buf));
     if (n < 1 || buf[0] != SSH_MSG_NEWKEYS) return -1;
@@ -720,6 +784,56 @@ static int do_newkeys(struct ssh_conn *c) {
     ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'C', c->session_id);
     for (int i = 0; i < 16; i++) c->key_c2s[i] = tmp[i];
     c->enc_in = 1;
+
+    /* RFC 8308 §2.3: server sends SSH_MSG_EXT_INFO right after its
+     * first NEWKEYS if the client signalled support. Body:
+     *
+     *   byte  SSH_MSG_EXT_INFO (7)
+     *   uint32 nr-extensions
+     *   for each: string name, string value
+     *
+     * We advertise the one extension that matters in practice today:
+     * server-sig-algs = "ssh-ed25519" — tells the client which sig
+     * algorithm we'll accept for publickey userauth, so it picks the
+     * right key out of its agent / files without probing. NOT sent
+     * on rekey runs — the client already has it. */
+    if (initial && c->client_wants_ext_info) {
+        uint8_t pkt[128];
+        uint8_t *p = pkt;
+        ssh_put_u8(&p, SSH_MSG_EXT_INFO);
+        ssh_put_u32(&p, 1);
+        ssh_put_cstring(&p, "server-sig-algs");
+        ssh_put_cstring(&p, "ssh-ed25519");
+        if (send_packet(c, pkt, (int)(p - pkt)) < 0) return -1;
+        puts("sshd: sent EXT_INFO server-sig-algs=ssh-ed25519\n");
+    }
+    return 0;
+}
+
+/* ---- REKEY -------------------------------------------------------
+ *
+ * RFC 4253 §9: either side may initiate a rekey at any time by sending
+ * SSH_MSG_KEXINIT. The peer that didn't initiate must respond with its
+ * own KEXINIT and the exchange proceeds exactly like the initial one,
+ * except session_id is preserved (RFC 4253 §7.2) and the SSH transport
+ * is already encrypted (so KEXINIT packets travel under the CURRENT
+ * keys, and only switch to new keys after both NEWKEYS messages).
+ *
+ * Precondition: the client's KEXINIT payload is already cached in
+ * c->i_c (recv_kexinit just put it there). We send our own KEXINIT
+ * cleanly under the existing transport, then drive ECDH + NEWKEYS
+ * with `initial=0` so session_id stays put and EXT_INFO is skipped.
+ *
+ * The caller is responsible for any side coordination needed (e.g. in
+ * run_shell, killing the TX child before this is called and respawning
+ * it after — otherwise the TX child keeps writing under stale keys
+ * because COW gave it its own copy of `c`). */
+static int do_rekey(struct ssh_conn *c) {
+    puts("sshd: rekey requested by client\n");
+    if (send_kexinit(c)        < 0) return -1;
+    if (do_kex_ecdh (c, 0)     < 0) return -1;
+    if (do_newkeys (c, 0)      < 0) return -1;
+    puts("sshd: rekey complete, new keys live\n");
     return 0;
 }
 
@@ -1107,6 +1221,40 @@ static int run_exec(struct ssh_conn *c, struct channel *ch, const char *cmd) {
  * only reads. No concurrent writes on the pty either: RX writes the
  * master, TX only reads it. Two independent unidirectional shuttles,
  * which is what makes the no-poll/no-select model work cleanly. */
+/* Body of the TX helper. Read shell output from pty master and stream
+ * as CHANNEL_DATA. Factored out so we can fork-spawn it twice: once
+ * at shell start, and again after each rekey (the previous TX's COW
+ * copy of `c` has stale keys; the fresh fork inherits the rekeyed
+ * state from the parent). */
+static void run_shell_tx(struct ssh_conn *c, struct channel *ch, int master) {
+    char buf[256];
+    for (;;) {
+        int n = sys_read(master, buf, sizeof(buf));
+        if (n <= 0) break;
+        if (send_channel_data(c, ch, buf, n) < 0) break;
+    }
+    /* Signal channel teardown to the client — only on natural exit,
+     * NOT when we were killed for a rekey (in that case the parent
+     * has already kicked the master_read out via SIGTERM and we'll
+     * be terminated in the kernel before returning here). */
+    uint8_t pkt[8]; uint8_t *q = pkt;
+    ssh_put_u8(&q, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&q, ch->their_id);
+    send_packet(c, pkt, (int)(q - pkt));
+    q = pkt;
+    ssh_put_u8(&q, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&q, ch->their_id);
+    send_packet(c, pkt, (int)(q - pkt));
+}
+
+/* Fork off a TX helper. Returns the child pid (or -1 on failure). */
+static int spawn_tx(struct ssh_conn *c, struct channel *ch, int master) {
+    int pid = sys_fork();
+    if (pid == 0) {
+        run_shell_tx(c, ch, master);
+        sys_exit(0);
+    }
+    return pid;
+}
+
 static int run_shell(struct ssh_conn *c, struct channel *ch) {
     int pty[2];
     if (sys_openpty(pty) < 0) {
@@ -1126,25 +1274,7 @@ static int run_shell(struct ssh_conn *c, struct channel *ch) {
      * the first syscall — the task is created but doesn't make progress
      * past one sys_write. Forking TX first avoids whatever the shell's
      * exec/destroy-PD path leaves behind. Filed as a follow-up. */
-    int tx_pid = sys_fork();
-    if (tx_pid == 0) {
-        /* Inherit `c` via COW (eager copy actually) — uses c->key_s2c
-         * + c->iv_s2c. */
-        char buf[256];
-        for (;;) {
-            int n = sys_read(master, buf, sizeof(buf));
-            if (n <= 0) break;        /* slave closed = shell exited */
-            if (send_channel_data(c, ch, buf, n) < 0) break;
-        }
-        /* Signal channel teardown to the client. */
-        uint8_t pkt[8]; uint8_t *q = pkt;
-        ssh_put_u8(&q, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&q, ch->their_id);
-        send_packet(c, pkt, (int)(q - pkt));
-        q = pkt;
-        ssh_put_u8(&q, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&q, ch->their_id);
-        send_packet(c, pkt, (int)(q - pkt));
-        sys_exit(0);
-    }
+    int tx_pid = spawn_tx(c, ch, master);
 
     /* Now fork the shell. */
     int shell_pid = sys_fork();
@@ -1163,7 +1293,12 @@ static int run_shell(struct ssh_conn *c, struct channel *ch) {
 
     /* Parent becomes the RX helper. Loops on incoming SSH packets,
      * forwarding CHANNEL_DATA bytes to the pty master (which appear
-     * on shell's stdin). Exit on CHANNEL_CLOSE or read error. */
+     * on shell's stdin). Exit on CHANNEL_CLOSE or read error.
+     *
+     * Also handles mid-session rekey: a SSH_MSG_KEXINIT from the client
+     * triggers the protocol-level KEX dance. Because the TX child has
+     * a COW copy of `c` with stale keys, we must kill+respawn it
+     * around the rekey — see the SSH_MSG_KEXINIT branch below. */
     static uint8_t rxbuf[SSH_MAX_PACKET];
     for (;;) {
         int n = recv_packet(c, rxbuf, sizeof(rxbuf));
@@ -1185,6 +1320,53 @@ static int run_shell(struct ssh_conn *c, struct channel *ch) {
                     w += k;
                 }
             }
+            continue;
+        }
+        if (m == SSH_MSG_KEXINIT) {
+            /* RFC 4253 §9 mid-session rekey.
+             *
+             *   1. Quiesce the TX child — kill it and wait. We send
+             *      SIGTERM; it interrupts the child's pty_master_read
+             *      (kernel sees a pending unblocked signal in the
+             *      yield loop and returns -1 → master_read returns
+             *      -1 → sys_read returns to user → before iret the
+             *      kernel runs the SIGTERM default action and the
+             *      task terminates). No partial packets escape because
+             *      send_packet's write_all completes within one
+             *      sys_write call before the next syscall returns.
+             *   2. Copy the just-received KEXINIT into c->i_c so the
+             *      H-hash recomputation in do_kex_ecdh sees the right
+             *      bytes (it's the same field recv_kexinit would have
+             *      filled).
+             *   3. do_rekey: send our KEXINIT, ECDH, NEWKEYS — all
+             *      under the CURRENT keys until we switch.
+             *   4. spawn_tx again. The new TX inherits the post-rekey
+             *      keys from `c` via fork-time copy. */
+            if (tx_pid > 0) {
+                /* Stop the TX child first — it has a COW copy of `c`
+                 * with the old keys and would otherwise keep sending
+                 * CHANNEL_DATA after we've rotated. SIGTERM tears it
+                 * out of its blocking master_read (kernel side: the
+                 * yield loop now bails on sig_pending). */
+                sys_kill(tx_pid, SIGTERM);
+                int code; sys_wait(&code);
+            }
+            for (int i = 0; i < n && i < (int)sizeof(c->i_c); i++) c->i_c[i] = rxbuf[i];
+            c->i_c_len = n;
+            /* re-scan ext-info advertisement: client may have changed
+             * its mind, though in practice it doesn't matter — we only
+             * send EXT_INFO on the initial NEWKEYS anyway. */
+            if (n >= 1 + 16 + 4) {
+                int o = 1 + 16;
+                int ll = ((int)c->i_c[o] << 24) | ((int)c->i_c[o+1] << 16) |
+                         ((int)c->i_c[o+2] << 8) | (int)c->i_c[o+3];
+                o += 4;
+                if (o + ll <= n) {
+                    c->client_wants_ext_info = name_list_contains(c->i_c + o, ll, "ext-info-c");
+                }
+            }
+            if (do_rekey(c) < 0) break;
+            tx_pid = spawn_tx(c, ch, master);
             continue;
         }
         if (m == SSH_MSG_CHANNEL_WINDOW_ADJUST) continue;
@@ -1218,8 +1400,8 @@ static void serve_one(int conn) {
     printf("sshd: client %s\n", c.v_c);
     if (send_kexinit(&c)      < 0) goto bye;
     if (recv_kexinit(&c)      < 0) goto bye;
-    if (do_kex_ecdh(&c)       < 0) goto bye;
-    if (do_newkeys(&c)        < 0) goto bye;
+    if (do_kex_ecdh(&c, 1)    < 0) goto bye;
+    if (do_newkeys (&c, 1)    < 0) goto bye;
     puts("sshd: KEX complete, transport secured\n");
 
     if (do_service_request(&c) < 0) goto bye;

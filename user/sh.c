@@ -989,6 +989,16 @@ static int run_script(const char *path) {
 
 /* ---- selftest ------------------------------------------------------ */
 
+/* SIGINT handler used by the t38 PTY ISIG test. Lives at file scope
+ * (not nested inside selftest) so its address resolves at link time;
+ * declared extern from selftest() to avoid pulling in <signal.h>-style
+ * forward decls. Exit code 42 distinguishes "got signal" from "read
+ * returned bytes" (which would exit 99). */
+void caught_sigint_t38(int sig) {
+    (void)sig;
+    sys_exit(42);
+}
+
 /* Headless boot can't drive the shell from the keyboard, so kmain
  * passes "selftest" as argv[1]. We run a sequence of demos that
  * exercise fork/exec/wait, pipes, and > redirection — each prints
@@ -2047,6 +2057,154 @@ static void selftest(void) {
             EXPECT(find_hs,    "httpsget reports TLS 1.3 handshake OK (sig_alg matched + CertificateVerify validated)");
             EXPECT(find_200,   "HTTP/1.0 200 came through the encrypted record layer");
             EXPECT(find_aos,   "response body decrypted into expected greeting");
+        }
+
+        #undef EXPECT
+    }
+
+    puts("[t38] PTY signals + SSH ext-info + SSH rekey\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* --- Part 1: PTY ISIG line discipline -----------------------
+         *
+         * The slave-end process group receives SIGINT when Ctrl-C
+         * (0x03) is written to the master, modeled on a real Unix
+         * terminal. Wiring:
+         *
+         *   parent                   child
+         *   ──────                   ─────
+         *   sys_openpty(pty)         inherits both fds via fork
+         *   wait child sync          setpgid(0,0); sigaction(SIGINT);
+         *   tcsetpgrp(slave, cpid)   close master; sync; slave_read()
+         *   master_write(0x03)       (kernel: SIGINT default_action ==
+         *                              ACT_IGN unless handler installed
+         *                              — we set it to caught_sigint_t38)
+         *   sys_wait                 handler runs, sys_exit(42)
+         *
+         * The byte 0x03 is "consumed" — never reaches the slave
+         * reader — and signal_send_pgrp delivers SIGINT to every
+         * task whose pgid matches the pty's fg_pgrp.
+         *
+         * tcsetpgrp MUST be called with the slave fd: the syscall
+         * routes FD_PTY_S to per-pty state and falls back to the
+         * global console TTY otherwise. Pass the master and you'd
+         * accidentally clobber the console's fg_pgrp. */
+        int pty[2];
+        int rc = sys_openpty(pty);
+        EXPECT(rc == 0, "sys_openpty allocates pty for ISIG test");
+
+        int sync_pipe[2];
+        sys_pipe(sync_pipe);
+
+        int child_pid = sys_fork();
+        if (child_pid == 0) {
+            sys_close(pty[0]);
+            sys_close(sync_pipe[0]);
+            setpgid(0, 0);
+            sigaction(SIGINT, caught_sigint_t38);
+            const char go = '!';
+            sys_write(sync_pipe[1], &go, 1);
+            sys_close(sync_pipe[1]);
+            char buf[8];
+            sys_read(pty[1], buf, sizeof(buf));
+            sys_exit(99);
+        }
+        sys_close(sync_pipe[1]);
+
+        char ack;
+        sys_read(sync_pipe[0], &ack, 1);
+        sys_close(sync_pipe[0]);
+
+        /* Set fg pgrp via the slave fd (parent still holds it). */
+        tcsetpgrp(pty[1], child_pid);
+        /* Now we can drop our slave reference — child still has it. */
+        sys_close(pty[1]);
+
+        sys_sleep_ms(20);   /* let the child actually block in read */
+
+        const char ctrlc = 0x03;
+        int wn = sys_write(pty[0], &ctrlc, 1);
+        EXPECT(wn == 1, "master_write(0x03) returns 1 (byte consumed)");
+
+        int code = 0;
+        sys_wait(&code);
+        printf("  child exit code = %d\n", code);
+        EXPECT(code == 42,
+               "child caught SIGINT via fg_pgrp (NOT bytes on slave_read)");
+        sys_close(pty[0]);
+
+        /* --- Part 2: SSH ext-info + rekey loopback ------------------
+         *
+         * Spawn ssh.elf in `@rekey;<cmd>` mode:
+         *   - send ext-info-c in our KEXINIT
+         *   - after initial NEWKEYS, log server's EXT_INFO server-sig-algs
+         *   - request pty+shell so server enters run_shell
+         *   - send a SSH_MSG_KEXINIT under the now-encrypted channel
+         *   - server's run_shell parent: kill TX, do_rekey, respawn TX
+         *   - feed "<cmd>\nexit\n" via stdin pipe, drain remote output
+         *
+         * Grep targets in captured output:
+         *   - "ext: server-sig-algs = ssh-ed25519"  (RFC 8308)
+         *   - "rekey complete, new transport keys"  (session_id reused)
+         *   - "uid=1000"                            (id.elf ran as guest)
+         */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for ssh.elf capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "ssh.elf", "127.0.0.1", "guest",
+                                    "guest", "@rekey;id.elf", 0 };
+                sys_exec("ssh.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+
+            static char captured[4096];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], captured + total,
+                                 (int)sizeof(captured) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(captured) - 1) break;
+            }
+            captured[total] = 0;
+            sys_close(pp[0]);
+            int ec = 0;
+            sys_wait(&ec);
+
+            printf("  captured %d bytes from ssh.elf @rekey  (exit=%d)\n",
+                   total, ec);
+            puts("  ---- ssh.elf @rekey output ----\n");
+            sys_write(1, captured, total);
+            puts("  -------------------------------\n");
+
+            int find_ext = 0, find_sigalgs = 0, find_rekey = 0, find_uid = 0;
+            for (int i = 0; i < total; i++) {
+                if (!find_ext && i + 25 <= total && captured[i] == 's' &&
+                    memcmp(captured + i, "server EXT_INFO with", 20) == 0) find_ext = 1;
+                if (!find_sigalgs && i + 15 <= total && captured[i] == 's' &&
+                    memcmp(captured + i, "server-sig-algs", 15) == 0) find_sigalgs = 1;
+                if (!find_rekey && i + 14 <= total && captured[i] == 'r' &&
+                    memcmp(captured + i, "rekey complete", 14) == 0) find_rekey = 1;
+                if (!find_uid && i + 8 <= total && captured[i] == 'u' &&
+                    memcmp(captured + i, "uid=1000", 8) == 0) find_uid = 1;
+            }
+
+            EXPECT(find_ext,     "client received SSH_MSG_EXT_INFO after initial NEWKEYS");
+            EXPECT(find_sigalgs, "EXT_INFO carried server-sig-algs extension");
+            EXPECT(find_rekey,   "client completed mid-session rekey (session_id preserved)");
+            EXPECT(find_uid,     "id.elf output (uid=1000) flowed through post-rekey keys");
         }
 
         #undef EXPECT

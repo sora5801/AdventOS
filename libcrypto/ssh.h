@@ -29,6 +29,8 @@
 #define SSH_MSG_DEBUG                       4
 #define SSH_MSG_SERVICE_REQUEST             5
 #define SSH_MSG_SERVICE_ACCEPT              6
+#define SSH_MSG_EXT_INFO                    7   /* RFC 8308 */
+#define SSH_MSG_NEWCOMPRESS                 8
 #define SSH_MSG_KEXINIT                    20
 #define SSH_MSG_NEWKEYS                    21
 #define SSH_MSG_KEX_ECDH_INIT              30   /* RFC 5656 / 8731 */
