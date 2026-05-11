@@ -3,8 +3,10 @@
 #include "net.h"
 #include "arp.h"
 #include "pit.h"
+#include "rtc.h"
 #include "string.h"
 #include "kprintf.h"
+#include "syscall.h"     /* struct sys_dhcp_info */
 
 /*
  * BOOTP / DHCP packet format. The fixed-size part is 240 bytes (up
@@ -60,6 +62,11 @@ static struct ip_addr      g_offered_dns;
 static struct ip_addr      g_server_id;
 static uint32_t            g_xid;
 
+/* Session 60 — lease bookkeeping for SYS_DHCP_INFO. Populated when
+ * the server's ACK lands; visible to userspace via dhcp_get_info(). */
+static uint32_t            g_lease_seconds;
+static uint32_t            g_acquired_epoch;
+
 #define DHCP_S_IDLE   0
 #define DHCP_S_OFFER  1
 #define DHCP_S_ACK    2
@@ -91,6 +98,14 @@ static int parse_options(const uint8_t *opts, int len, int *msg_type) {
                 break;
             case DHCP_OPT_SERVER_ID:
                 if (l == 4) for (int k = 0; k < 4; k++) g_server_id.b[k]    = v[k];
+                break;
+            case DHCP_OPT_LEASE_TIME:
+                /* RFC 2132 §9.2: 32-bit unsigned seconds, big-endian. */
+                if (l == 4) {
+                    g_lease_seconds = ((uint32_t)v[0] << 24) |
+                                       ((uint32_t)v[1] << 16) |
+                                       ((uint32_t)v[2] <<  8) | v[3];
+                }
                 break;
         }
         i += l;
@@ -230,13 +245,20 @@ int dhcp_acquire_lease(void) {
     g_subnet_mask = g_offered_mask;
     g_gateway_ip  = g_offered_gw;
     g_dns_server  = g_offered_dns;
+    /* Session 60: stamp the lease-acquired time. parse_options set
+     * g_lease_seconds when DHCP_OPT_LEASE_TIME arrived; if the server
+     * didn't send one (SLIRP doesn't), assume 1 day. */
+    if (g_lease_seconds == 0) g_lease_seconds = 86400;
+    g_acquired_epoch = rtc_epoch_corrected();
 
     kputs("ACK\n");
     kputs("net: ");
     net_print_ip(&g_my_ip);  kputs("/");
     net_print_ip(&g_subnet_mask); kputs("  GW ");
     net_print_ip(&g_gateway_ip);  kputs("  DNS ");
-    net_print_ip(&g_dns_server);  kputc('\n');
+    net_print_ip(&g_dns_server);
+    kprintf("  lease=%us  (T1=%us)\n",
+            (unsigned)g_lease_seconds, (unsigned)g_lease_seconds / 2);
 
     /* Prime the ARP cache for the gateway so the first outbound TCP
      * reply doesn't get dropped because of a cache miss (we have no
@@ -246,4 +268,23 @@ int dhcp_acquire_lease(void) {
     pit_sleep(50);
 
     return 0;
+}
+
+/* Session 60 — flat snapshot of the lease state for userspace
+ * introspection (SYS_DHCP_INFO).  Safe to call any time; if we don't
+ * have a lease yet, `have_lease` is 0 and the rest is zero. */
+void dhcp_get_info(struct sys_dhcp_info *out) {
+    if (!out) return;
+    for (int i = 0; i < 4; i++) {
+        out->ip[i]         = g_my_ip.b[i];
+        out->netmask[i]    = g_subnet_mask.b[i];
+        out->gateway[i]    = g_gateway_ip.b[i];
+        out->dns_server[i] = g_dns_server.b[i];
+    }
+    out->lease_seconds   = g_lease_seconds;
+    out->acquired_epoch  = g_acquired_epoch;
+    out->t1_renew_at     = g_lease_seconds
+                           ? g_acquired_epoch + g_lease_seconds / 2
+                           : 0;
+    out->have_lease      = (g_state == DHCP_S_ACK) ? 1 : 0;
 }

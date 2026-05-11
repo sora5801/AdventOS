@@ -149,9 +149,10 @@ void syscall_dispatch(struct registers *r) {
             break;
         }
         case SYS_TIME: {
-            struct rtc_time t;
-            rtc_read(&t);
-            ret = (int32_t)rtc_to_epoch(&t);
+            /* Session 60: returns the NTP-corrected epoch.  Bare RTC
+             * is the default base; ntp_sync may have nudged it via
+             * rtc_apply_correction. */
+            ret = (int32_t)rtc_epoch_corrected();
             break;
         }
         case SYS_READ_LINE: {
@@ -470,6 +471,48 @@ void syscall_dispatch(struct registers *r) {
              * lifting lives in kernel/ptrace.c. */
             extern int  ptrace_dispatch(int op, uint32_t pid, void *args);
             ret = ptrace_dispatch((int)a, b, (void *)(uintptr_t)c);
+            break;
+        }
+        case SYS_NTP_SYNC: {
+            /* Driver-side of session 60 SNTP. Caller hands us the
+             * server IP as a 4-byte array; we query, parse, and
+             * apply the delta to the kernel clock.  Returns the
+             * server's reported Unix epoch on success, -1 on
+             * timeout / bad reply. */
+            extern int ntp_sync(const struct ip_addr *, uint32_t *);
+            const uint8_t *ip_bytes = (const uint8_t *)(uintptr_t)a;
+            if (!ip_bytes) { ret = -1; break; }
+            struct ip_addr server;
+            for (int i = 0; i < 4; i++) server.b[i] = ip_bytes[i];
+            uint32_t server_epoch = 0;
+            if (ntp_sync(&server, &server_epoch) != 0) { ret = -1; break; }
+            /* Apply correction: delta = server - local current.
+             * SYS_TIME from this point onward returns the disciplined
+             * value. */
+            uint32_t before = rtc_epoch_corrected();
+            int32_t  delta  = (int32_t)((int64_t)server_epoch - (int64_t)before);
+            rtc_apply_correction(delta);
+            ret = (int32_t)server_epoch;
+            break;
+        }
+        case SYS_NTP_TEST_RESPONDER: {
+            extern void ntp_test_responder(int, uint32_t);
+            ntp_test_responder((int)a, (uint32_t)b);
+            ret = 0;
+            break;
+        }
+        case SYS_DNS_CACHE_STATS: {
+            extern void dns_cache_stats(uint32_t out[4]);
+            uint32_t *out = (uint32_t *)(uintptr_t)a;
+            if (out) dns_cache_stats(out);
+            ret = 0;
+            break;
+        }
+        case SYS_DHCP_INFO: {
+            extern void dhcp_get_info(struct sys_dhcp_info *out);
+            struct sys_dhcp_info *out = (struct sys_dhcp_info *)(uintptr_t)a;
+            if (out) dhcp_get_info(out);
+            ret = 0;
             break;
         }
         case SYS_OPENPTY: {

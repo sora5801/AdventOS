@@ -125,6 +125,7 @@ DATA_FILES = [
     ('inittab',   'fs/inittab',   'etc'),
     ('passwd',    'fs/passwd',    'etc'),     # session 47
     ('ssh_keys',  'fs/ssh_keys',  'etc'),     # session 53 — pubkey auth
+    ('resolv.conf', 'fs/etc/resolv.conf', 'etc'),  # session 60 — DNS fail-over list
     # Session 57: debugger sidecars. The interactive debugger
     # (dbg.elf) opens "<prog>.syms" at runtime to resolve symbol
     # names → user VAs. Only ship for programs we want to debug;

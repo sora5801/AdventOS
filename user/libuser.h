@@ -105,6 +105,24 @@ typedef unsigned int   size_t;
 #define SYS_KBD_POLL      73
 #define SYS_MOUSE_INJECT  74
 #define SYS_PTRACE        75
+#define SYS_NTP_SYNC      76
+#define SYS_NTP_TEST_RESPONDER 77
+#define SYS_DNS_CACHE_STATS    78
+#define SYS_DHCP_INFO     79
+
+/* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
+ * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to
+ * keep the user ABI tight), so we use unsigned char for byte fields. */
+struct sys_dhcp_info {
+    unsigned char ip[4];
+    unsigned char netmask[4];
+    unsigned char gateway[4];
+    unsigned char dns_server[4];
+    uint32_t      lease_seconds;
+    uint32_t      acquired_epoch;
+    uint32_t      t1_renew_at;
+    int           have_lease;
+};
 
 /* ptrace op set — mirror of kernel/syscall.h. */
 #define PTRACE_TRACEME    0
@@ -310,6 +328,11 @@ int      sys_fb_takeover (int on);
 int      sys_kbd_poll    (void);
 int      sys_mouse_inject(int x, int y, int btns);
 int      sys_ptrace      (int op, int pid, void *args);
+/* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
+int      sys_ntp_sync    (const unsigned char ip[4]);
+int      sys_ntp_test_responder(int on, unsigned int epoch);
+int      sys_dns_cache_stats(unsigned int out[4]);
+int      sys_dhcp_info   (struct sys_dhcp_info *out);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

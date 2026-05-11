@@ -138,6 +138,32 @@
                                 struct ptrace_args below. Single multiplexed
                                 syscall to avoid burning seven slots. */
 
+/* ---- Session 60: SNTP + DNS cache + DHCP introspection ---- */
+
+#define SYS_NTP_SYNC      76 /* (eax=76, ebx=ip[4]) -> Unix epoch reported
+                                by the NTP server, or -1 on timeout / bad
+                                reply.  Also calls rtc_apply_correction
+                                so subsequent SYS_TIME returns the
+                                disciplined time. */
+
+#define SYS_NTP_TEST_RESPONDER 77 /* (eax=77, ebx=on, ecx=epoch) -> 0.
+                                Test-only — register a kernel-side UDP-123
+                                responder that replies with `epoch` as the
+                                Transmit Timestamp.  Lets [t43] do a pure-
+                                loopback NTP round-trip without needing a
+                                public-internet server. on=0 unregisters. */
+
+#define SYS_DNS_CACHE_STATS 78 /* (eax=78, ebx=uint32 out[4]) -> 0.
+                                Fills out[]: lookups, hits, misses,
+                                live entries.  Used by [t43] to verify
+                                the TTL-cache from session 60. */
+
+#define SYS_DHCP_INFO     79 /* (eax=79, ebx=struct sys_dhcp_info *) -> 0.
+                                Snapshot of the DHCP lease for
+                                introspection: assigned IP, gateway,
+                                netmask, dns server, lease length, time
+                                acquired. */
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;
@@ -224,6 +250,18 @@ struct ptrace_args {
     uint32_t       size;       /* PEEK/POKE byte count */
     void          *buf;        /* PEEK/POKE caller buffer (in tracer's VA) */
     struct ptrace_regs *regs;  /* GETREGS / SETREGS */
+};
+
+/* SYS_DHCP_INFO output (session 60). */
+struct sys_dhcp_info {
+    uint8_t  ip[4];            /* our assigned IP */
+    uint8_t  netmask[4];
+    uint8_t  gateway[4];
+    uint8_t  dns_server[4];
+    uint32_t lease_seconds;    /* lease length the server granted */
+    uint32_t acquired_epoch;   /* sys_time() at DHCP ACK */
+    uint32_t t1_renew_at;      /* sys_time() value at which we'll renew (= acquired + lease/2) */
+    int      have_lease;       /* 1 if everything above is meaningful */
 };
 
 void syscall_dispatch(struct registers *r);

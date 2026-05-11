@@ -274,6 +274,10 @@ void kmain(uint32_t boot_drive) {
     }
 
     dns_init();
+    /* Session 60 — if /etc/resolv.conf is present, pull in any extra
+     * nameservers it lists as fail-overs behind the DHCP-provided
+     * primary. Filesystem is already mounted by this point. */
+    dns_load_resolv_conf();
 
     /* Sanity beep: short delay, prove the timer is ticking */
     pit_sleep(50);

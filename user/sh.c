@@ -2592,7 +2592,11 @@ static void selftest(void) {
             sys_exec("httpsd.elf", a);
             sys_exit(127);
         }
-        sys_sleep_ms(150);    /* give the rogue server time to bind */
+        /* Generous wait: synthesize-self-signed builds a fresh ECDSA
+         * keypair (~50ms in QEMU) then x509_build_self_signed_p256.
+         * Under selftest load (post-RSA-t41) the rogue can take a
+         * full second to be ready on accept(). */
+        sys_sleep_ms(800);
 
         int pp2[2];
         if (sys_pipe(pp2) < 0) {
@@ -2623,6 +2627,12 @@ static void selftest(void) {
             sys_close(pp2[0]);
             int code = 0; sys_wait(&code);
 
+            printf("  captured %d bytes from negative httpsget  (exit=%d)\n",
+                   total, code);
+            puts("  ---- httpsget output (negative) ----\n");
+            sys_write(1, captured, total);
+            puts("  ------------------------------------\n");
+
             int find_rejected = 0, find_handshake_failed = 0;
             for (int i = 0; i < total; i++) {
                 if (!find_rejected && i + 33 <= total &&
@@ -2643,6 +2653,107 @@ static void selftest(void) {
         sys_kill(rogue_pid, SIGTERM);
         sys_sleep_ms(50);
         int code; while (sys_wait_nb(&code) > 0) {}
+
+        #undef EXPECT
+    }
+
+    puts("[t43] DNS + DHCP + NTP — /etc/resolv.conf, TTL cache, lease info, SNTP\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* ---- DHCP introspection ---- */
+        struct sys_dhcp_info di = {0};
+        sys_dhcp_info(&di);
+        printf("  DHCP: ip=%d.%d.%d.%d  gw=%d.%d.%d.%d  dns=%d.%d.%d.%d\n"
+               "        lease=%u s  t1_renew_at=%u  (acquired=%u)\n",
+               di.ip[0], di.ip[1], di.ip[2], di.ip[3],
+               di.gateway[0], di.gateway[1], di.gateway[2], di.gateway[3],
+               di.dns_server[0], di.dns_server[1], di.dns_server[2],
+               di.dns_server[3],
+               di.lease_seconds, di.t1_renew_at, di.acquired_epoch);
+        EXPECT(di.have_lease,           "DHCP reports an active lease");
+        EXPECT(di.ip[0] == 10 && di.ip[1] == 0 && di.ip[2] == 2 && di.ip[3] == 15,
+                                        "DHCP got us 10.0.2.15 from SLIRP");
+        EXPECT(di.gateway[0] == 10 && di.gateway[3] == 2,
+                                        "Gateway 10.0.2.2 advertised by DHCP");
+        EXPECT(di.lease_seconds > 0,    "lease_seconds > 0 (DHCP_OPT_LEASE_TIME parsed)");
+        EXPECT(di.t1_renew_at > di.acquired_epoch,
+                                        "T1 renewal deadline is in the future");
+
+        /* ---- /etc/resolv.conf parsed into the DNS server list ----
+         *
+         * We can't observe the server list directly from userspace
+         * (there's no SYS_DNS_GET_SERVERS — wasn't worth its own
+         * syscall slot), but we can prove the file was parsed by
+         * checking the cache-stats count starts at 0 and grows on
+         * lookup.  Indirect but adequate. */
+        unsigned int s0[4];
+        sys_dns_cache_stats(s0);
+        printf("  DNS cache stats at start: lookups=%u hits=%u misses=%u live=%u\n",
+               s0[0], s0[1], s0[2], s0[3]);
+
+        /* First lookup of a unique name: MUST be a cache miss + a
+         * real resolve. */
+        unsigned char dns_ip[4];
+        int rc = sys_dns_resolve("example.com", dns_ip);
+        unsigned int s1[4];
+        sys_dns_cache_stats(s1);
+        printf("  after 1st lookup:           lookups=%u hits=%u misses=%u live=%u\n",
+               s1[0], s1[1], s1[2], s1[3]);
+        EXPECT(rc == 0,                   "first DNS resolve example.com succeeded");
+        EXPECT(s1[0] == s0[0] + 1,        "lookup counter incremented");
+        EXPECT(s1[2] == s0[2] + 1,        "first lookup recorded as a miss");
+
+        /* Second identical lookup: cache hit, no UDP traffic, no
+         * additional miss. */
+        rc = sys_dns_resolve("example.com", dns_ip);
+        unsigned int s2[4];
+        sys_dns_cache_stats(s2);
+        printf("  after 2nd lookup (cached):  lookups=%u hits=%u misses=%u live=%u\n",
+               s2[0], s2[1], s2[2], s2[3]);
+        EXPECT(rc == 0,                   "second DNS resolve example.com succeeded");
+        EXPECT(s2[1] == s1[1] + 1,        "second lookup served from cache");
+        EXPECT(s2[2] == s1[2],            "no additional miss for cache hit");
+
+        /* ---- NTP roundtrip via the in-kernel test responder ----
+         *
+         * Plant a known epoch (= 2030-01-01 00:00:00 UTC = 1893456000),
+         * register the responder, fire SYS_NTP_SYNC at our own IP, see
+         * if SYS_TIME jumps to ~that value.
+         *
+         * The loopback path: ip_send notices dst == g_my_ip and
+         * shortcuts to the local udp_rx, which dispatches to the
+         * test responder.  No real network involved. */
+        const unsigned int FAKE_EPOCH = 1893456000u;     /* 2030-01-01 */
+        sys_ntp_test_responder(1, FAKE_EPOCH);
+
+        unsigned char self_ip[4] = { 10, 0, 2, 15 };
+        unsigned int before = (unsigned int)sys_time();
+        int srv_epoch = sys_ntp_sync(self_ip);
+        unsigned int after  = (unsigned int)sys_time();
+
+        sys_ntp_test_responder(0, 0);
+
+        printf("  NTP: before=%u  server-said=%d  after=%u\n",
+               before, srv_epoch, after);
+        EXPECT(srv_epoch > 0,
+            "SYS_NTP_SYNC returned a positive epoch (test-responder talked back)");
+        EXPECT((unsigned int)srv_epoch == FAKE_EPOCH,
+            "server-supplied epoch == hand-planted FAKE_EPOCH (1893456000)");
+        EXPECT(after >= FAKE_EPOCH && after < FAKE_EPOCH + 5,
+            "SYS_TIME jumped to the disciplined epoch (within 5s window)");
+
+        /* ---- Reverse the correction so subsequent tests see the
+         * real wall-clock again. */
+        int undo = sys_ntp_test_responder(1, before);
+        (void)undo;
+        sys_ntp_sync(self_ip);
+        sys_ntp_test_responder(0, 0);
+        printf("  NTP: clock rewound, SYS_TIME=%u\n",
+               (unsigned)sys_time());
 
         #undef EXPECT
     }

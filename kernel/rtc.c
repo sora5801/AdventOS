@@ -108,3 +108,22 @@ uint32_t rtc_to_epoch(const struct rtc_time *t) {
                          + (uint32_t)t->min  * 60u
                          + (uint32_t)t->sec;
 }
+
+/* Session 60: an NTP-driven correction additively applied to every
+ * SYS_TIME / rtc_epoch_corrected call.  Signed so we can step the
+ * clock backwards (the RTC can be ahead of UTC, e.g. set to local time).
+ * Persists for the life of the boot — we don't push it back into the
+ * CMOS chip. */
+static int32_t g_clock_correction;
+
+uint32_t rtc_epoch_corrected(void) {
+    struct rtc_time t;
+    rtc_read(&t);
+    uint32_t base = rtc_to_epoch(&t);
+    /* int32_t cast then add — handles negative corrections via wrap. */
+    return base + (uint32_t)g_clock_correction;
+}
+
+void rtc_apply_correction(int32_t delta_seconds) {
+    g_clock_correction += delta_seconds;
+}

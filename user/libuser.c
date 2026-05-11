@@ -404,6 +404,42 @@ int sys_ptrace(int op, int pid, void *args) {
     return ret;
 }
 
+int sys_ntp_sync(const unsigned char ip[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_NTP_SYNC), "b"(ip)
+                      : "memory");
+    return ret;
+}
+
+int sys_ntp_test_responder(int on, unsigned int epoch) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_NTP_TEST_RESPONDER), "b"(on), "c"(epoch)
+                      : "memory");
+    return ret;
+}
+
+int sys_dns_cache_stats(unsigned int out[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_DNS_CACHE_STATS), "b"(out)
+                      : "memory");
+    return ret;
+}
+
+int sys_dhcp_info(struct sys_dhcp_info *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_DHCP_INFO), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"
