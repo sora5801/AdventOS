@@ -1791,25 +1791,21 @@ static void selftest(void) {
         #undef EXPECT
     }
 
-    puts("[t33] sshd: TLS-backed remote shell loopback (login, exec, exit)\n");
+    puts("[t33] sshd: RFC 4253 SSH-2 loopback (KEX + ed25519 sig + AES-GCM + exec)\n");
     {
         #define EXPECT(cond, msg) do { \
             if (cond) printf("  PASS  %s\n", msg); \
             else      printf("  FAIL  %s\n", msg); \
         } while (0)
 
-        /* Inittab started sshd in parallel with us; by t33 it has had
-         * plenty of time to bind + listen. Drive a full session: log in
-         * as `guest`, run `id`, exit. ssh.elf's stdout is piped back
-         * so we can assert on the substrings we expect to find.
+        /* Session 51 replaces the session-50 TLS-shuttle protocol with
+         * a real RFC 4253 SSH-2 handshake. Drive a one-shot exec:
+         *   ssh.elf 127.0.0.1 guest guest id.elf
+         * The remote sh.elf -c "id.elf" runs id.elf, which prints
+         * uid=1000 (guest's uid). The signature over the exchange
+         * hash is verified inside ssh.elf via ed25519_verify.
          *
-         * tty_inject is the same input-feeding mechanism t30 uses for
-         * login.elf. The kernel echo of the typed bytes goes to the
-         * screen, not into the captured pipe, so what we read back is
-         * just what ssh.elf wrote: server prompts + command output. */
-        const char *script = "guest\nguest\nid.elf\nexit\n";
-        tty_inject(script, (int)strlen(script));
-
+         * No tty injection — credentials and command flow via argv. */
         int pp[2];
         if (sys_pipe(pp) < 0) {
             puts("  FAIL  pipe() for ssh capture\n");
@@ -1820,15 +1816,12 @@ static void selftest(void) {
                 sys_dup2(pp[1], 2);
                 sys_close(pp[0]);
                 sys_close(pp[1]);
-                const char *a[] = { "ssh.elf", "127.0.0.1", 0 };
+                const char *a[] = { "ssh.elf", "127.0.0.1", "guest", "guest", "id.elf", 0 };
                 sys_exec("ssh.elf", a);
                 sys_exit(127);
             }
             sys_close(pp[1]);
 
-            /* Drain the client's output into one big buffer. The whole
-             * session — handshake banners through the post-exit close
-             * notice — is well under 4 KiB. */
             static char captured[4096];
             int total = 0;
             for (;;) {
@@ -1844,38 +1837,38 @@ static void selftest(void) {
             int code = 0;
             sys_wait(&code);
 
-            printf("  captured %d bytes from ssh.elf\n", total);
-            /* Hide nothing — the serial log is gold for diagnosing
-             * future regressions. */
+            printf("  captured %d bytes from ssh.elf  (child exit code=%d)\n",
+                   total, code);
             puts("  ---- ssh.elf output ----\n");
             sys_write(1, captured, total);
             puts("  ------------------------\n");
 
-            /* Substring checks. memmem isn't available in libuser, so
-             * we just do a manual scan with per-pattern bounds checks
-             * (so a match at the very end of the buffer — typical for
-             * "bye\n" — isn't missed by a fixed loop bound). */
-            int find_welcome = 0, find_login = 0, find_uid = 0,
-                find_bye = 0, find_handshake = 0;
+            int find_kex_done = 0, find_authed = 0, find_aes_gcm = 0,
+                find_uid = 0, find_exit0 = 0, find_banner = 0;
             for (int i = 0; i < total; i++) {
-                if (!find_handshake && i + 10 <= total && captured[i] == 'T' &&
-                    memcmp(captured + i, "TLS 1.3 up", 10) == 0) find_handshake = 1;
-                if (!find_login && i + 6 <= total && captured[i] == 'l' &&
-                    memcmp(captured + i, "login:", 6) == 0) find_login = 1;
-                if (!find_welcome && i + 19 <= total && captured[i] == 'W' &&
-                    memcmp(captured + i, "Welcome to AdventOS", 19) == 0) find_welcome = 1;
+                /* Bound for each memcmp: i + len <= total — match
+                 * window is captured[i..i+len-1] so i can go up to
+                 * total-len. */
+                if (!find_banner && i + 7 <= total && captured[i] == 'S' &&
+                    memcmp(captured + i, "SSH-2.0", 7) == 0) find_banner = 1;
+                if (!find_kex_done && i + 22 <= total && captured[i] == 'K' &&
+                    memcmp(captured + i, "KEX done, host key ver", 22) == 0) find_kex_done = 1;
+                if (!find_aes_gcm && i + 19 <= total && captured[i] == 't' &&
+                    memcmp(captured + i, "transport encrypted", 19) == 0) find_aes_gcm = 1;
+                if (!find_authed && i + 13 <= total && captured[i] == 'a' &&
+                    memcmp(captured + i, "authenticated", 13) == 0) find_authed = 1;
                 if (!find_uid && i + 8 <= total && captured[i] == 'u' &&
                     memcmp(captured + i, "uid=1000", 8) == 0) find_uid = 1;
-                if (!find_bye && i + 3 <= total && captured[i] == 'b' &&
-                    memcmp(captured + i, "bye", 3) == 0) find_bye = 1;
+                if (!find_exit0 && i + 15 <= total && captured[i] == 'e' &&
+                    memcmp(captured + i, "exit-status = 0", 15) == 0) find_exit0 = 1;
             }
 
-            EXPECT(code == 0,        "ssh.elf exited 0");
-            EXPECT(find_handshake,   "client logged TLS 1.3 handshake OK");
-            EXPECT(find_login,       "server sent 'login:' prompt over TLS");
-            EXPECT(find_welcome,     "server sent welcome banner after auth");
-            EXPECT(find_uid,         "remote `id` printed uid=1000 (guest's uid)");
-            EXPECT(find_bye,         "server acknowledged exit with 'bye'");
+            EXPECT(find_banner,   "client received SSH-2.0-* server banner");
+            EXPECT(find_kex_done, "host-key signature verified (ed25519 over H)");
+            EXPECT(find_aes_gcm,  "transport switched to AES-128-GCM after NEWKEYS");
+            EXPECT(find_authed,   "password auth succeeded (USERAUTH_SUCCESS)");
+            EXPECT(find_uid,      "remote `id.elf` printed uid=1000 over CHANNEL_DATA");
+            EXPECT(find_exit0,    "server sent exit-status = 0 in CHANNEL_REQUEST");
         }
 
         #undef EXPECT

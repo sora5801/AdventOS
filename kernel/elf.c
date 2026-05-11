@@ -126,21 +126,22 @@ int elf_load(int fs_idx, struct elf_load_result *out) {
         return -107;
     }
 
-    /* 4. Allocate a multi-page user stack. Bumped from 1 page to 4
-     * pages (16 KiB) in session 36 — TLS handshake code allocates
-     * 4 KiB record buffers plus call-chain frames; a single-page
-     * stack overflows into unmapped memory at 0x400FF000 just below
-     * USER_STACK_VA. The previous "1 page is enough for shells and
-     * coreutils" assumption stops holding once we add crypto. The
-     * stack is allocated as four contiguous pages (NOT contiguous
-     * physical pages — they're separately pmm_alloc'd, but VA is
-     * contiguous from USER_STACK_VA - 3*PAGE_SIZE up to USER_STACK_VA
-     * + PAGE_SIZE). */
-    #define USER_STACK_PAGES  4
+    /* 4. Allocate a multi-page user stack. Session 36 bumped this from
+     * 1 page to 4 pages (16 KiB) to accommodate TLS record buffers +
+     * the call-chain frames the handshake builds.
+     *
+     * Session 51 bumps 4 → 16 pages (64 KiB): the SSH-2 server's
+     * do_kex_ecdh stack frame is ~1.6 KiB (multiple SHA-256/Ed25519
+     * scratch buffers), and ed25519_sign itself eats another ~6 KiB
+     * for its expanded-secret-key + SHA-512 transcript work. Combined
+     * with banner / KEXINIT / userauth / channel frames already on the
+     * stack we were faulting at ESP just under USER_STACK_VA-3*PAGE_SIZE.
+     * 64 KiB gives all the protocol code comfortable headroom. */
+    #define USER_STACK_PAGES  16
     #define USER_STACK_BYTES  (USER_STACK_PAGES * PAGE_SIZE)
-    /* Stack lives in [USER_STACK_VA - 3*PAGE_SIZE, USER_STACK_VA + PAGE_SIZE);
-     * user_esp starts at the high end (USER_STACK_VA + PAGE_SIZE) and
-     * grows down. */
+    /* Stack lives in [USER_STACK_VA + PAGE_SIZE - USER_STACK_BYTES,
+     *                  USER_STACK_VA + PAGE_SIZE);
+     * user_esp starts at the high end and grows down. */
     uint32_t stack_va_lo = USER_STACK_VA + PAGE_SIZE - USER_STACK_BYTES;
     void *first_stack_page = 0;
     for (int i = 0; i < USER_STACK_PAGES; i++) {

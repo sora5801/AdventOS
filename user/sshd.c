@@ -1,69 +1,61 @@
 /*
- * sshd — TLS-over-TCP remote shell server for AdventOS.
+ * sshd — RFC 4253 SSH-2 server for AdventOS.
  *
- * "SSH" in the AdventOS sense: not RFC-4253 SSH-2, but a remote-shell
- * service built from the same three primitives a real sshd uses —
- * (a) a transport-level cipher (TLS 1.3 with cert auth in our case,
- * vs. SSH-2's own KEX+AEAD); (b) user authentication against
- * /etc/passwd with salt+SHA-256 hashes; (c) per-connection shells
- * with the user's real uid/gid. Each command runs through `sh.elf
- * -c` so users get the full session-49 shell — pipelines, env vars,
- * builtins, the works — only with stdin/stdout piped from the TLS
- * connection instead of the local TTY.
+ * Wire-level compatible with OpenSSH clients. The protocol stack:
  *
- *   client (ssh.elf)                       server (sshd)
- *   ────────────────                       ─────────────
- *   socket+connect ──TCP──────────────►    accept
- *                                          fork per connection
- *   tls_client_handshake_cert ──TLS───►    tls_server_handshake_cert
+ *   transport (RFC 4253)
+ *     V_S = "SSH-2.0-AdventOS_1.0\r\n"
+ *     KEXINIT exchange — we advertise exactly one algorithm per slot
+ *     curve25519-sha256 ECDH key exchange (RFC 8731)
+ *     ssh-ed25519 host-key signature (RFC 8709)
+ *     aes128-gcm@openssh.com AEAD record layer (RFC 5647 framing)
  *
- *                  user/pass over TLS
- *                  ◄────────────────────► verify against /etc/passwd
- *                                         setuid/setgid
+ *   userauth (RFC 4252)
+ *     "none" → USERAUTH_FAILURE with "password" in the methods list
+ *     "password" → check against /etc/passwd (salt + SHA-256)
  *
- *                  one command at a time
- *                  ◄────────────────────► fork+exec("sh.elf","-c",line)
- *                                         pipe-shuttle stdout back
+ *   connection (RFC 4254)
+ *     CHANNEL_OPEN "session"  → CHANNEL_OPEN_CONFIRMATION
+ *     CHANNEL_REQUEST "pty-req" → CHANNEL_FAILURE (no pty pairs yet)
+ *     CHANNEL_REQUEST "env"     → CHANNEL_SUCCESS (ignored)
+ *     CHANNEL_REQUEST "exec"    → fork+exec sh.elf -c <cmd>, pipe back
+ *     CHANNEL_REQUEST "shell"   → CHANNEL_SUCCESS, but only sends a
+ *                                 hint and closes — see deep dive
  *
- * Wire framing inside the TLS stream: prompts and outputs are plain
- * bytes; the server signals "your turn to type" by sending a single
- * 0x01 byte (an ASCII SOH — guaranteed not to appear in normal
- * stdout). The client reads until it sees 0x01, then waits for the
- * user's line. This is the moral equivalent of SSH-2's window
- * advertisement + channel-eof, only collapsed to one byte because
- * we don't multiplex.
+ * Each accepted connection forks; the child does the whole handshake +
+ * exec, then exits. Host keypair is deterministic (seeded from a fixed
+ * 32-byte constant) so the public-key fingerprint is stable across
+ * reboots — handy for OpenSSH's known_hosts.
  *
- * One process per connection by way of fork(); state isolation is
- * the kernel's address-space isolation, not threads. `cd` is handled
- * inline (no fork) so cwd persists; everything else runs sh.elf -c.
+ * Test from the host (one command):
+ *
+ *   sshpass -p guest \
+ *     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+ *         -o KexAlgorithms=curve25519-sha256 \
+ *         -o HostKeyAlgorithms=ssh-ed25519 \
+ *         -o Ciphers=aes128-gcm@openssh.com \
+ *         -p 2222 guest@127.0.0.1 id
  */
 #include "libuser.h"
 #include "../libcrypto/crypto.h"
-#include "../libcrypto/tls.h"
-#include "../libcrypto/x509.h"
+#include "../libcrypto/ssh.h"
 
 #define SSH_PORT     2222
-#define LINE_MAX     256
 #define USERS_MAX    16
 
-/* Deterministic seed for the server's ECDSA-P256 keypair. Different
- * from httpsd's seed so the two services have distinct cert
- * fingerprints — makes wire captures easier to read and prevents
- * a curl --pinnedpubkey collision between the two demos. */
-static const unsigned char SSHD_SEED[32] = {
-    0x55, 0x41, 0x8E, 0xC2, 0x97, 0x33, 0xB2, 0x09,
-    0x7B, 0xC1, 0xF5, 0x80, 0x4D, 0x6E, 0x21, 0xA8,
-    0x18, 0xDD, 0x44, 0xE7, 0x52, 0x95, 0x06, 0x6B,
-    0xFA, 0x21, 0x90, 0xC4, 0xAB, 0x77, 0x33, 0x18,
+/* ---- host keypair (seeded, persistent across reboots) ------------- */
+
+static const uint8_t HOSTKEY_SEED[32] = {
+    0x9C, 0x4D, 0x77, 0x18, 0xB2, 0xEE, 0x6A, 0x05,
+    0xFF, 0x91, 0x33, 0xC8, 0xDD, 0x44, 0xA0, 0x1B,
+    0x71, 0x5C, 0x9E, 0x82, 0x37, 0x60, 0xAB, 0xC4,
+    0x12, 0x88, 0xE9, 0x55, 0x4F, 0x06, 0xD3, 0x1E,
 };
 
-/* Filled at startup by main(); inherited COW by every forked child. */
-static unsigned char g_pub[64];
-static unsigned char g_priv[32];
-static unsigned char g_cert[X509_MAX_CERT];
-static int           g_cert_len;
+static uint8_t g_host_pk[32];
+static uint8_t g_host_sk[64];
 
-/* ---- /etc/passwd parsing (copied from login.c) -------------------- */
+/* ---- /etc/passwd (same parser as login.c / session-47 sshd) ------- */
 
 struct user_entry {
     char name[32];
@@ -92,7 +84,7 @@ static int parse_int(const char *s, int n) {
     return v;
 }
 
-static void hex_lower(const unsigned char *in, int n, char *out) {
+static void hex_lower(const uint8_t *in, int n, char *out) {
     static const char *d = "0123456789abcdef";
     for (int i = 0; i < n; i++) {
         out[2*i  ] = d[in[i] >> 4];
@@ -134,10 +126,6 @@ static int parse_passwd_line(const char *line, int len) {
     u->hash[hl] = 0;
     u->uid = parse_int(line + starts[2], ends[2] - starts[2]);
     u->gid = parse_int(line + starts[3], ends[3] - starts[3]);
-    int hml = ends[4] - starts[4];
-    if (hml >= (int)sizeof(u->home)) hml = (int)sizeof(u->home) - 1;
-    for (int i = 0; i < hml; i++) u->home[i] = line[starts[4] + i];
-    u->home[hml] = 0;
     int shl = ends[5] - starts[5];
     if (shl >= (int)sizeof(u->shell)) shl = (int)sizeof(u->shell) - 1;
     for (int i = 0; i < shl; i++) u->shell[i] = line[starts[5] + i];
@@ -187,237 +175,668 @@ static int verify_password(struct user_entry *u, const char *password) {
     return my_strcmp(got, u->hash) == 0;
 }
 
-/* ---- TLS line I/O -------------------------------------------------- */
+/* ---- TCP I/O helpers --------------------------------------------- */
 
-/* Userspace receive buffer.
- *
- * tls_recv() decrypts one whole TLS record and copies AT MOST max_n
- * plaintext bytes into the caller's buffer — the rest is DISCARDED
- * (libcrypto/tls.c:1050). Reading a line byte-by-byte directly from
- * tls_recv would therefore lose 5 of 6 bytes from a "guest\n" record
- * and hang on the next call waiting for a record that never comes.
- *
- * Fix: read one record's worth into a static buffer, hand out from
- * there. Each forked sshd child has its own copy of g_rx (forked
- * via COW), so there's no inter-connection bleed. */
-static struct rx_state {
-    char buf[TLS_MAX_FRAGMENT];
-    int  pos;
-    int  end;
-} g_rx;
-
-static int tls_read_byte(struct tls_conn *t, char *out) {
-    if (g_rx.pos >= g_rx.end) {
-        int n = tls_recv(t, g_rx.buf, (int)sizeof(g_rx.buf));
-        if (n <= 0) return -1;
-        g_rx.end = n;
-        g_rx.pos = 0;
+static int read_exact(int fd, void *buf, int n) {
+    int got = 0;
+    while (got < n) {
+        int r = sys_read(fd, (char *)buf + got, n - got);
+        if (r <= 0) return -1;
+        got += r;
     }
-    *out = g_rx.buf[g_rx.pos++];
-    return 1;
+    return 0;
 }
 
-/* Read a logical line (terminated by '\n', or EOF) from the TLS
- * connection. Strips trailing CR if present so Windows clients work.
- * Returns the line length (>= 0), or -1 if the connection dropped. */
-static int tls_read_line(struct tls_conn *t, char *out, int cap) {
-    int len = 0;
+static int write_all(int fd, const void *buf, int n) {
+    int put = 0;
+    while (put < n) {
+        int w = sys_write(fd, (const char *)buf + put, n - put);
+        if (w <= 0) return -1;
+        put += w;
+    }
+    return 0;
+}
+
+/* ---- SSH connection state ---------------------------------------- */
+
+struct ssh_conn {
+    int     fd;
+
+    /* Banner strings (without trailing \r\n). */
+    char    v_c[256]; int v_c_len;
+    char    v_s[64];  int v_s_len;
+
+    /* KEXINIT payloads (starting from the SSH_MSG_KEXINIT byte). */
+    uint8_t i_c[4096]; int i_c_len;
+    uint8_t i_s[1024]; int i_s_len;
+
+    /* KEX state. */
+    uint8_t q_c[32];           /* client ephemeral pub */
+    uint8_t q_s[32];           /* server ephemeral pub */
+    uint8_t d_s[32];           /* server ephemeral priv */
+    uint8_t k_mpint[40];       /* shared secret encoded as mpint */
+    int     k_mpint_len;
+    uint8_t h[32];             /* exchange hash */
+    uint8_t session_id[32];    /* = h from first handshake */
+
+    /* AEAD keys + IVs after NEWKEYS. */
+    int     enc_in, enc_out;
+    uint8_t key_c2s[16];
+    uint8_t iv_c2s [12];
+    uint8_t key_s2c[16];
+    uint8_t iv_s2c [12];
+};
+
+/* ---- packet layer ------------------------------------------------- */
+
+/* Pre-NEWKEYS framing (no MAC, padding to 8-byte boundary).
+ *
+ * RFC 4253 §6: the TOTAL on-wire bytes (4-byte length field + pad_len
+ * byte + payload + padding) must be a multiple of max(cipher_block, 8).
+ * For the "none" cipher block_size is 8, so we pad (4+1+N+P) to a
+ * multiple of 8, with at least 4 bytes of padding. */
+static int send_packet_clear(struct ssh_conn *c,
+                             const uint8_t *payload, int payload_len) {
+    int min_pad = 4, block = 8;
+    int pad_n = block - ((4 + 1 + payload_len) % block);
+    if (pad_n < min_pad) pad_n += block;
+    int enc_n = 1 + payload_len + pad_n;
+    int total = 4 + enc_n;
+    static uint8_t out[8192];
+    if (total > (int)sizeof(out)) return -1;
+    out[0] = (uint8_t)(enc_n >> 24);
+    out[1] = (uint8_t)(enc_n >> 16);
+    out[2] = (uint8_t)(enc_n >>  8);
+    out[3] = (uint8_t)(enc_n);
+    out[4] = (uint8_t)pad_n;
+    for (int i = 0; i < payload_len; i++) out[5 + i] = payload[i];
+    rand_bytes(out + 5 + payload_len, pad_n);
+    return write_all(c->fd, out, total);
+}
+
+static int recv_packet_clear(struct ssh_conn *c,
+                             uint8_t *payload, int max_payload) {
+    uint8_t hdr[5];
+    if (read_exact(c->fd, hdr, 5) < 0) return -1;
+    uint32_t enc_n = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+                     ((uint32_t)hdr[2] <<  8) | (uint32_t)hdr[3];
+    int pad_n = hdr[4];
+    if (enc_n < 8 || enc_n > 8000) return -1;
+    int body = (int)enc_n - 1;       /* already consumed pad_len byte */
+    static uint8_t buf[8192];
+    if (read_exact(c->fd, buf, body) < 0) return -1;
+    int payload_len = body - pad_n;
+    if (payload_len < 0 || payload_len > max_payload) return -1;
+    for (int i = 0; i < payload_len; i++) payload[i] = buf[i];
+    return payload_len;
+}
+
+/* AEAD framing post-NEWKEYS. */
+static int send_packet_aead(struct ssh_conn *c,
+                            const uint8_t *payload, int payload_len) {
+    static uint8_t out[SSH_MAX_PACKET];
+    size_t out_len;
+    if (ssh_packet_seal(c->key_s2c, c->iv_s2c,
+                        payload, payload_len, out, &out_len) < 0) return -1;
+    return write_all(c->fd, out, (int)out_len);
+}
+
+static int recv_packet_aead(struct ssh_conn *c,
+                            uint8_t *payload, int max_payload) {
+    uint8_t hdr[4];
+    if (read_exact(c->fd, hdr, 4) < 0) return -1;
+    uint32_t enc_n = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+                     ((uint32_t)hdr[2] <<  8) | (uint32_t)hdr[3];
+    if (enc_n < 16 || enc_n > SSH_MAX_PACKET - 4 - 16) return -1;
+    static uint8_t pkt[SSH_MAX_PACKET];
+    for (int i = 0; i < 4; i++) pkt[i] = hdr[i];
+    if (read_exact(c->fd, pkt + 4, (int)enc_n + 16) < 0) return -1;
+    size_t pl;
+    if (ssh_packet_open(c->key_c2s, c->iv_c2s, pkt, 4 + enc_n + 16,
+                        payload, (size_t)max_payload, &pl) < 0) return -1;
+    return (int)pl;
+}
+
+/* Dispatch to the right framing. Auto-skips IGNORE/DEBUG messages so
+ * callers can just expect the next semantic packet. */
+static int send_packet(struct ssh_conn *c, const uint8_t *p, int n) {
+    return c->enc_out ? send_packet_aead(c, p, n) : send_packet_clear(c, p, n);
+}
+
+static int recv_packet(struct ssh_conn *c, uint8_t *p, int max) {
     for (;;) {
-        char c;
-        if (tls_read_byte(t, &c) < 0) return -1;
-        if (c == '\n') break;
-        if (c == '\r') continue;
-        if (len < cap - 1) out[len++] = c;
+        int n = c->enc_in ? recv_packet_aead(c, p, max)
+                          : recv_packet_clear(c, p, max);
+        if (n < 1) return n;
+        if (p[0] == SSH_MSG_IGNORE || p[0] == SSH_MSG_DEBUG) continue;
+        return n;
     }
-    out[len] = 0;
-    return len;
 }
 
-/* Send a NUL-terminated string over TLS in one record. */
-static int tls_send_str(struct tls_conn *t, const char *s) {
-    int n = 0; while (s[n]) n++;
-    return tls_send(t, s, n);
+/* ---- banner exchange (RFC 4253 §4.2) ----------------------------- */
+
+static int do_banner(struct ssh_conn *c) {
+    static const char ours[] = "SSH-2.0-AdventOS_1.0";
+    int i = 0;
+    while (ours[i]) { c->v_s[i] = ours[i]; i++; }
+    c->v_s_len = i;
+    char buf[64];
+    for (int j = 0; j < c->v_s_len; j++) buf[j] = c->v_s[j];
+    buf[c->v_s_len] = '\r';
+    buf[c->v_s_len + 1] = '\n';
+    if (write_all(c->fd, buf, c->v_s_len + 2) < 0) return -1;
+
+    /* Read up to 255 bytes ending in \n. Per RFC, lines before the
+     * SSH-x.y line are "for human consumption" and can be ignored. We
+     * keep only the SSH- line. */
+    int len = 0;
+    int saw_ssh = 0;
+    while (len < 255) {
+        char ch;
+        if (read_exact(c->fd, &ch, 1) < 0) return -1;
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+            c->v_c[len] = 0;
+            if (len >= 4 && c->v_c[0] == 'S' && c->v_c[1] == 'S' &&
+                c->v_c[2] == 'H' && c->v_c[3] == '-') {
+                saw_ssh = 1;
+                break;
+            }
+            len = 0;
+            continue;
+        }
+        c->v_c[len++] = ch;
+    }
+    if (!saw_ssh) return -1;
+    c->v_c_len = len;
+    return 0;
 }
 
-/* The "your turn" sentinel: a lone 0x01 byte (SOH). The client reads
- * TLS bytes to stdout until it sees one of these, then prompts the
- * user for the next command. We emit it after every server-side
- * output block — login prompts, the post-auth banner, and after each
- * command's output finishes draining. */
-static int tls_send_ready(struct tls_conn *t) {
-    char b = 0x01;
-    return tls_send(t, &b, 1);
+/* ---- KEXINIT ----------------------------------------------------- */
+
+/* Build and send our KEXINIT. Returns 0 on success. */
+static int send_kexinit(struct ssh_conn *c) {
+    uint8_t *p = c->i_s;
+    ssh_put_u8(&p, SSH_MSG_KEXINIT);
+    uint8_t cookie[16];
+    rand_bytes(cookie, 16);
+    ssh_put_bytes(&p, cookie, 16);
+    /* 10 name-lists — we offer exactly one algo per slot. */
+    ssh_put_cstring(&p, "curve25519-sha256");           /* kex */
+    ssh_put_cstring(&p, "ssh-ed25519");                  /* host key */
+    ssh_put_cstring(&p, "aes128-gcm@openssh.com");       /* enc c->s */
+    ssh_put_cstring(&p, "aes128-gcm@openssh.com");       /* enc s->c */
+    ssh_put_cstring(&p, "");                              /* mac c->s (AEAD) */
+    ssh_put_cstring(&p, "");                              /* mac s->c (AEAD) */
+    ssh_put_cstring(&p, "none");                          /* comp c->s */
+    ssh_put_cstring(&p, "none");                          /* comp s->c */
+    ssh_put_cstring(&p, "");                              /* lang c->s */
+    ssh_put_cstring(&p, "");                              /* lang s->c */
+    ssh_put_bool(&p, 0);                                  /* first_kex_packet_follows */
+    ssh_put_u32(&p, 0);                                   /* reserved */
+    c->i_s_len = (int)(p - c->i_s);
+    return send_packet(c, c->i_s, c->i_s_len);
 }
 
-/* ---- Per-connection command loop ----------------------------------- */
+static int recv_kexinit(struct ssh_conn *c) {
+    int n = recv_packet(c, c->i_c, sizeof(c->i_c));
+    if (n < 1 || c->i_c[0] != SSH_MSG_KEXINIT) return -1;
+    c->i_c_len = n;
+    /* We don't verify intersection — if the client picks an algo we
+     * can't do, KEX will fail downstream and we'll send DISCONNECT. */
+    return 0;
+}
 
-/* Run one command line: fork a child that execs `sh.elf -c <line>`
- * with stdout/stderr captured into a pipe, then shuttle the pipe
- * contents back over TLS. Returns 0 if the connection should
- * continue, -1 if the parent should tear it down. */
-static int run_remote_command(struct tls_conn *t, const char *line) {
+/* ---- KEX_ECDH ---------------------------------------------------- */
+
+static void hash_string(struct sha256 *s, const void *data, int n) {
+    uint8_t lb[4];
+    lb[0] = (uint8_t)(n >> 24);
+    lb[1] = (uint8_t)(n >> 16);
+    lb[2] = (uint8_t)(n >>  8);
+    lb[3] = (uint8_t)n;
+    sha256_update(s, lb, 4);
+    sha256_update(s, data, n);
+}
+
+/* Receive SSH_MSG_KEX_ECDH_INIT (Q_C), do the ECDH, build and send
+ * SSH_MSG_KEX_ECDH_REPLY with K_S + Q_S + signature(H). */
+static int do_kex_ecdh(struct ssh_conn *c) {
+    uint8_t buf[256];
+    int n = recv_packet(c, buf, sizeof(buf));
+    if (n < 1 || buf[0] != SSH_MSG_KEX_ECDH_INIT) return -1;
+    const uint8_t *p = buf + 1, *end = buf + n;
+    uint32_t q_len;
+    const uint8_t *q = ssh_get_string(&p, end, &q_len);
+    if (!q || q_len != 32) return -1;
+    for (int i = 0; i < 32; i++) c->q_c[i] = q[i];
+
+    /* Ephemeral keypair + shared secret. */
+    rand_bytes(c->d_s, 32);
+    x25519(c->q_s, c->d_s, x25519_basepoint);
+    uint8_t k_raw[32];
+    x25519(k_raw, c->d_s, c->q_c);
+
+    /* mpint-encode the shared secret. */
+    uint8_t *kp = c->k_mpint;
+    ssh_put_mpint(&kp, k_raw, 32);
+    c->k_mpint_len = (int)(kp - c->k_mpint);
+
+    /* Build K_S — the SSH-encoded ssh-ed25519 host key blob:
+     *   string "ssh-ed25519" || string pubkey(32). */
+    uint8_t k_s[64];
+    uint8_t *ksp = k_s;
+    ssh_put_cstring(&ksp, "ssh-ed25519");
+    ssh_put_string(&ksp, g_host_pk, 32);
+    int k_s_len = (int)(ksp - k_s);
+
+    /* H = SHA-256(string(V_C) || string(V_S) ||
+     *             string(I_C) || string(I_S) ||
+     *             string(K_S) || string(Q_C) || string(Q_S) ||
+     *             mpint(K)). */
+    struct sha256 sh;
+    sha256_init(&sh);
+    hash_string(&sh, c->v_c, c->v_c_len);
+    hash_string(&sh, c->v_s, c->v_s_len);
+    hash_string(&sh, c->i_c, c->i_c_len);
+    hash_string(&sh, c->i_s, c->i_s_len);
+    hash_string(&sh, k_s,    k_s_len);
+    hash_string(&sh, c->q_c, 32);
+    hash_string(&sh, c->q_s, 32);
+    sha256_update(&sh, c->k_mpint, c->k_mpint_len);
+    sha256_final(&sh, c->h);
+
+    /* First handshake — session_id is "frozen" to H. We never rekey,
+     * so this is also the final value. */
+    for (int i = 0; i < 32; i++) c->session_id[i] = c->h[i];
+
+    /* Sign H with the host key. */
+    uint8_t sig_raw[64];
+    ed25519_sign(sig_raw, c->h, 32, g_host_sk);
+
+    /* Wrap signature as SSH-format blob: string "ssh-ed25519" || string sig. */
+    uint8_t sig_blob[128];
+    uint8_t *sbp = sig_blob;
+    ssh_put_cstring(&sbp, "ssh-ed25519");
+    ssh_put_string(&sbp, sig_raw, 64);
+    int sig_blob_len = (int)(sbp - sig_blob);
+
+    /* Send SSH_MSG_KEX_ECDH_REPLY:
+     *   byte 31 || string K_S || string Q_S || string sig_blob. */
+    uint8_t reply[256];
+    uint8_t *rp = reply;
+    ssh_put_u8(&rp, SSH_MSG_KEX_ECDH_REPLY);
+    ssh_put_string(&rp, k_s, k_s_len);
+    ssh_put_string(&rp, c->q_s, 32);
+    ssh_put_string(&rp, sig_blob, sig_blob_len);
+    return send_packet(c, reply, (int)(rp - reply));
+}
+
+/* ---- NEWKEYS ----------------------------------------------------- */
+
+static int do_newkeys(struct ssh_conn *c) {
+    uint8_t nk = SSH_MSG_NEWKEYS;
+    if (send_packet(c, &nk, 1) < 0) return -1;
+
+    /* Outbound (server → client) keys go live now. */
+    uint8_t tmp[32];
+    ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'B', c->session_id);
+    for (int i = 0; i < 12; i++) c->iv_s2c[i] = tmp[i];
+    ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'D', c->session_id);
+    for (int i = 0; i < 16; i++) c->key_s2c[i] = tmp[i];
+    c->enc_out = 1;
+
+    /* Wait for client NEWKEYS (still in cleartext mode at this point). */
+    uint8_t buf[16];
+    int n = recv_packet(c, buf, sizeof(buf));
+    if (n < 1 || buf[0] != SSH_MSG_NEWKEYS) return -1;
+
+    /* Inbound (client → server) keys go live next. */
+    ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'A', c->session_id);
+    for (int i = 0; i < 12; i++) c->iv_c2s[i] = tmp[i];
+    ssh_kdf(tmp, c->k_mpint, c->k_mpint_len, c->h, 'C', c->session_id);
+    for (int i = 0; i < 16; i++) c->key_c2s[i] = tmp[i];
+    c->enc_in = 1;
+    return 0;
+}
+
+/* ---- service request + userauth ---------------------------------- */
+
+static int do_service_request(struct ssh_conn *c) {
+    uint8_t buf[256];
+    int n = recv_packet(c, buf, sizeof(buf));
+    if (n < 1 || buf[0] != SSH_MSG_SERVICE_REQUEST) return -1;
+    const uint8_t *p = buf + 1, *end = buf + n;
+    uint32_t svc_len;
+    const uint8_t *svc = ssh_get_string(&p, end, &svc_len);
+    if (!svc || svc_len != 12) return -1;
+    for (int i = 0; i < 12; i++) {
+        if (svc[i] != "ssh-userauth"[i]) return -1;
+    }
+    uint8_t reply[32];
+    uint8_t *rp = reply;
+    ssh_put_u8(&rp, SSH_MSG_SERVICE_ACCEPT);
+    ssh_put_cstring(&rp, "ssh-userauth");
+    return send_packet(c, reply, (int)(rp - reply));
+}
+
+/* Process userauth requests until one succeeds (or we give up).
+ * On success, returns 0 and fills *out_user. */
+static int do_userauth(struct ssh_conn *c, struct user_entry **out_user) {
+    static uint8_t buf[1024];
+    *out_user = 0;
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int n = recv_packet(c, buf, sizeof(buf));
+        if (n < 1 || buf[0] != SSH_MSG_USERAUTH_REQUEST) return -1;
+        const uint8_t *p = buf + 1, *end = buf + n;
+        uint32_t ul, sl, ml;
+        const uint8_t *us = ssh_get_string(&p, end, &ul);
+        const uint8_t *ss = ssh_get_string(&p, end, &sl);
+        const uint8_t *ms = ssh_get_string(&p, end, &ml);
+        (void)ss;
+        if (!us || !ss || !ms) return -1;
+
+        char username[64];
+        if (ul >= sizeof(username)) ul = sizeof(username) - 1;
+        for (uint32_t i = 0; i < ul; i++) username[i] = (char)us[i];
+        username[ul] = 0;
+
+        if (ml == 8 && ms[0] == 'p' && ms[1] == 'a' && ms[2] == 's' &&
+            ms[3] == 's' && ms[4] == 'w' && ms[5] == 'o' &&
+            ms[6] == 'r' && ms[7] == 'd') {
+            ssh_get_u8(&p);   /* FALSE — change-password flag */
+            uint32_t pl;
+            const uint8_t *ps = ssh_get_string(&p, end, &pl);
+            if (!ps) return -1;
+            char pass[64];
+            if (pl >= sizeof(pass)) pl = sizeof(pass) - 1;
+            for (uint32_t i = 0; i < pl; i++) pass[i] = (char)ps[i];
+            pass[pl] = 0;
+
+            struct user_entry *u = find_user(username);
+            if (u && verify_password(u, pass)) {
+                uint8_t s = SSH_MSG_USERAUTH_SUCCESS;
+                if (send_packet(c, &s, 1) < 0) return -1;
+                *out_user = u;
+                return 0;
+            }
+            printf("sshd: auth failed user='%s'\n", username);
+            sys_sleep_ms(200);
+        }
+
+        /* Reject: send USERAUTH_FAILURE listing what we DO support. */
+        uint8_t fail[64];
+        uint8_t *fp = fail;
+        ssh_put_u8(&fp, SSH_MSG_USERAUTH_FAILURE);
+        ssh_put_cstring(&fp, "password");
+        ssh_put_bool(&fp, 0);
+        if (send_packet(c, fail, (int)(fp - fail)) < 0) return -1;
+    }
+    return -1;
+}
+
+/* ---- channels ---------------------------------------------------- */
+
+struct channel {
+    uint32_t their_id;
+    uint32_t our_id;
+    uint32_t their_window;
+    uint32_t our_window;
+    uint32_t max_packet;
+};
+
+static int do_channel_open(struct ssh_conn *c, struct channel *ch) {
+    uint8_t buf[256];
+    int n = recv_packet(c, buf, sizeof(buf));
+    if (n < 1 || buf[0] != SSH_MSG_CHANNEL_OPEN) return -1;
+    const uint8_t *p = buf + 1, *end = buf + n;
+    uint32_t type_len;
+    const uint8_t *type = ssh_get_string(&p, end, &type_len);
+    uint32_t their_id     = ssh_get_u32(&p);
+    uint32_t their_window = ssh_get_u32(&p);
+    uint32_t their_max    = ssh_get_u32(&p);
+    if (!type || type_len != 7 ||
+        type[0]!='s'||type[1]!='e'||type[2]!='s'||type[3]!='s'||
+        type[4]!='i'||type[5]!='o'||type[6]!='n') {
+        /* Reject anything other than "session". */
+        uint8_t r[64];
+        uint8_t *rp = r;
+        ssh_put_u8(&rp, SSH_MSG_CHANNEL_OPEN_FAILURE);
+        ssh_put_u32(&rp, their_id);
+        ssh_put_u32(&rp, SSH_OPEN_UNKNOWN_CHANNEL_TYPE);
+        ssh_put_cstring(&rp, "only session channels supported");
+        ssh_put_cstring(&rp, "");
+        send_packet(c, r, (int)(rp - r));
+        return -1;
+    }
+    ch->their_id     = their_id;
+    ch->our_id       = 0;
+    ch->their_window = their_window;
+    ch->our_window   = 0x100000;
+    ch->max_packet   = their_max < 16384 ? their_max : 16384;
+
+    uint8_t reply[32];
+    uint8_t *rp = reply;
+    ssh_put_u8(&rp, SSH_MSG_CHANNEL_OPEN_CONFIRMATION);
+    ssh_put_u32(&rp, their_id);
+    ssh_put_u32(&rp, ch->our_id);
+    ssh_put_u32(&rp, ch->our_window);
+    ssh_put_u32(&rp, ch->max_packet);
+    return send_packet(c, reply, (int)(rp - reply));
+}
+
+/* Pump channel-request messages until we see "exec" or "shell", then
+ * return that command. Returns 1 = exec (cmd filled), 2 = shell, -1 on
+ * error. Side-effect: replies to pty-req / env / etc.
+ *
+ * `buf` is static (not stack) because the user stack is only 16 KiB
+ * total and a 4 KiB stack array, combined with the rest of the call
+ * chain, was overflowing into the guard page after auth. */
+static int do_channel_requests(struct ssh_conn *c, struct channel *ch,
+                                char *cmd_out, int cmd_cap) {
+    static uint8_t buf[4096];
+    for (;;) {
+        int n = recv_packet(c, buf, sizeof(buf));
+        if (n < 1) return -1;
+        uint8_t m = buf[0];
+
+        if (m == SSH_MSG_CHANNEL_WINDOW_ADJUST) {
+            const uint8_t *p = buf + 1;
+            ssh_get_u32(&p);     /* our chan */
+            ch->their_window += ssh_get_u32(&p);
+            continue;
+        }
+
+        if (m != SSH_MSG_CHANNEL_REQUEST) return -1;
+
+        const uint8_t *p = buf + 1, *end = buf + n;
+        ssh_get_u32(&p);                  /* our chan id */
+        uint32_t tl;
+        const uint8_t *t = ssh_get_string(&p, end, &tl);
+        int want_reply = ssh_get_u8(&p);
+
+        int handled_ok = 0;
+        int is_exec = 0, is_shell = 0;
+
+        if (tl == 7 && t[0]=='p'&&t[1]=='t'&&t[2]=='y'&&
+                       t[3]=='-'&&t[4]=='r'&&t[5]=='e'&&t[6]=='q') {
+            /* No PTY support. */
+            handled_ok = 0;
+        }
+        else if (tl == 3 && t[0]=='e'&&t[1]=='n'&&t[2]=='v') {
+            handled_ok = 1;
+        }
+        else if (tl == 4 && t[0]=='e'&&t[1]=='x'&&t[2]=='e'&&t[3]=='c') {
+            uint32_t cl;
+            const uint8_t *cs = ssh_get_string(&p, end, &cl);
+            if (cs) {
+                if ((int)cl >= cmd_cap) cl = cmd_cap - 1;
+                for (uint32_t i = 0; i < cl; i++) cmd_out[i] = (char)cs[i];
+                cmd_out[cl] = 0;
+                handled_ok = 1;
+                is_exec = 1;
+            }
+        }
+        else if (tl == 5 && t[0]=='s'&&t[1]=='h'&&t[2]=='e'&&t[3]=='l'&&t[4]=='l') {
+            cmd_out[0] = 0;
+            handled_ok = 1;
+            is_shell = 1;
+        }
+
+        if (want_reply) {
+            uint8_t reply[8];
+            uint8_t *rp = reply;
+            ssh_put_u8(&rp, handled_ok ? SSH_MSG_CHANNEL_SUCCESS : SSH_MSG_CHANNEL_FAILURE);
+            ssh_put_u32(&rp, ch->their_id);
+            if (send_packet(c, reply, (int)(rp - reply)) < 0) return -1;
+        }
+
+        if (is_exec)  return 1;
+        if (is_shell) return 2;
+    }
+}
+
+/* Send a CHANNEL_DATA packet. */
+static int send_channel_data(struct ssh_conn *c, struct channel *ch,
+                              const void *data, int n) {
+    static uint8_t pkt[SSH_MAX_PACKET];
+    uint8_t *p = pkt;
+    ssh_put_u8(&p, SSH_MSG_CHANNEL_DATA);
+    ssh_put_u32(&p, ch->their_id);
+    ssh_put_string(&p, data, n);
+    return send_packet(c, pkt, (int)(p - pkt));
+}
+
+/* Run sh.elf -c "<cmd>" and stream its stdout/stderr as CHANNEL_DATA
+ * frames. exit-status is delivered after EOF. */
+static int run_exec(struct ssh_conn *c, struct channel *ch, const char *cmd) {
     int outp[2];
-    if (sys_pipe(outp) < 0) {
-        tls_send_str(t, "sshd: pipe() failed\n");
-        return 0;
-    }
-
+    if (sys_pipe(outp) < 0) return -1;
     int pid = sys_fork();
-    if (pid < 0) {
-        sys_close(outp[0]); sys_close(outp[1]);
-        tls_send_str(t, "sshd: fork() failed\n");
-        return 0;
-    }
-
     if (pid == 0) {
-        /* Child: redirect stdout + stderr to the pipe, drop the read
-         * end, then exec the shell. Stdin keeps pointing at whatever
-         * we inherited (the TLS connection's TCP socket, which has no
-         * controlling TTY) — sh.elf -c never reads stdin. */
         sys_dup2(outp[1], 1);
         sys_dup2(outp[1], 2);
         sys_close(outp[0]);
         sys_close(outp[1]);
-        const char *argv[] = { "sh.elf", "-c", line, 0 };
+        const char *argv[] = { "sh.elf", "-c", cmd, 0 };
         sys_exec("sh.elf", argv);
-        /* exec failed — write something the parent will forward back */
-        const char err[] = "sshd: exec sh.elf failed\n";
-        sys_write(1, err, (int)sizeof(err) - 1);
         sys_exit(127);
     }
-
-    /* Parent: close the write end so reads see EOF when the child
-     * (and any of its grandchildren that inherited fd 1) all exit. */
     sys_close(outp[1]);
 
-    char buf[256];
+    static char buf[2048];
     for (;;) {
         int n = sys_read(outp[0], buf, sizeof(buf));
         if (n <= 0) break;
-        if (tls_send(t, buf, n) < 0) {
-            /* Client dropped — reap the child and bail. */
+        if (send_channel_data(c, ch, buf, n) < 0) {
             sys_close(outp[0]);
             int code; sys_wait(&code);
             return -1;
         }
     }
     sys_close(outp[0]);
-    int code; sys_wait(&code);
+    int code = 0;
+    sys_wait(&code);
+
+    /* exit-status (RFC 4254 §6.10). */
+    {
+        uint8_t p[64];
+        uint8_t *q = p;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_REQUEST);
+        ssh_put_u32(&q, ch->their_id);
+        ssh_put_cstring(&q, "exit-status");
+        ssh_put_bool(&q, 0);            /* want_reply = false */
+        ssh_put_u32(&q, (uint32_t)(code & 0xff));
+        send_packet(c, p, (int)(q - p));
+    }
+
+    /* CHANNEL_EOF + CHANNEL_CLOSE. */
+    {
+        uint8_t p[8]; uint8_t *q = p;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&q, ch->their_id);
+        send_packet(c, p, (int)(q - p));
+    }
+    {
+        uint8_t p[8]; uint8_t *q = p;
+        ssh_put_u8(&q, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&q, ch->their_id);
+        send_packet(c, p, (int)(q - p));
+    }
+
+    /* Drain a few packets so we see the client's CHANNEL_CLOSE / EOF
+     * before tearing down the TCP socket — keeps the wire clean. */
+    for (int i = 0; i < 8; i++) {
+        uint8_t buf[256];
+        int n = recv_packet(c, buf, sizeof(buf));
+        if (n <= 0) break;
+        if (buf[0] == SSH_MSG_CHANNEL_CLOSE) break;
+    }
     return 0;
 }
 
-/* The post-auth interactive loop. Builtins handled inline (so they
- * mutate THIS process's state); everything else fork+execs sh.elf -c.
- * Loops until the client sends "exit" or the connection drops. */
-static void shell_loop(struct tls_conn *t, struct user_entry *u) {
-    char welcome[128];
-    int w = 0;
-    const char *banner = "\nWelcome to AdventOS over TLS.  user=";
-    while (*banner) welcome[w++] = *banner++;
-    int nl = 0; while (u->name[nl]) welcome[w++] = u->name[nl++];
-    const char *rest = "  shell=sh.elf -c\nType 'exit' to disconnect.\n\n";
-    while (*rest) welcome[w++] = *rest++;
-    welcome[w] = 0;
-    tls_send(t, welcome, w);
+/* "Shell" mode: tell the user we don't have ptys + close. Real shell
+ * mode needs pty pairs + bidirectional shuttling, which is its own
+ * session. */
+static int run_shell_placeholder(struct ssh_conn *c, struct channel *ch) {
+    const char *msg =
+        "AdventOS sshd: interactive shell needs a pty (not implemented yet).\r\n"
+        "Pass an explicit command instead:\r\n"
+        "    ssh user@host '<command>'\r\n";
+    int ml = 0; while (msg[ml]) ml++;
+    send_channel_data(c, ch, msg, ml);
 
-    for (;;) {
-        tls_send_str(t, "advent-ssh$ ");
-        tls_send_ready(t);
+    uint8_t p[64]; uint8_t *q = p;
+    ssh_put_u8(&q, SSH_MSG_CHANNEL_REQUEST);
+    ssh_put_u32(&q, ch->their_id);
+    ssh_put_cstring(&q, "exit-status");
+    ssh_put_bool(&q, 0);
+    ssh_put_u32(&q, 1);
+    send_packet(c, p, (int)(q - p));
 
-        char line[LINE_MAX];
-        int len = tls_read_line(t, line, sizeof(line));
-        if (len < 0) return;
-
-        /* Trim leading whitespace. */
-        int s = 0;
-        while (line[s] == ' ' || line[s] == '\t') s++;
-        if (!line[s]) continue;
-        char *cmd = &line[s];
-
-        if (my_strcmp(cmd, "exit") == 0) {
-            tls_send_str(t, "bye\n");
-            return;
-        }
-
-        /* `cd` handled inline so the cwd change persists for the next
-         * command. Anything else (including pipelines, redirects, env
-         * exports) goes through sh.elf -c. */
-        if (cmd[0] == 'c' && cmd[1] == 'd' && (cmd[2] == 0 || cmd[2] == ' ')) {
-            const char *path = "/";
-            if (cmd[2] == ' ') {
-                int p = 3;
-                while (cmd[p] == ' ') p++;
-                if (cmd[p]) path = &cmd[p];
-            }
-            if (sys_chdir(path) < 0) {
-                tls_send_str(t, "cd: ");
-                tls_send_str(t, path);
-                tls_send_str(t, ": no such directory\n");
-            }
-            continue;
-        }
-
-        if (run_remote_command(t, cmd) < 0) return;
-    }
+    uint8_t e[8]; uint8_t *eq = e;
+    ssh_put_u8(&eq, SSH_MSG_CHANNEL_EOF); ssh_put_u32(&eq, ch->their_id);
+    send_packet(c, e, (int)(eq - e));
+    uint8_t cl[8]; uint8_t *clq = cl;
+    ssh_put_u8(&clq, SSH_MSG_CHANNEL_CLOSE); ssh_put_u32(&clq, ch->their_id);
+    send_packet(c, cl, (int)(clq - cl));
+    return 0;
 }
 
-/* Per-connection driver. Handshake → log in → shell loop. */
+/* ---- top-level connection driver --------------------------------- */
+
 static void serve_one(int conn) {
-    struct tls_conn t;
-    t.cert_der     = g_cert;
-    t.cert_der_len = g_cert_len;
-    t.server_sk    = g_priv;
-    t.sig_alg      = 0x0403;     /* ecdsa_secp256r1_sha256 */
+    static struct ssh_conn c;
+    /* Zero out the on-fork state — child got the parent's zeroed copy
+     * but a previous child of THIS parent (after wait()) would have
+     * written into it. We use a static to keep it off the user stack
+     * (16 KiB total). */
+    for (size_t i = 0; i < sizeof(c); i++) ((uint8_t *)&c)[i] = 0;
+    c.fd = conn;
 
-    int hs = tls_server_handshake_cert(&t, conn);
-    if (hs != 0) {
-        printf("sshd: handshake failed rc=%d\n", hs);
-        sys_close(conn);
-        return;
-    }
-    puts("sshd: TLS handshake OK; entering auth\n");
+    if (do_banner(&c)        < 0) goto bye;
+    printf("sshd: client %s\n", c.v_c);
+    if (send_kexinit(&c)      < 0) goto bye;
+    if (recv_kexinit(&c)      < 0) goto bye;
+    if (do_kex_ecdh(&c)       < 0) goto bye;
+    if (do_newkeys(&c)        < 0) goto bye;
+    puts("sshd: KEX complete, transport secured\n");
 
-    /* Two tries before we hang up. Reading 0 bytes for username or
-     * password means the client closed mid-prompt — treat as drop. */
-    for (int attempt = 0; attempt < 2; attempt++) {
-        tls_send_str(&t, "AdventOS sshd over TLS 1.3 (ECDSA-P256)\n");
-        tls_send_str(&t, "login: ");
-        tls_send_ready(&t);
+    if (do_service_request(&c) < 0) goto bye;
+    struct user_entry *u;
+    if (do_userauth(&c, &u)    < 0) goto bye;
+    printf("sshd: authenticated user=%s uid=%d\n", u->name, u->uid);
 
-        char user[64];
-        if (tls_read_line(&t, user, sizeof(user)) <= 0) {
-            sys_close(conn); return;
-        }
+    sys_setgid(u->gid);
+    if (sys_setuid(u->uid) < 0) goto bye;
 
-        tls_send_str(&t, "password: ");
-        tls_send_ready(&t);
+    struct channel ch;
+    if (do_channel_open(&c, &ch) < 0) goto bye;
 
-        char pass[64];
-        if (tls_read_line(&t, pass, sizeof(pass)) < 0) {
-            sys_close(conn); return;
-        }
+    char cmd[1024];
+    int mode = do_channel_requests(&c, &ch, cmd, sizeof(cmd));
+    if (mode == 1)       run_exec(&c, &ch, cmd);
+    else if (mode == 2)  run_shell_placeholder(&c, &ch);
 
-        struct user_entry *u = find_user(user);
-        if (!u || !verify_password(u, pass)) {
-            tls_send_str(&t, "Login incorrect\n");
-            printf("sshd: auth failed for user='%s'\n", user);
-            sys_sleep_ms(300);
-            continue;
-        }
-
-        printf("sshd: authenticated user=%s uid=%d\n", u->name, u->uid);
-        sys_setgid(u->gid);
-        if (sys_setuid(u->uid) < 0) {
-            tls_send_str(&t, "sshd: setuid failed\n");
-            sys_close(conn); return;
-        }
-
-        shell_loop(&t, u);
-        sys_close(conn);
-        return;
-    }
-
-    tls_send_str(&t, "Too many failed attempts. Bye.\n");
+bye:
     sys_close(conn);
 }
 
@@ -430,35 +849,18 @@ int main(int argc, char **argv) {
     }
     printf("sshd: loaded %d users from /etc/passwd\n", g_n_users);
 
-    /* Lazy keypair + cert build, same pattern as httpsd. */
-    p256_keypair_from_seed(g_pub, g_priv, SSHD_SEED);
-    g_cert_len = x509_build_self_signed_p256(
-        g_pub, g_priv, "AdventOS sshd",
-        g_cert, sizeof(g_cert));
-    if (g_cert_len < 0) {
-        puts("sshd: x509 build failed\n");
-        return 1;
-    }
-    printf("sshd: built self-signed ECDSA-P256 cert (%d bytes DER)\n", g_cert_len);
+    ed25519_keypair_from_seed(g_host_pk, g_host_sk, HOSTKEY_SEED);
+    puts("sshd: host key: ssh-ed25519 (seeded, persistent across reboots)\n");
 
     int srv = sys_socket();
-    if (srv < 0) { puts("sshd: socket failed\n"); return 1; }
-    if (sys_bind(srv, SSH_PORT) < 0) {
-        puts("sshd: bind failed\n");
-        sys_close(srv);
-        return 1;
-    }
-    if (sys_listen(srv, 4) < 0) {
-        puts("sshd: listen failed\n");
-        sys_close(srv);
-        return 1;
-    }
-    printf("sshd: listening on TLS port %d\n", SSH_PORT);
+    if (srv < 0)                              { puts("sshd: socket failed\n");  return 1; }
+    if (sys_bind  (srv, SSH_PORT) < 0)        { puts("sshd: bind failed\n");    return 1; }
+    if (sys_listen(srv, 4)        < 0)        { puts("sshd: listen failed\n");  return 1; }
+    printf("sshd: listening on SSH-2 port %d\n", SSH_PORT);
 
     for (;;) {
         int conn = sys_accept(srv);
         if (conn < 0) { sys_sleep_ms(100); continue; }
-
         int pid = sys_fork();
         if (pid == 0) {
             sys_close(srv);
@@ -467,7 +869,6 @@ int main(int argc, char **argv) {
         }
         sys_close(conn);
         int code;
-        while (sys_wait_nb(&code) > 0) {}    /* reap zombies */
+        while (sys_wait_nb(&code) > 0) {}
     }
-    return 0;
 }
