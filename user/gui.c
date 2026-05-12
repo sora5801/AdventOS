@@ -40,8 +40,44 @@
 static volatile unsigned char *g_fb;
 static unsigned int g_w, g_h, g_bpp, g_pitch;
 
+/* Session 63 — clip rectangle.  Every drawing primitive consults this
+ * before touching a pixel.  The damage-rect render path sets it to the
+ * current dirty region before drawing each window's chrome + content,
+ * so the SAME draw functions that used to repaint the entire desktop
+ * each frame now repaint only the dirty band.  Initialized to "full
+ * screen" so existing one-shot draws (the very first frame, the cursor
+ * sprite, status overlays) keep working without explicitly opening the
+ * clip up. */
+static int g_clip_x0, g_clip_y0, g_clip_x1, g_clip_y1;
+/* Pixel counter for the t46 selftest's empirical "look how few we
+ * painted" assertion. Incremented inside put_pixel; reset per frame in
+ * the redraw path. */
+static uint32_t g_pixels_painted;
+
+static inline void set_clip(int x, int y, int w, int h) {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    if ((unsigned)(x + w) > g_w) w = (int)g_w - x;
+    if ((unsigned)(y + h) > g_h) h = (int)g_h - y;
+    g_clip_x0 = x;
+    g_clip_y0 = y;
+    g_clip_x1 = x + w;
+    g_clip_y1 = y + h;
+}
+
+static inline void set_clip_full(void) {
+    g_clip_x0 = 0; g_clip_y0 = 0;
+    g_clip_x1 = (int)g_w; g_clip_y1 = (int)g_h;
+}
+
 static inline void put_pixel(int x, int y, unsigned int rgb) {
-    if (x < 0 || y < 0 || (unsigned)x >= g_w || (unsigned)y >= g_h) return;
+    /* Clip + screen bounds in one shot. The clip rectangle is always
+     * a subset of (0,0,g_w,g_h) since set_clip pre-clamps it. */
+    if (x < g_clip_x0 || y < g_clip_y0 ||
+        x >= g_clip_x1 || y >= g_clip_y1) return;
+    g_pixels_painted++;
     volatile unsigned char *row = g_fb + (unsigned)y * g_pitch;
     if (g_bpp == 32) {
         ((volatile uint32_t *)row)[x] = rgb;
@@ -79,11 +115,21 @@ static unsigned int get_pixel(int x, int y) {
 
 static void fill_rect(int x0, int y0, int w, int h, unsigned int rgb) {
     if (w <= 0 || h <= 0) return;
-    if (x0 < 0) { w += x0; x0 = 0; }
-    if (y0 < 0) { h += y0; y0 = 0; }
-    if (x0 + w > (int)g_w) w = (int)g_w - x0;
-    if (y0 + h > (int)g_h) h = (int)g_h - y0;
+    /* Clip against BOTH the screen and the current damage-rect clip
+     * box (session 63).  The intersection is the actual paint area;
+     * if it's empty we bail out early — saves a pile of cycles when
+     * a window's draw callback fires while only its title bar is
+     * dirty. */
+    int x1 = x0 + w, y1 = y0 + h;
+    if (x0 < g_clip_x0) x0 = g_clip_x0;
+    if (y0 < g_clip_y0) y0 = g_clip_y0;
+    if (x1 > g_clip_x1) x1 = g_clip_x1;
+    if (y1 > g_clip_y1) y1 = g_clip_y1;
+    w = x1 - x0;
+    h = y1 - y0;
     if (w <= 0 || h <= 0) return;
+
+    g_pixels_painted += (uint32_t)(w * h);
 
     /* For 32-bpp we punch out rows with a tight inner loop — the
      * naive nested put_pixel was the hot path of the old gui demo
@@ -163,6 +209,82 @@ static void draw_cursor(int x, int y) {
     }
 }
 
+/* ---- Damage rectangles (session 63) -----------------------------
+ *
+ * Instead of clearing + recomposing the entire 1024x768 desktop each
+ * frame (~786k pixels @ 60 fps = ~135 MB/s of pure framebuffer write
+ * traffic), we keep a small list of "this region of the screen needs
+ * repainting" rectangles. Only those rects get cleared + recomposed.
+ *
+ * Sources of damage:
+ *   - frame 0:                          whole screen
+ *   - cursor move:                      old bbox + new bbox (12x12 each)
+ *   - window drag:                      old window rect + new window rect
+ *   - window destroyed:                 its old rect
+ *   - window focus changed:             both windows' title bars
+ *   - window raised:                    its full rect
+ *   - built-in app w/ wants_anim:       its full rect (Clock + Tasks)
+ *   - built-in app handler ran a click: its body
+ *   - client app rasterize_*:           the affected rect in screen coords
+ *   - status overlay (bottom-right):    its strip every frame (mouse coords
+ *                                       could've changed every frame)
+ *   - menu bar frame counter:           its strip every frame
+ *
+ * On an idle desktop with no mouse movement, the only per-frame
+ * damage is the two animated windows (Clock + Tasks) and the small
+ * frame counter, dropping the painted-pixel count from ~786k to ~70k —
+ * an order-of-magnitude saving. Move the mouse and the cursor's two
+ * 12x12 boxes (288 pixels total) get added on top of that.
+ *
+ * Rect coalescing is deliberately NOT done: 32 slots is enough for
+ * a typical frame, and merging adjacent boxes would cost more in
+ * walking + intersect logic than just painting a few extra pixels. */
+#define MAX_DAMAGE  32
+
+struct rect {
+    int x, y, w, h;
+};
+static struct rect g_damage[MAX_DAMAGE];
+static int         g_damage_n;
+/* When set, the per-frame damage path takes the "redraw the whole
+ * screen" fast path: a single screen-sized rect, no list management.
+ * Triggered by frame 0, by overflow of g_damage[], or by a window
+ * raise (which can uncover arbitrary regions of the desktop). */
+static int         g_damage_full_flag;
+
+static void damage_clear(void) {
+    g_damage_n = 0;
+    g_damage_full_flag = 0;
+}
+
+static void damage_full(void) {
+    g_damage_full_flag = 1;
+}
+
+static void damage_add(int x, int y, int w, int h) {
+    if (g_damage_full_flag) return;        /* already covering everything */
+    /* Clip to screen up-front so subsequent intersect math is bounded. */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w <= 0 || h <= 0) return;
+    if ((unsigned)(x + w) > g_w) w = (int)g_w - x;
+    if ((unsigned)(y + h) > g_h) h = (int)g_h - y;
+    if (w <= 0 || h <= 0) return;
+    if (g_damage_n >= MAX_DAMAGE) {
+        /* Out of slots — degrade to full-screen redraw rather than
+         * drop coverage. Cheap insurance against a misbehaving frame. */
+        damage_full();
+        return;
+    }
+    g_damage[g_damage_n].x = x;
+    g_damage[g_damage_n].y = y;
+    g_damage[g_damage_n].w = w;
+    g_damage[g_damage_n].h = h;
+    g_damage_n++;
+}
+
+/* damage_window — declared once struct window is defined; see below. */
+
 /* ---- Window model ------------------------------------------------ */
 
 /* Session 62 — was 8; bumped to 12 to leave headroom for client
@@ -196,6 +318,11 @@ struct window {
      * explicitly opt in so the canvas can keep painting under a held
      * mouse.  Default 0 = button-style. */
     int      wants_drag;
+    /* Session 63: apps whose content changes every frame (Clock's
+     * seconds digit, Tasks' /proc reads, an oscilloscope, etc.) opt
+     * in so the damage tracker damages their window each tick.
+     * Default 0 = "static-ish content; only damage on event." */
+    int      wants_anim;
     /* Session 62: out-of-process windows.  Built-in apps still use the
      * draw/click/key callbacks above; client-owned windows leave those
      * NULL (or set to the client_* stubs) and the WM blits their
@@ -211,6 +338,13 @@ struct window {
 
 static struct window g_wins[MAX_WINDOWS];
 static int g_next_z = 1;
+
+/* Damage helper that knows about struct window — declared up here so
+ * every later call site sees it without a forward decl noise. The
+ * damage list machinery is up near the top of the file. */
+static void damage_window(struct window *w) {
+    damage_add(w->x, w->y, w->w, w->h);
+}
 
 static int win_alloc(void) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -1084,8 +1218,31 @@ static void client_destroy_window(int wid) {
     if (wid < 0 || wid >= MAX_WINDOWS) return;
     struct window *w = &g_wins[wid];
     if (!w->alive) return;
+    /* Session 63: closing exposes whatever's behind. Damage the rect
+     * before clearing `alive` so the redraw walks the desktop / lower
+     * z-order windows in this region next frame. */
+    damage_window(w);
     if (w->pix_idx >= 0) free_pix_slot(w->pix_idx);
     w->alive = 0;
+}
+
+/* Session 63 helper — convert a (content_x, content_y, w, h) rect into
+ * screen coords and add it to the damage list. Each client command
+ * goes through this so the WM's compositor only redraws the area the
+ * client actually touched. */
+static void client_damage_rect(struct window *w,
+                                int cx, int cy, int cw, int ch) {
+    int x0 = cx, y0 = cy;
+    int x1 = cx + cw, y1 = cy + ch;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w->content_w) x1 = w->content_w;
+    if (y1 > w->content_h) y1 = w->content_h;
+    if (x1 <= x0 || y1 <= y0) return;
+    damage_add(w->x + x0,
+               w->y + TITLE_H + y0,
+               x1 - x0,
+               y1 - y0);
 }
 
 static void rasterize_fill_rect(struct window *w,
@@ -1102,6 +1259,7 @@ static void rasterize_fill_rect(struct window *w,
         uint32_t *row = pix + yy * w->content_w;
         for (int xx = x0; xx < x1; xx++) row[xx] = rgb;
     }
+    client_damage_rect(w, x0, y0, x1 - x0, y1 - y0);
 }
 
 static void rasterize_pixel(struct window *w, int x, int y, uint32_t rgb) {
@@ -1127,6 +1285,10 @@ static void rasterize_text(struct window *w, int x, int y, const char *s,
     for (int i = 0; i < n; i++) {
         rasterize_glyph(w, x + i * FONT_W, y, s[i], rgb);
     }
+    /* One damage rect covering the full text bounding box (cheaper
+     * than per-glyph) — the WM's compositor will repaint anything
+     * inside it. */
+    client_damage_rect(w, x, y, n * FONT_W, FONT_H);
 }
 
 /* ---- Per-client message dispatch ------------------------------ */
@@ -1186,6 +1348,11 @@ static int handle_cmd(struct ipc_client *cli, uint8_t kind,
             for (int i = 0; i < MAX_WINDOWS; i++)
                 if (i != slot) g_wins[i].focused = 0;
 
+            /* Session 63: the new window covers a region of the
+             * desktop — repaint it (chrome + initially-grey pixmap).
+             * Subsequent client commands add their own damage rects. */
+            damage_window(w);
+
             struct wm_evt_window_id ev = { .wid = slot };
             wm_send_evt(cli->fd, WM_EVT_WINDOW_ID, &ev, sizeof(ev));
             printf("wm: created client window wid=%d for fd=%d (%dx%d)\n",
@@ -1219,6 +1386,8 @@ static int handle_cmd(struct ipc_client *cli, uint8_t kind,
             struct window *w = &g_wins[m->wid];
             if (!w->alive || w->client_fd != cli->fd) return 0;
             rasterize_pixel(w, m->x, m->y, m->rgb);
+            /* Single-pixel damage in screen coords. */
+            client_damage_rect(w, m->x, m->y, 1, 1);
             return 0;
         }
         case WM_CMD_DESTROY: {
@@ -1324,19 +1493,22 @@ static void ipc_init(void) {
 
 /* ---- Event dispatch + main loop --------------------------------- */
 
-static void desktop_draw(int mx, int my, int btn, int frame) {
-    (void)mx; (void)my; (void)btn;
+/* Paint one rect's worth of the desktop: clear to bg, draw any
+ * windows that intersect, paint chrome + content. The clip box is
+ * set to the rect for the duration so every put_pixel / fill_rect
+ * inside the called draw functions auto-clips.
+ *
+ * Occlusion optimization: if any window's outer rect FULLY contains
+ * this damage rect, the desktop bg will be immediately overpainted
+ * by the window's body fill — we skip the bg fill entirely. For a
+ * Clock/Tasks animation damage (where the dirty rect IS inside the
+ * window), this halves the painted-pixel count. */
+static void paint_rect(int rx, int ry, int rw, int rh, int frame) {
+    set_clip(rx, ry, rw, rh);
 
-    /* Desktop: solid steel-blue background. */
-    fill_rect(0, 0, (int)g_w, (int)g_h, 0x103060u);
-
-    /* Top "menu bar" — a 24-px strip. */
-    fill_rect(0, 0, (int)g_w, 24, 0x282828u);
-    draw_str(8,  8, "AdventOS WM  -  session 57", 0xC0C0C0u);
-    draw_str((int)g_w - 100, 8, "frame:", 0x808080u);
-    draw_int((int)g_w - 60,  8, frame,    0xC0C0C0u);
-
-    /* Find z-sorted indices; tiny enough for n^2 sort. */
+    /* Walk windows in z-order, painting any that intersect this rect.
+     * Each window's draw callback also gets called — clipped, so it
+     * only writes pixels inside our rect. */
     int order[MAX_WINDOWS], n = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (g_wins[i].alive) order[n++] = i;
@@ -1346,11 +1518,59 @@ static void desktop_draw(int mx, int my, int btn, int frame) {
             if (g_wins[order[j]].z < g_wins[order[i]].z) {
                 int t = order[i]; order[i] = order[j]; order[j] = t;
             }
+
+    /* Check whether any window fully covers the damage rect. If yes,
+     * the desktop bg never shows through here. */
+    int desktop_covered = 0;
     for (int i = 0; i < n; i++) {
         struct window *w = &g_wins[order[i]];
+        if (w->x <= rx && w->y <= ry &&
+            w->x + w->w >= rx + rw && w->y + w->h >= ry + rh) {
+            desktop_covered = 1;
+            break;
+        }
+    }
+    if (!desktop_covered) {
+        fill_rect(0, 0, (int)g_w, (int)g_h, 0x103060u);
+    }
+
+    /* Menu bar — only painted when the dirty rect intersects y < 24
+     * AND no window covers it (windows can't span the menu bar in
+     * our layout, but the cheap check is consistent). */
+    if (!desktop_covered && ry < 24) {
+        fill_rect(0, 0, (int)g_w, 24, 0x282828u);
+        draw_str(8,  8, "AdventOS WM  -  session 63", 0xC0C0C0u);
+        draw_str((int)g_w - 100, 8, "frame:", 0x808080u);
+        draw_int((int)g_w - 60,  8, frame,    0xC0C0C0u);
+    }
+
+    for (int i = 0; i < n; i++) {
+        struct window *w = &g_wins[order[i]];
+        /* Cheap reject: skip windows that don't intersect this rect
+         * at all. The clip would reject the pixels anyway, but the
+         * pixmap blit + window-frame fills are sequential reads that
+         * cost something even when output is clipped to zero. */
+        if (w->x >= rx + rw || w->y >= ry + rh)            continue;
+        if (w->x + w->w <= rx || w->y + w->h <= ry)        continue;
         draw_window_frame(w);
         if (w->draw) w->draw(w, frame);
     }
+}
+
+/* Public entry: walk the damage list and paint each rect. After this
+ * returns, every dirty region of the desktop has been recomposed.
+ * Clip is left at full-screen so the caller can do post-overlay
+ * draws (cursor, status bar) unrestricted. */
+static void damage_redraw(int frame) {
+    if (g_damage_full_flag) {
+        paint_rect(0, 0, (int)g_w, (int)g_h, frame);
+    } else {
+        for (int i = 0; i < g_damage_n; i++) {
+            paint_rect(g_damage[i].x, g_damage[i].y,
+                       g_damage[i].w, g_damage[i].h, frame);
+        }
+    }
+    set_clip_full();
 }
 
 static void handle_mouse(int mx, int my, int btns, int prev_btns) {
@@ -1361,15 +1581,37 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
     if (down_edge) {
         int idx = win_hit_test(mx, my);
         if (idx < 0) {
-            for (int i = 0; i < MAX_WINDOWS; i++) g_wins[i].focused = 0;
+            /* Click landed on bare desktop — defocus everyone. The
+             * unfocused state changes title-bar color on whichever
+             * window held focus, so damage its title strip. */
+            for (int i = 0; i < MAX_WINDOWS; i++) {
+                if (g_wins[i].alive && g_wins[i].focused) {
+                    damage_add(g_wins[i].x, g_wins[i].y, g_wins[i].w, TITLE_H);
+                }
+                g_wins[i].focused = 0;
+            }
             return;
         }
+        /* Track the previous focus so we can damage its title bar
+         * (color flips from focused-blue to unfocused-grey). The
+         * newly-focused window might already be focused or freshly so;
+         * either way, its title bar repaints to focused-blue. The
+         * raise itself can uncover desktop regions, so we damage the
+         * window's full rect — cheap and always correct. */
+        int prev_focused = win_focused_idx();
         win_raise(idx);
+        if (prev_focused >= 0 && prev_focused != idx) {
+            damage_add(g_wins[prev_focused].x, g_wins[prev_focused].y,
+                       g_wins[prev_focused].w, TITLE_H);
+        }
+        damage_window(&g_wins[idx]);
+
         struct window *w = &g_wins[idx];
         if (hit_close_button(w, mx, my)) {
-            /* Session 62 — for client-owned windows, send a CLOSE
-             * event before tearing the slot down. Lets the client
-             * shut down gracefully (most clients react by exiting). */
+            /* Closed window's old rect now shows whatever was beneath
+             * it — could be desktop, could be another window. Easiest:
+             * damage the whole rect. */
+            damage_window(w);
             if (w->client_fd >= 0) {
                 struct wm_evt_close ev = { .wid = w->id };
                 wm_send_evt(w->client_fd, WM_EVT_CLOSE, &ev, sizeof(ev));
@@ -1386,13 +1628,20 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
             return;
         }
         /* Body click — local coords relative to content origin
-         * (BELOW title bar). */
+         * (BELOW title bar). Built-in app handlers may mutate state
+         * (Paint paints, Calc clears, etc.) so damage the body. */
         int lx = mx - w->x;
         int ly = my - (w->y + TITLE_H);
-        if (w->click) w->click(w, lx, ly, btns);
+        if (w->click) {
+            w->click(w, lx, ly, btns);
+            damage_add(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
+        }
     } else if ((btns & 0x1) && g_drag_idx >= 0) {
         struct window *w = &g_wins[g_drag_idx];
         if (w->alive) {
+            /* Damage the OLD rect (desktop / other windows reveal
+             * underneath) before mutating coords. */
+            damage_window(w);
             w->x = mx - g_drag_dx;
             w->y = my - g_drag_dy;
             /* Clamp to screen so a window can't escape interaction. */
@@ -1400,6 +1649,9 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
             if (w->y < 24) w->y = 24;        /* below menu bar */
             if (w->x + w->w > (int)g_w) w->x = (int)g_w - w->w;
             if (w->y + w->h > (int)g_h) w->y = (int)g_h - w->h;
+            /* And the NEW rect, so we repaint the window at its new
+             * position over the (possibly stale) pixels there. */
+            damage_window(w);
         }
     } else if ((btns & 0x1) && g_drag_idx < 0) {
         /* Continuous drag-paint on focused window — Paint opts into
@@ -1412,6 +1664,7 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
                 int lx = mx - w->x;
                 int ly = my - (w->y + TITLE_H);
                 w->click(w, lx, ly, btns);
+                damage_add(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
             }
         }
     }
@@ -1424,7 +1677,12 @@ static void handle_key(int key) {
     int idx = win_focused_idx();
     if (idx < 0) return;
     struct window *w = &g_wins[idx];
-    if (w->key) w->key(w, key);
+    if (w->key) {
+        w->key(w, key);
+        /* Damage the window body — most text-handling apps (Calc,
+         * Notepad) change visible content on every keystroke. */
+        damage_add(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
+    }
 }
 
 /* ---- App registration ------------------------------------------- */
@@ -1595,8 +1853,9 @@ int main(int argc, char **argv) {
 
     spawn_window("Hello",   60,  60, 320, 120,
                  hello_draw, 0, 0);
-    spawn_window("Clock",  420,  60, 260, 140,
+    int clock_idx = spawn_window("Clock",  420,  60, 260, 140,
                  clock_draw, 0, 0);
+    g_wins[clock_idx].wants_anim = 1;        /* seconds tick */
     spawn_window("Calc",    60, 200, 240, 270,
                  calc_draw, calc_click, calc_key);
     int paint_idx = spawn_window("Paint",  310, 200, 360, 280,
@@ -1604,8 +1863,9 @@ int main(int argc, char **argv) {
     g_wins[paint_idx].wants_drag = 1;        /* drag-to-paint */
     spawn_window("Notepad",310, 490, 360, 180,
                  notepad_draw, notepad_click, notepad_key);
-    spawn_window("Tasks",  680, 220, 280, 240,
+    int tasks_idx = spawn_window("Tasks",  680, 220, 280, 240,
                  tasks_draw, 0, 0);
+    g_wins[tasks_idx].wants_anim = 1;        /* /proc list refresh */
 
     /* Bring up the IPC server AFTER built-in windows so any race
      * between client connect + render uses the same coordinate
@@ -1614,12 +1874,28 @@ int main(int argc, char **argv) {
 
     int frame = 0;
     int prev_btns = 0;
+    int prev_mx = -1, prev_my = -1;
     /* Selftest budget (frames at 16 ms each, ~3-4 s wall clock in
      * QEMU): the script now extends through the IPC-client click at
      * frame 180-195 and a final Hello re-raise at 215-225, so 250
      * gives us a few settling frames at the end before the WM
      * exits and shuts down the listener. */
     int max_frames = g_selftest_mode ? 250 : 600;
+
+    /* Session 63 — track painted-pixel counts so the t46 selftest can
+     * empirically observe damage tracking is doing its job. Reset per
+     * frame; we accumulate sum + frame-count to report an average,
+     * plus min/max to spot full-redraw outliers. uint32_t is enough:
+     * worst case 250 frames × 786432 px = 196M, under 2^31. */
+    uint32_t pix_total = 0;
+    uint32_t pix_max   = 0;
+    uint32_t pix_min   = 0xFFFFFFFFu;
+    int      idle_frames = 0;       /* frames where painted < 200k */
+
+    set_clip_full();
+    /* Frame 0 needs to paint everything — the framebuffer holds
+     * whatever fbcon last wrote. */
+    damage_full();
 
     for (;;) {
         int ms[4] = {0,0,0,0};
@@ -1632,6 +1908,13 @@ int main(int argc, char **argv) {
         } else {
             sys_mouse_state(ms);
             mx = ms[0]; my = ms[1]; btns = ms[2];
+        }
+
+        /* Cursor move damage: the old 12x12 cursor footprint plus
+         * the new one. Skip on frame 0 (prev_mx unset). */
+        if (prev_mx >= 0 && (mx != prev_mx || my != prev_my)) {
+            damage_add(prev_mx, prev_my, 12, 12);
+            damage_add(mx, my, 12, 12);
         }
 
         /* Keystroke (non-blocking). ESC quits. */
@@ -1654,10 +1937,34 @@ int main(int argc, char **argv) {
         handle_mouse(mx, my, btns, prev_btns);
         prev_btns = btns;
 
-        desktop_draw(mx, my, btns, frame);
-        draw_cursor(mx, my);
+        /* Animation damage — windows that opted in via wants_anim
+         * (Clock, Tasks) get their bodies marked dirty every frame.
+         * The flag is per-window so static apps don't pay this cost. */
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            struct window *w = &g_wins[i];
+            if (w->alive && w->wants_anim) {
+                damage_add(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
+            }
+        }
 
-        /* Status overlay — bottom-right corner. */
+        /* The top menu bar's right-hand "frame: N" counter changes
+         * every frame.  Damage the ~80x16 strip — cheaper than
+         * damaging the whole menu bar. */
+        damage_add((int)g_w - 110, 0, 110, 24);
+
+        /* The bottom-right status overlay (x/y/btn) updates every
+         * frame for the same reason.  ~200x12 strip at the screen
+         * bottom. The overlay paints OVER whatever windows might be
+         * there, so it goes through the redraw path too. */
+        damage_add((int)g_w - 220, (int)g_h - FONT_H - 8, 220, FONT_H + 8);
+
+        /* Reset per-frame paint counter, then compose. */
+        g_pixels_painted = 0;
+        damage_redraw(frame);
+
+        /* Status overlay text (drawn unclipped so it overlays anything
+         * the compositor put there). */
+        set_clip_full();
         int sy = (int)g_h - FONT_H - 4;
         draw_str((int)g_w - 200, sy, "x:", 0xFFFFFFu);
         draw_int((int)g_w - 184, sy, mx,    0xFFFFFFu);
@@ -1665,6 +1972,19 @@ int main(int argc, char **argv) {
         draw_int((int)g_w - 134, sy, my,    0xFFFFFFu);
         draw_str((int)g_w - 100, sy, "btn:", 0xFFFFFFu);
         draw_int((int)g_w - 70,  sy, btns,  0xFFFFFFu);
+
+        /* Cursor — last, on top of everything, full clip. */
+        draw_cursor(mx, my);
+
+        /* Tally + reset damage. */
+        if (g_pixels_painted > pix_max) pix_max = g_pixels_painted;
+        if (g_pixels_painted < pix_min) pix_min = g_pixels_painted;
+        pix_total += g_pixels_painted;
+        if (g_pixels_painted < 200000u) idle_frames++;
+
+        damage_clear();
+        prev_mx = mx;
+        prev_my = my;
 
         sys_sleep_ms(16);
         frame++;
@@ -1680,6 +2000,14 @@ int main(int argc, char **argv) {
          * for how these coords line up with Paint's canvas cell (3,1)
          * and Hello's title bar after the final click+raise. */
         printf("gui-wm: selftest done, %d frames\n", frame);
+        /* Session 63 damage-tracker stats — t46 greps these. The avg
+         * is the headline: full redraw at 1024x768 = 786432 pixels per
+         * frame; we expect well under 200k on this workload. */
+        uint32_t pix_avg = pix_total / (uint32_t)frame;
+        uint32_t full_redraw = (uint32_t)g_w * (uint32_t)g_h;
+        printf("  damage: avg=%u min=%u max=%u pixels/frame "
+               "(full=%u, idle_frames=%d)\n",
+               pix_avg, pix_min, pix_max, full_redraw, idle_frames);
         printf("  paint cell @ (322,232) = 0x%x\n",
                get_pixel(322, 232));
         printf("  hello title bar @ (110,70) = 0x%x\n",

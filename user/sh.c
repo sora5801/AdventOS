@@ -3030,6 +3030,151 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t46] damage-rect compositing: WM only repaints dirty regions\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 63 swapped the WM's "clear + redraw everything each
+         * frame" model for damage-rect compositing.  Each frame:
+         *
+         *   1. Various sources (cursor move, drag, click, key,
+         *      animation, client commands) push rectangles onto a
+         *      damage list.
+         *   2. The renderer walks ONLY those rects.  For each rect it
+         *      sets the clip, paints desktop bg (unless a window
+         *      covers it — occlusion skip), and re-runs each
+         *      intersecting window's chrome + draw callback under
+         *      the clip.
+         *   3. Idle frames (no events) still cost ~Clock + Tasks +
+         *      menu counter + status bar — but the rest of the
+         *      desktop is untouched.
+         *
+         * The WM prints a `damage:` line in its selftest summary with
+         * avg / min / max pixels-per-frame.  Full redraw at 1024x768
+         * is 786432 px/frame.  We expect:
+         *
+         *   avg < 350k   (~half of full)
+         *   min < 250k   (idle frame painting just anim windows + status)
+         *   max can be up to ~3x screen (drag frames overlap rects)
+         *
+         * We grab the WM's stdout from t39's existing fork pattern —
+         * gui.elf selftest writes the damage line right after
+         * "selftest done".  Re-running gui.elf here would double the
+         * test time, so we use a fresh spawn (~250 frames, ~4 s in
+         * QEMU). */
+        int pp[2];
+        if (sys_pipe(pp) < 0) {
+            puts("  FAIL  pipe() for gui.elf capture\n");
+        } else {
+            int pid = sys_fork();
+            if (pid == 0) {
+                sys_dup2(pp[1], 1);
+                sys_dup2(pp[1], 2);
+                sys_close(pp[0]);
+                sys_close(pp[1]);
+                const char *a[] = { "gui.elf", "selftest", 0 };
+                sys_exec("gui.elf", a);
+                sys_exit(127);
+            }
+            sys_close(pp[1]);
+            static char cap[3072];
+            int total = 0;
+            for (;;) {
+                int n = sys_read(pp[0], cap + total,
+                                 (int)sizeof(cap) - 1 - total);
+                if (n <= 0) break;
+                total += n;
+                if (total >= (int)sizeof(cap) - 1) break;
+            }
+            cap[total] = 0;
+            sys_close(pp[0]);
+            int code = 0;
+            sys_wait(&code);
+
+            /* Look for the damage line. SKIP gracefully if no
+             * framebuffer in this QEMU instance. */
+            int find_no_fb = 0;
+            int dmg_start = -1;
+            for (int i = 0; i < total - 14; i++) {
+                if (!find_no_fb && cap[i] == 'n' &&
+                    memcmp(cap + i, "no framebuffer", 14) == 0)
+                    find_no_fb = 1;
+                if (dmg_start < 0 && i + 10 <= total &&
+                    memcmp(cap + i, "damage: avg", 11) == 0)
+                    dmg_start = i;
+            }
+
+            if (find_no_fb) {
+                puts("  SKIP  no framebuffer in this QEMU instance\n");
+            } else if (dmg_start < 0) {
+                puts("  FAIL  WM did not emit a `damage:` summary line\n");
+            } else {
+                /* Parse avg / min / max out of the line. The format
+                 * "damage: avg=NNNN min=NNNN max=NNNN" is fixed, so a
+                 * simple atoi-after-= pattern works.  We pass a
+                 * non-NUL char to detect end-of-number rather than
+                 * relying on strchr. */
+                int p = dmg_start;
+                int avg = 0, mn = 0, mx = 0;
+                /* Skip to "avg=" */
+                while (p < total - 4 && memcmp(cap + p, "avg=", 4) != 0) p++;
+                p += 4;
+                while (p < total && cap[p] >= '0' && cap[p] <= '9') {
+                    avg = avg * 10 + (cap[p] - '0'); p++;
+                }
+                while (p < total - 4 && memcmp(cap + p, "min=", 4) != 0) p++;
+                p += 4;
+                while (p < total && cap[p] >= '0' && cap[p] <= '9') {
+                    mn = mn * 10 + (cap[p] - '0'); p++;
+                }
+                while (p < total - 4 && memcmp(cap + p, "max=", 4) != 0) p++;
+                p += 4;
+                while (p < total && cap[p] >= '0' && cap[p] <= '9') {
+                    mx = mx * 10 + (cap[p] - '0'); p++;
+                }
+                int full = 1024 * 768;
+                printf("  parsed WM damage stats: avg=%d min=%d max=%d (full=%d)\n",
+                       avg, mn, mx, full);
+
+                EXPECT(avg > 0 && avg < (full * 7) / 10,
+                       "avg pixels/frame < 70% of a full redraw");
+                EXPECT(mn > 0 && mn < (full * 4) / 10,
+                       "min pixels/frame < 40% of a full redraw (an idle frame)");
+                /* Sanity: avg ≤ max, min ≤ avg. */
+                EXPECT(mn <= avg && avg <= mx,
+                       "min ≤ avg ≤ max (sanity)");
+                /* And the visual must still be correct — t39 already
+                 * checks pixel values, but re-grep them here so a
+                 * regression in this run shows up against this
+                 * specific WM invocation. Each string gets its own
+                 * loop bound to avoid OOB reads (the previous shared
+                 * `i < total - 32` bound under-covered the 37-char
+                 * Hello search string by 5 bytes, masking matches
+                 * near the end of the buffer). */
+                int find_paint = 0, find_hello = 0, find_bg = 0;
+                for (int i = 0; i + 33 <= total; i++) {
+                    if (memcmp(cap + i, "paint cell @ (322,232) = 0xe03030", 33) == 0)
+                        find_paint = 1;
+                }
+                for (int i = 0; i + 37 <= total; i++) {
+                    if (memcmp(cap + i, "hello title bar @ (110,70) = 0x305080", 37) == 0)
+                        find_hello = 1;
+                }
+                for (int i = 0; i + 30 <= total; i++) {
+                    if (memcmp(cap + i, "desktop bg @ (0,30) = 0x103060", 30) == 0)
+                        find_bg = 1;
+                }
+                EXPECT(find_paint && find_hello && find_bg,
+                       "rendered pixels are still correct (Paint cell + Hello title + bg)");
+            }
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \
