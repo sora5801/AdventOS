@@ -109,6 +109,7 @@ typedef unsigned int   size_t;
 #define SYS_NTP_TEST_RESPONDER 77
 #define SYS_DNS_CACHE_STATS    78
 #define SYS_DHCP_INFO     79
+#define SYS_FD_NB         80
 
 /* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
  * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to
@@ -333,6 +334,12 @@ int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);
 int      sys_dns_cache_stats(unsigned int out[4]);
 int      sys_dhcp_info   (struct sys_dhcp_info *out);
+/* Session 62: flip the FD_FL_NONBLOCK bit on a per-fd flags byte.
+ * on=1 makes the fd non-blocking — SYS_ACCEPT / SYS_READ on a socket
+ * fd will return -1 instead of yielding when nothing is queued. Lets
+ * the userspace WM pump many client fds from a single 60-fps loop
+ * without ever stalling on any one of them. */
+int      sys_fd_nb       (int fd, int on);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

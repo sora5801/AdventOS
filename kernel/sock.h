@@ -79,4 +79,20 @@ int  sock_write  (int idx, const void *buf, int n);
 int  sock_close  (int idx);
 void sock_inc_ref(int idx);                             /* fork uses this  */
 
+/* Session 62 — non-blocking peek helpers. Lets the syscall layer
+ * implement O_NONBLOCK semantics on SOCK fds without changing the
+ * existing blocking accept/read signatures.
+ *
+ *   sock_accept_avail(idx) = 1 if a connection is already queued in
+ *                            this listener's backlog ring, 0 otherwise.
+ *                            Returns -1 on bad idx / wrong state.
+ *
+ *   sock_read_avail(idx)   = 1 if there's at least one byte in the
+ *                            socket's rx ring OR the peer has closed
+ *                            (so a non-blocking read would observe
+ *                            either data or EOF, never block).
+ *                            Returns -1 on bad idx / wrong state. */
+int  sock_accept_avail(int idx);
+int  sock_read_avail  (int idx);
+
 #endif

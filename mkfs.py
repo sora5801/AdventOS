@@ -110,6 +110,8 @@ USER_PROGRAMS = [
     ('dbgtest.elf',    'user/_obj/dbgtest.bin',    None),
     # Session 58: RSA-PKCS#1 v1.5 sign/verify exerciser.
     ('rsatest.elf',    'user/_obj/rsatest.bin',    None),
+    # Session 62: out-of-process WM client demo.
+    ('gclient.elf',    'user/_obj/gclient.bin',    None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

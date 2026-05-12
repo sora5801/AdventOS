@@ -39,12 +39,21 @@ enum {
     FD_PTY_S,         /* pseudo-terminal slave  (session 52); obj_idx = pty idx */
 };
 
+/* Session 62 — per-fd flags.  Currently only bit 0 = O_NONBLOCK
+ * (settable via SYS_FD_NB).  When set on a FD_SOCK, sys_accept and
+ * sys_read return -1 immediately if there's nothing to do, instead
+ * of looping task_yield until data arrives.  Required for the WM's
+ * event loop: it can't afford to block on a single client connection
+ * at 60 fps. */
+#define FD_FL_NONBLOCK   0x01
+
 struct task_fd {
     int      kind;
     int      obj_idx;      /* fs_idx / sock_idx / pipe_idx / tmpfs_idx */
     uint32_t offset;       /* used by FD_FS, FD_TMPFS                  */
     void    *fs_data;      /* FD_FS only: which fs_instance owns this  */
                            /* fd. NULL means boot fs.                  */
+    uint32_t flags;        /* FD_FL_* bitmask (session 62)             */
 };
 
 enum {

@@ -189,6 +189,24 @@ int sock_accept(int idx) {
     return q_pop(&g_socks[idx]);
 }
 
+/* Session 62 — peek helpers for the non-blocking accept/read path.
+ * The actual O_NONBLOCK check happens in syscall.c against the
+ * task_fd's flags bitmap; if non-blocking is set, the syscall
+ * handler calls these first and short-circuits to -1 when nothing's
+ * available. */
+int sock_accept_avail(int idx) {
+    if (idx < 0 || idx >= SOCK_MAX) return -1;
+    if (g_socks[idx].state != SOCK_LISTEN) return -1;
+    return q_empty(&g_socks[idx]) ? 0 : 1;
+}
+
+int sock_read_avail(int idx) {
+    if (idx < 0 || idx >= SOCK_MAX) return -1;
+    struct sock *s = &g_socks[idx];
+    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) return -1;
+    return (s->rx_head != s->rx_tail || s->peer_closed) ? 1 : 0;
+}
+
 int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
     if (g_socks[idx].state != SOCK_NEW) return -1;

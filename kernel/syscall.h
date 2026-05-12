@@ -164,6 +164,16 @@
                                 netmask, dns server, lease length, time
                                 acquired. */
 
+/* ---- Session 62: out-of-process apps over IPC ---- */
+
+#define SYS_FD_NB         80 /* (eax=80, ebx=fd, ecx=on) -> 0 / -1.
+                                When on=1, sets FD_FL_NONBLOCK on the
+                                given fd in the task's fd table. SYS_ACCEPT
+                                / SYS_READ then return -1 immediately on
+                                empty instead of blocking. Lets the WM
+                                pump many client connections from a single
+                                60-fps event loop. */
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;

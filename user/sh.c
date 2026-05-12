@@ -2864,6 +2864,172 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t45] out-of-process apps over IPC: WM <-> gclient.elf\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 62 added an IPC server inside the WM (TCP loopback
+         * on 127.0.0.1:7000) and a small "draw protocol" that lets
+         * unrelated processes connect, create windows, paint, and
+         * receive mouse + key events back.
+         *
+         * t45 spawns both the WM (gui.elf selftest) AND the client
+         * (gclient.elf selftest) and captures each one's stdout in
+         * its own pipe.  The WM's scripted timeline includes a click
+         * at (830, 559) — inside the client's window @ (720, 480) —
+         * at frame 180.  Round-trip witnesses:
+         *
+         *   client stdout: "connected to WM"
+         *   client stdout: "window N created"
+         *   client stdout: "scene painted"
+         *   client stdout: "got CLICK ..."   ← the event came back
+         *   WM stdout:     "wm: client fd=N HELLO ok"
+         *   WM stdout:     "wm: created client window wid=N for fd=N"
+         *
+         * Order matters: WM must bind port 7000 BEFORE gclient tries
+         * to connect.  We fork the WM first, sleep, then fork the
+         * client.  Sleeping ~400 ms is enough — even in slow QEMU
+         * the WM's startup (mmap fb, spawn 6 windows, bind, listen)
+         * is well under 100 ms. */
+        int wm_pp[2];
+        if (sys_pipe(wm_pp) < 0) {
+            puts("  FAIL  pipe() for WM capture\n");
+        } else {
+            int wm_pid = sys_fork();
+            if (wm_pid == 0) {
+                sys_dup2(wm_pp[1], 1);
+                sys_dup2(wm_pp[1], 2);
+                sys_close(wm_pp[0]);
+                sys_close(wm_pp[1]);
+                const char *a[] = { "gui.elf", "selftest", 0 };
+                sys_exec("gui.elf", a);
+                sys_exit(127);
+            }
+            sys_close(wm_pp[1]);
+
+            /* Give the WM time to bind 127.0.0.1:7000 before the
+             * client tries to connect. */
+            sys_sleep_ms(400);
+
+            int cl_pp[2];
+            if (sys_pipe(cl_pp) < 0) {
+                puts("  FAIL  pipe() for client capture\n");
+                /* Drain WM anyway. */
+                int code; sys_wait(&code);
+            } else {
+                int cl_pid = sys_fork();
+                if (cl_pid == 0) {
+                    sys_dup2(cl_pp[1], 1);
+                    sys_dup2(cl_pp[1], 2);
+                    sys_close(cl_pp[0]);
+                    sys_close(cl_pp[1]);
+                    const char *a[] = { "gclient.elf", "selftest", 0 };
+                    sys_exec("gclient.elf", a);
+                    sys_exit(127);
+                }
+                sys_close(cl_pp[1]);
+
+                /* Drain both pipes.  We don't want to block the WM
+                 * by failing to consume its pipe — read both
+                 * round-robin until each gives EOF. */
+                static char wm_buf[4096];
+                static char cl_buf[4096];
+                int wm_total = 0, cl_total = 0;
+                int wm_eof = 0,    cl_eof = 0;
+                while (!wm_eof || !cl_eof) {
+                    if (!wm_eof) {
+                        int n = sys_read(wm_pp[0],
+                                         wm_buf + wm_total,
+                                         (int)sizeof(wm_buf) - 1 - wm_total);
+                        if (n <= 0)  wm_eof = 1;
+                        else         wm_total += n;
+                        if (wm_total >= (int)sizeof(wm_buf) - 1) wm_eof = 1;
+                    }
+                    if (!cl_eof) {
+                        int n = sys_read(cl_pp[0],
+                                         cl_buf + cl_total,
+                                         (int)sizeof(cl_buf) - 1 - cl_total);
+                        if (n <= 0)  cl_eof = 1;
+                        else         cl_total += n;
+                        if (cl_total >= (int)sizeof(cl_buf) - 1) cl_eof = 1;
+                    }
+                }
+                wm_buf[wm_total] = 0;
+                cl_buf[cl_total] = 0;
+                sys_close(wm_pp[0]);
+                sys_close(cl_pp[0]);
+                int code1 = 0, code2 = 0;
+                sys_wait(&code1);
+                sys_wait(&code2);
+
+                printf("  captured WM:%d bytes, client:%d bytes\n",
+                       wm_total, cl_total);
+                puts("  ---- gclient output ----\n");
+                sys_write(1, cl_buf, cl_total);
+                puts("  ------------------------\n");
+
+                /* SKIP if no framebuffer (CI without -vga std). */
+                int find_no_fb = 0;
+                for (int i = 0; i < wm_total - 14; i++) {
+                    if (wm_buf[i] == 'n' &&
+                        memcmp(wm_buf + i, "no framebuffer", 14) == 0) {
+                        find_no_fb = 1; break;
+                    }
+                }
+                if (find_no_fb) {
+                    puts("  SKIP  no framebuffer in this QEMU instance\n");
+                } else {
+                    int wm_hello = 0, wm_create = 0;
+                    int cl_conn = 0, cl_create = 0, cl_paint = 0, cl_click = 0;
+                    for (int i = 0; i < wm_total; i++) {
+                        if (!wm_hello && i + 18 <= wm_total &&
+                            memcmp(wm_buf + i, "client fd=", 10) == 0)
+                            wm_hello = 1;
+                        if (!wm_create && i + 27 <= wm_total &&
+                            memcmp(wm_buf + i, "created client window wid=", 26) == 0)
+                            wm_create = 1;
+                    }
+                    for (int i = 0; i < cl_total; i++) {
+                        if (!cl_conn && i + 17 <= cl_total &&
+                            memcmp(cl_buf + i, "connected to WM", 15) == 0)
+                            cl_conn = 1;
+                        if (!cl_create && i + 14 <= cl_total &&
+                            memcmp(cl_buf + i, "window ", 7) == 0 &&
+                            cl_buf[i+7] >= '0' && cl_buf[i+7] <= '9' &&
+                            i + 14 <= cl_total &&
+                            (memcmp(cl_buf + i + 7, " created", 8) == 0 ||
+                             memcmp(cl_buf + i + 8, " created", 8) == 0))
+                            cl_create = 1;
+                        if (!cl_paint && i + 13 <= cl_total &&
+                            memcmp(cl_buf + i, "scene painted", 13) == 0)
+                            cl_paint = 1;
+                        if (!cl_click && i + 9 <= cl_total &&
+                            memcmp(cl_buf + i, "got CLICK", 9) == 0)
+                            cl_click = 1;
+                    }
+
+                    EXPECT(wm_hello,
+                           "WM accepted the client connection (HELLO handshake ok)");
+                    EXPECT(wm_create,
+                           "WM allocated a window for the client (CREATE_WIN dispatch)");
+                    EXPECT(cl_conn,
+                           "client connected to WM on 127.0.0.1:7000");
+                    EXPECT(cl_create,
+                           "client received WM_EVT_WINDOW_ID back from CREATE_WIN");
+                    EXPECT(cl_paint,
+                           "client sent FILL_RECT + DRAW_TEXT + PRESENT");
+                    EXPECT(cl_click,
+                           "client received WM_EVT_MOUSE_BTN after scripted click");
+                }
+            }
+        }
+
+        #undef EXPECT
+    }
+
     puts("[t36] sshd: host-key persistence on disk (/etc/ssh_host_key)\n");
     {
         #define EXPECT(cond, msg) do { \

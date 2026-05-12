@@ -440,6 +440,15 @@ int sys_dhcp_info(struct sys_dhcp_info *out) {
     return ret;
 }
 
+int sys_fd_nb(int fd, int on) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FD_NB), "b"(fd), "c"(on)
+                      : "memory");
+    return ret;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

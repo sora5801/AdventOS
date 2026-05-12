@@ -64,6 +64,10 @@ static void release_fd(struct task_fd *e) {
         case FD_PTY_S:   pty_close_slave  (e->obj_idx); break;
         default: break;     /* FD_FS / FD_STDIN / FD_STDOUT have no refcount */
     }
+    e->kind    = FD_FREE;
+    e->obj_idx = -1;
+    e->offset  = 0;
+    e->flags   = 0;          /* session 62 — clear FD_FL_NONBLOCK */
 }
 
 #define USER_STR_MAX 256
@@ -273,6 +277,15 @@ void syscall_dispatch(struct registers *r) {
                     break;
                 }
                 case FD_SOCK:
+                    /* Session 62 — honor FD_FL_NONBLOCK on the fd
+                     * before falling into sock_read's blocking yield
+                     * loop. The peek (sock_read_avail) is cheap and
+                     * lets the WM pump dozens of client fds per
+                     * frame without ever stalling. */
+                    if (e->flags & FD_FL_NONBLOCK) {
+                        int av = sock_read_avail(e->obj_idx);
+                        if (av != 1) { ret = -1; break; }
+                    }
                     ret = sock_read(e->obj_idx, buf, n);
                     break;
                 case FD_PIPE_R:
@@ -386,6 +399,15 @@ void syscall_dispatch(struct registers *r) {
             if (fd < 0 || fd >= TASK_MAX_FDS)         { ret = -1; break; }
             if (t->fds[fd].kind != FD_SOCK)           { ret = -1; break; }
 
+            /* Session 62 — non-blocking accept: if FD_FL_NONBLOCK is
+             * set, peek the backlog and return -1 instead of blocking
+             * when no connection is queued. The accepted child fd
+             * does NOT inherit the flag — clients shouldn't be forced
+             * into nonblock mode just because the listener was. */
+            if (t->fds[fd].flags & FD_FL_NONBLOCK) {
+                int av = sock_accept_avail(t->fds[fd].obj_idx);
+                if (av != 1) { ret = -1; break; }
+            }
             int conn_sock = sock_accept(t->fds[fd].obj_idx);
             if (conn_sock < 0) { ret = -1; break; }
 
@@ -394,7 +416,19 @@ void syscall_dispatch(struct registers *r) {
 
             t->fds[conn_fd].kind    = FD_SOCK;
             t->fds[conn_fd].obj_idx = conn_sock;
+            t->fds[conn_fd].flags   = 0;
             ret = conn_fd;
+            break;
+        }
+        case SYS_FD_NB: {
+            int fd = (int)a;
+            int on = (int)b;
+            struct task *t = task_current();
+            if (fd < 0 || fd >= TASK_MAX_FDS)        { ret = -1; break; }
+            if (t->fds[fd].kind == FD_FREE)          { ret = -1; break; }
+            if (on) t->fds[fd].flags |=  FD_FL_NONBLOCK;
+            else    t->fds[fd].flags &= ~FD_FL_NONBLOCK;
+            ret = 0;
             break;
         }
         case SYS_PIPE: {

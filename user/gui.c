@@ -165,7 +165,10 @@ static void draw_cursor(int x, int y) {
 
 /* ---- Window model ------------------------------------------------ */
 
-#define MAX_WINDOWS  8
+/* Session 62 — was 8; bumped to 12 to leave headroom for client
+ * windows alongside the 6 built-in apps (Hello/Clock/Calc/Paint/
+ * Notepad/Tasks). */
+#define MAX_WINDOWS  12
 #define TITLE_H      18
 #define CLOSE_W      14
 #define BORDER       1
@@ -193,6 +196,16 @@ struct window {
      * explicitly opt in so the canvas can keep painting under a held
      * mouse.  Default 0 = button-style. */
     int      wants_drag;
+    /* Session 62: out-of-process windows.  Built-in apps still use the
+     * draw/click/key callbacks above; client-owned windows leave those
+     * NULL (or set to the client_* stubs) and the WM blits their
+     * pixmap each frame instead.  client_fd lets event dispatch route
+     * back to the right TCP connection.  pix_idx slots into the
+     * g_client_pix[] storage pool. */
+    int      client_fd;    /* -1 for built-in, else a TCP fd */
+    int      pix_idx;      /* -1 for built-in, else 0..MAX_CLIENT_WINS-1 */
+    int      content_w;    /* pixmap width  in pixels (capped at WIN_PIX_W) */
+    int      content_h;    /* pixmap height in pixels (capped at WIN_PIX_H) */
     int      state[16];    /* per-app scratchpad */
 };
 
@@ -204,8 +217,10 @@ static int win_alloc(void) {
         if (!g_wins[i].alive) {
             for (size_t b = 0; b < sizeof(g_wins[i]); b++)
                 ((uint8_t *)&g_wins[i])[b] = 0;
-            g_wins[i].alive = 1;
-            g_wins[i].id    = i;
+            g_wins[i].alive     = 1;
+            g_wins[i].id        = i;
+            g_wins[i].client_fd = -1;       /* session 62: built-in by default */
+            g_wins[i].pix_idx   = -1;
             return i;
         }
     }
@@ -932,6 +947,381 @@ static void notepad_key(struct window *w, int key) {
     tf_handle_key(&g_notepad_tf, key);
 }
 
+/* ---- IPC server (session 62) -----------------------------------
+ *
+ * Out-of-process clients connect over TCP loopback (127.0.0.1:7000)
+ * and speak the protocol in include/wm_proto.h: a 4-byte header
+ * (kind, reserved, length) + payload.  The WM:
+ *
+ *   * binds + listens on WM_PORT, sets the listen fd non-blocking
+ *   * each frame, accepts any newly-queued connections (non-blocking
+ *     accept just returns -1 when nothing's pending) and adds them
+ *     to a small client table
+ *   * for each connected client, reads whatever bytes are available
+ *     into a per-client buffer and slices out complete messages,
+ *     dispatching one at a time
+ *   * window mouse / key events are serialized + written back to the
+ *     owning client's fd in dispatch_event_to_client
+ *
+ * Per-client buffering matters because TCP is a byte stream — a
+ * single sys_read can return half a message, or two and a half. The
+ * buffer holds whatever didn't parse yet; the next read appends.
+ *
+ * On disconnect (sys_read returns 0 = EOF, or -1 + EAGAIN-style and
+ * we eventually detect a dead client) the WM tears down every window
+ * the client owned. */
+
+#include "../include/wm_proto.h"
+
+#define IPC_MAX_CLIENTS         4
+#define MAX_CLIENT_WINS         4
+#define WIN_PIX_W             300
+#define WIN_PIX_H             200
+
+/* Per-client-window pixmap pool. 32-bpp RGBA, indexed by window's
+ * pix_idx.  Allocated LAZILY via malloc (which grows the user heap
+ * through SYS_BRK) — keeping the buffers as static arrays here
+ * would force build.sh's -fno-zero-initialized-in-bss into emitting
+ * the full 960 KiB to disk inside gui.bin, blowing the AdventFS
+ * bitmap cap (~2 MiB total).  By going through malloc we keep the
+ * on-disk binary small and only pay the RAM cost if a client
+ * actually shows up. */
+static uint32_t *g_client_pix[MAX_CLIENT_WINS];
+static int       g_client_pix_used[MAX_CLIENT_WINS];
+
+struct ipc_client {
+    int      in_use;
+    int      fd;
+    int      hello_ok;       /* set on a valid WM_CMD_HELLO */
+    /* Inbound bytes that didn't form a complete message yet. */
+    uint8_t  recv[sizeof(struct wm_hdr) + WM_MAX_PAYLOAD];
+    int      recv_off;
+};
+static struct ipc_client g_clients[IPC_MAX_CLIENTS];
+static int g_listen_fd = -1;
+
+/* Forward decls so the click/key trampolines can call into the
+ * event-dispatch code. */
+static void wm_send_evt(int fd, uint8_t kind, const void *payload, int len);
+static void client_destroy_window(int wid);
+
+/* Client-window trampolines. Calc/Hello/etc. supply their own
+ * draw/click/key callbacks; out-of-process windows get THESE — they
+ * just serialize the event and ship it to the owning fd. The render
+ * path checks pix_idx >= 0 to know it should blit the pixmap. */
+static void client_win_draw(struct window *w, int frame) {
+    (void)frame;
+    if (w->pix_idx < 0) return;
+    const uint32_t *pix = g_client_pix[w->pix_idx];
+    int sx = w->x;
+    int sy = w->y + TITLE_H;
+    for (int yy = 0; yy < w->content_h; yy++) {
+        for (int xx = 0; xx < w->content_w; xx++) {
+            uint32_t c = pix[yy * w->content_w + xx];
+            put_pixel(sx + xx, sy + yy, c);
+        }
+    }
+}
+
+static void client_win_click(struct window *w, int lx, int ly, int btns) {
+    if (w->client_fd < 0) return;
+    struct wm_evt_mouse_btn ev = {
+        .wid  = w->id,
+        .lx   = lx, .ly = ly,
+        .btns = (uint32_t)btns,
+        .down = 1,
+    };
+    wm_send_evt(w->client_fd, WM_EVT_MOUSE_BTN, &ev, sizeof(ev));
+}
+
+static void client_win_key(struct window *w, int key) {
+    if (w->client_fd < 0) return;
+    struct wm_evt_key ev = {
+        .wid     = w->id,
+        .keycode = key,
+    };
+    wm_send_evt(w->client_fd, WM_EVT_KEY, &ev, sizeof(ev));
+}
+
+/* Write a single event message. Best-effort; if the client has died
+ * sys_write returns -1 and we'll notice on the next pump_client call. */
+static void wm_send_evt(int fd, uint8_t kind, const void *payload, int len) {
+    if (fd < 0) return;
+    struct wm_hdr h = { .kind = kind, .reserved = 0, .length = (uint16_t)len };
+    sys_write(fd, &h, sizeof(h));
+    if (len > 0) sys_write(fd, payload, len);
+}
+
+/* Allocate the next free pixmap pool slot, or -1 if all 4 are taken
+ * or out of heap. The malloc-on-first-use scheme means the WM only
+ * pays the ~240 KiB per slot if a client actually claims one; an
+ * idle WM doesn't reserve any pixmap memory. */
+static int alloc_pix_slot(void) {
+    for (int i = 0; i < MAX_CLIENT_WINS; i++) {
+        if (!g_client_pix_used[i]) {
+            if (!g_client_pix[i]) {
+                g_client_pix[i] = malloc(WIN_PIX_W * WIN_PIX_H * sizeof(uint32_t));
+                if (!g_client_pix[i]) return -1;
+            }
+            g_client_pix_used[i] = 1;
+            /* Pre-fill light grey so the client window doesn't show
+             * uninitialized RAM in the half-second before the first
+             * client draw command lands. */
+            for (int p = 0; p < WIN_PIX_W * WIN_PIX_H; p++) {
+                g_client_pix[i][p] = 0xE0E0E0u;
+            }
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void free_pix_slot(int slot) {
+    if (slot >= 0 && slot < MAX_CLIENT_WINS) g_client_pix_used[slot] = 0;
+}
+
+static void client_destroy_window(int wid) {
+    if (wid < 0 || wid >= MAX_WINDOWS) return;
+    struct window *w = &g_wins[wid];
+    if (!w->alive) return;
+    if (w->pix_idx >= 0) free_pix_slot(w->pix_idx);
+    w->alive = 0;
+}
+
+static void rasterize_fill_rect(struct window *w,
+                                 int x, int y, int rw, int rh, uint32_t rgb) {
+    if (w->pix_idx < 0) return;
+    uint32_t *pix = g_client_pix[w->pix_idx];
+    /* Clip to content area. */
+    int x0 = x, y0 = y, x1 = x + rw, y1 = y + rh;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w->content_w) x1 = w->content_w;
+    if (y1 > w->content_h) y1 = w->content_h;
+    for (int yy = y0; yy < y1; yy++) {
+        uint32_t *row = pix + yy * w->content_w;
+        for (int xx = x0; xx < x1; xx++) row[xx] = rgb;
+    }
+}
+
+static void rasterize_pixel(struct window *w, int x, int y, uint32_t rgb) {
+    if (w->pix_idx < 0) return;
+    if (x < 0 || y < 0 || x >= w->content_w || y >= w->content_h) return;
+    g_client_pix[w->pix_idx][y * w->content_w + x] = rgb;
+}
+
+static void rasterize_glyph(struct window *w, int x, int y, char c, uint32_t rgb) {
+    if (w->pix_idx < 0) return;
+    if ((uint8_t)c < FONT_FIRST_CH || (uint8_t)c > FONT_LAST_CH) return;
+    const uint8_t *glyph = font8x8[(uint8_t)c - FONT_FIRST_CH];
+    for (int r = 0; r < FONT_H; r++) {
+        uint8_t bits = glyph[r];
+        for (int col = 0; col < FONT_W; col++) {
+            if (bits & (1u << col)) rasterize_pixel(w, x + col, y + r, rgb);
+        }
+    }
+}
+
+static void rasterize_text(struct window *w, int x, int y, const char *s,
+                            int n, uint32_t rgb) {
+    for (int i = 0; i < n; i++) {
+        rasterize_glyph(w, x + i * FONT_W, y, s[i], rgb);
+    }
+}
+
+/* ---- Per-client message dispatch ------------------------------ */
+
+/* Returns 1 if the client should be torn down (protocol violation,
+ * died, etc.). */
+static int handle_cmd(struct ipc_client *cli, uint8_t kind,
+                       const uint8_t *payload, int len) {
+    /* HELLO must come first. Anything else against an un-helloed
+     * client is a protocol error. */
+    if (!cli->hello_ok && kind != WM_CMD_HELLO) return 1;
+
+    switch (kind) {
+        case WM_CMD_HELLO: {
+            if (len < (int)sizeof(struct wm_cmd_hello)) return 1;
+            const struct wm_cmd_hello *m = (const void *)payload;
+            if (m->magic != WM_PROTO_MAGIC || m->version != 1) return 1;
+            cli->hello_ok = 1;
+            printf("wm: client fd=%d HELLO ok (magic+v1)\n", cli->fd);
+            return 0;
+        }
+        case WM_CMD_CREATE_WIN: {
+            if (len < (int)sizeof(struct wm_cmd_create_win)) return 1;
+            const struct wm_cmd_create_win *m = (const void *)payload;
+            int slot = win_alloc();
+            int pix  = alloc_pix_slot();
+            if (slot < 0 || pix < 0) {
+                if (slot >= 0) g_wins[slot].alive = 0;
+                if (pix >= 0)  free_pix_slot(pix);
+                /* Send back wid = -1 so the client knows. */
+                struct wm_evt_window_id ev = { .wid = -1 };
+                wm_send_evt(cli->fd, WM_EVT_WINDOW_ID, &ev, sizeof(ev));
+                return 0;
+            }
+            struct window *w = &g_wins[slot];
+            for (int i = 0; i < (int)sizeof(w->title) - 1 && m->title[i]; i++) {
+                w->title[i] = m->title[i];
+            }
+            w->x = m->x; w->y = m->y;
+            w->w = m->w; w->h = m->h;
+            /* Cap content size at the pixmap pool's per-slot capacity. */
+            int cw = m->w;
+            int ch = m->h - TITLE_H - 1;
+            if (cw > WIN_PIX_W) cw = WIN_PIX_W;
+            if (ch > WIN_PIX_H) ch = WIN_PIX_H;
+            if (cw < 1) cw = 1;
+            if (ch < 1) ch = 1;
+            w->content_w = cw;
+            w->content_h = ch;
+            w->pix_idx   = pix;
+            w->client_fd = cli->fd;
+            w->draw      = client_win_draw;
+            w->click     = client_win_click;
+            w->key       = client_win_key;
+            w->z         = ++g_next_z;
+            w->focused   = 1;
+            for (int i = 0; i < MAX_WINDOWS; i++)
+                if (i != slot) g_wins[i].focused = 0;
+
+            struct wm_evt_window_id ev = { .wid = slot };
+            wm_send_evt(cli->fd, WM_EVT_WINDOW_ID, &ev, sizeof(ev));
+            printf("wm: created client window wid=%d for fd=%d (%dx%d)\n",
+                   slot, cli->fd, cw, ch);
+            return 0;
+        }
+        case WM_CMD_FILL_RECT: {
+            if (len < (int)sizeof(struct wm_cmd_fill_rect)) return 1;
+            const struct wm_cmd_fill_rect *m = (const void *)payload;
+            if (m->wid < 0 || m->wid >= MAX_WINDOWS) return 1;
+            struct window *w = &g_wins[m->wid];
+            if (!w->alive || w->client_fd != cli->fd) return 0;  /* ignore */
+            rasterize_fill_rect(w, m->x, m->y, m->w, m->h, m->rgb);
+            return 0;
+        }
+        case WM_CMD_DRAW_TEXT: {
+            if (len < (int)sizeof(struct wm_cmd_draw_text)) return 1;
+            const struct wm_cmd_draw_text *m = (const void *)payload;
+            if (m->wid < 0 || m->wid >= MAX_WINDOWS) return 1;
+            struct window *w = &g_wins[m->wid];
+            if (!w->alive || w->client_fd != cli->fd) return 0;
+            int text_len = len - (int)sizeof(struct wm_cmd_draw_text);
+            const char *txt = (const char *)payload + sizeof(struct wm_cmd_draw_text);
+            rasterize_text(w, m->x, m->y, txt, text_len, m->rgb);
+            return 0;
+        }
+        case WM_CMD_DRAW_PIXEL: {
+            if (len < (int)sizeof(struct wm_cmd_draw_pixel)) return 1;
+            const struct wm_cmd_draw_pixel *m = (const void *)payload;
+            if (m->wid < 0 || m->wid >= MAX_WINDOWS) return 1;
+            struct window *w = &g_wins[m->wid];
+            if (!w->alive || w->client_fd != cli->fd) return 0;
+            rasterize_pixel(w, m->x, m->y, m->rgb);
+            return 0;
+        }
+        case WM_CMD_DESTROY: {
+            if (len < (int)sizeof(struct wm_cmd_destroy)) return 1;
+            const struct wm_cmd_destroy *m = (const void *)payload;
+            if (m->wid < 0 || m->wid >= MAX_WINDOWS) return 0;
+            struct window *w = &g_wins[m->wid];
+            if (w->alive && w->client_fd == cli->fd) client_destroy_window(m->wid);
+            return 0;
+        }
+        case WM_CMD_PRESENT:
+            /* No-op — the WM composites every frame anyway. The
+             * client uses this as a "I'm done batching" marker. */
+            return 0;
+        default:
+            /* Unknown kind == protocol error == terminate connection. */
+            return 1;
+    }
+}
+
+static void teardown_client(struct ipc_client *cli) {
+    if (!cli->in_use) return;
+    printf("wm: client fd=%d disconnected — closing %d window(s)\n",
+           cli->fd, 0);   /* count would require a scan; minor */
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (g_wins[i].alive && g_wins[i].client_fd == cli->fd) {
+            client_destroy_window(i);
+        }
+    }
+    sys_close(cli->fd);
+    cli->in_use = 0;
+}
+
+/* Pump bytes off a client's fd, slicing out as many complete messages
+ * as fit in the recv buffer, dispatching each. Returns 0 normally,
+ * non-zero if the client should be torn down. */
+static int pump_client(struct ipc_client *cli) {
+    /* Read whatever's available. Non-blocking — returns -1 if empty. */
+    int avail = (int)sizeof(cli->recv) - cli->recv_off;
+    if (avail > 0) {
+        int n = sys_read(cli->fd, cli->recv + cli->recv_off, avail);
+        if (n == 0) return 1;       /* EOF */
+        if (n > 0) cli->recv_off += n;
+        /* n == -1 means "would block" — normal; fall through and try
+         * to dispatch whatever we already buffered. */
+    }
+
+    /* Slice out complete messages. */
+    for (;;) {
+        if (cli->recv_off < (int)sizeof(struct wm_hdr)) break;
+        const struct wm_hdr *h = (const void *)cli->recv;
+        int total = (int)sizeof(struct wm_hdr) + h->length;
+        if (h->length > WM_MAX_PAYLOAD) return 1;     /* malformed */
+        if (cli->recv_off < total) break;             /* partial — wait */
+        int rc = handle_cmd(cli, h->kind, cli->recv + sizeof(struct wm_hdr),
+                            (int)h->length);
+        if (rc) return rc;
+        /* Shift remaining bytes down. */
+        int rest = cli->recv_off - total;
+        for (int i = 0; i < rest; i++) cli->recv[i] = cli->recv[total + i];
+        cli->recv_off = rest;
+    }
+    return 0;
+}
+
+static void ipc_accept_new_clients(void) {
+    if (g_listen_fd < 0) return;
+    for (;;) {
+        int fd = sys_accept(g_listen_fd);
+        if (fd < 0) return;
+        /* Make the new fd non-blocking so per-client reads also short-
+         * circuit when there's nothing to read. */
+        sys_fd_nb(fd, 1);
+        /* Find a slot. */
+        int slot = -1;
+        for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+            if (!g_clients[i].in_use) { slot = i; break; }
+        }
+        if (slot < 0) {
+            printf("wm: client table full — rejecting fd=%d\n", fd);
+            sys_close(fd);
+            continue;
+        }
+        g_clients[slot].in_use   = 1;
+        g_clients[slot].fd       = fd;
+        g_clients[slot].hello_ok = 0;
+        g_clients[slot].recv_off = 0;
+        printf("wm: client accepted fd=%d slot=%d\n", fd, slot);
+    }
+}
+
+static void ipc_init(void) {
+    g_listen_fd = sys_socket();
+    if (g_listen_fd < 0) {
+        puts("wm: IPC socket() failed — out-of-process apps disabled\n");
+        return;
+    }
+    if (sys_bind  (g_listen_fd, WM_PORT) < 0) { sys_close(g_listen_fd); g_listen_fd = -1; return; }
+    if (sys_listen(g_listen_fd, 4)        < 0) { sys_close(g_listen_fd); g_listen_fd = -1; return; }
+    sys_fd_nb(g_listen_fd, 1);
+    printf("wm: IPC listening on 127.0.0.1:%d (non-blocking)\n", WM_PORT);
+}
+
 /* ---- Event dispatch + main loop --------------------------------- */
 
 static void desktop_draw(int mx, int my, int btn, int frame) {
@@ -977,7 +1367,16 @@ static void handle_mouse(int mx, int my, int btns, int prev_btns) {
         win_raise(idx);
         struct window *w = &g_wins[idx];
         if (hit_close_button(w, mx, my)) {
-            w->alive = 0;
+            /* Session 62 — for client-owned windows, send a CLOSE
+             * event before tearing the slot down. Lets the client
+             * shut down gracefully (most clients react by exiting). */
+            if (w->client_fd >= 0) {
+                struct wm_evt_close ev = { .wid = w->id };
+                wm_send_evt(w->client_fd, WM_EVT_CLOSE, &ev, sizeof(ev));
+                client_destroy_window(w->id);
+            } else {
+                w->alive = 0;
+            }
             return;
         }
         if (hit_title_bar(w, mx, my)) {
@@ -1113,12 +1512,24 @@ static struct script_step g_script[] = {
     { 165,   324, 658,   1,  0  },                   /* click Save button */
     { 175,   324, 658,   0,  0  },                   /* release */
 
+    /* ---- IPC-client coverage (session 62) ----
+     * gclient.elf places its window at (720, 480) size 220x140.
+     * Click at (830, 559) lands in the body — content-local (110, 61).
+     * The WM dispatches the click via client_win_click which serializes
+     * a WM_EVT_MOUSE_BTN over the TCP socket; gclient logs it.
+     *
+     * Doing this BEFORE the Hello re-raise so the final focus state
+     * still has Hello on top (preserves t39's title-bar focused-blue
+     * pixel check). */
+    { 180,   830, 559,   1,  0  },                   /* click into client window */
+    { 195,   830, 559,   0,  0  },                   /* release */
+
     /* Re-raise Hello so t39's "hello title bar = focused-blue"
-     * pixel assertion holds at end-of-script. Without this, Notepad
-     * would still be focused and Hello's title bar would read as
-     * unfocused grey. */
-    { 185,   100,  70,   1,  0  },
-    { 195,   100,  70,   0,  0  },
+     * pixel assertion holds at end-of-script. Without this, the
+     * client window (or Notepad) would still be focused and Hello's
+     * title bar would read as unfocused grey. */
+    { 215,   100,  70,   1,  0  },
+    { 225,   100,  70,   0,  0  },
 
     /* Sentinel — at_frame < 0 ends the table. */
     {  -1,    0,    0,   0,  0  },
@@ -1196,13 +1607,19 @@ int main(int argc, char **argv) {
     spawn_window("Tasks",  680, 220, 280, 240,
                  tasks_draw, 0, 0);
 
+    /* Bring up the IPC server AFTER built-in windows so any race
+     * between client connect + render uses the same coordinate
+     * system. */
+    ipc_init();
+
     int frame = 0;
     int prev_btns = 0;
-    /* Selftest now runs longer (was 80 frames in session 57) — the
-     * Calc + Notepad coverage scripted in g_script[] extends to
-     * frame ~175, and we want a few settling frames past the last
-     * Save click to redraw the "SAVED" footer overlay. */
-    int max_frames = g_selftest_mode ? 200 : 600;
+    /* Selftest budget (frames at 16 ms each, ~3-4 s wall clock in
+     * QEMU): the script now extends through the IPC-client click at
+     * frame 180-195 and a final Hello re-raise at 215-225, so 250
+     * gives us a few settling frames at the end before the WM
+     * exits and shuts down the listener. */
+    int max_frames = g_selftest_mode ? 250 : 600;
 
     for (;;) {
         int ms[4] = {0,0,0,0};
@@ -1222,6 +1639,16 @@ int main(int argc, char **argv) {
         if (key) {
             if (key == 0x1B) break;
             handle_key(key);
+        }
+
+        /* Pump the IPC server: accept any new clients, drain whatever
+         * commands are queued on existing connections, send pending
+         * events back.  All non-blocking so a slow / dead client
+         * never stalls the 60-fps loop. */
+        ipc_accept_new_clients();
+        for (int ci = 0; ci < IPC_MAX_CLIENTS; ci++) {
+            if (!g_clients[ci].in_use) continue;
+            if (pump_client(&g_clients[ci])) teardown_client(&g_clients[ci]);
         }
 
         handle_mouse(mx, my, btns, prev_btns);
