@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "1.0",
+  "server": {
+    "name": "adventos-agentd",
+    "version": "1.0.0",
+    "transport": "tcp",
+    "host": "127.0.0.1",
+    "port": 7000,
+    "framing": "line-delimited",
+    "protocol": "jsonrpc-2.0"
+  },
+  "tools": [
+    {
+      "name": "time",
+      "description": "Return the kernel's current UNIX epoch in seconds.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {"epoch": 1714680000}
+    },
+    {
+      "name": "getuid",
+      "description": "Return the uid + gid agentd is running under.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {"uid": 0, "gid": 0}
+    },
+    {
+      "name": "dns_resolve",
+      "description": "Resolve a hostname to an IPv4 address via the kernel resolver.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "host": {"type": "string", "description": "Hostname to resolve."}
+        },
+        "required": ["host"]
+      },
+      "outputExample": {"ip": "93.184.216.34"}
+    },
+    {
+      "name": "dhcp_info",
+      "description": "Return the active DHCP lease (ip, gateway, dns_server, lease).",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {
+        "have_lease": true,
+        "ip": "10.0.2.15",
+        "netmask": "255.255.255.0",
+        "gateway": "10.0.2.2",
+        "dns_server": "10.0.2.3",
+        "lease_seconds": 86400,
+        "acquired_epoch": 1714600000,
+        "t1_renew_at": 1714643200
+      }
+    },
+    {
+      "name": "dns_cache_stats",
+      "description": "Return cumulative DNS resolver cache stats.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {"lookups": 12, "hits": 9, "misses": 3, "evictions": 0}
+    },
+    {
+      "name": "fbinfo",
+      "description": "Return framebuffer geometry, or {enabled:false} if the kernel is text-mode only.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {"enabled": true, "width": 1024, "height": 768, "bpp": 32, "pitch": 4096}
+    },
+    {
+      "name": "smp_stats",
+      "description": "Return SMP topology + per-CPU tick counts.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []},
+      "outputExample": {"nr_cpus": 2, "ticks": [12345, 6789]}
+    },
+    {
+      "name": "shell.exec",
+      "description": "Fork+exec a command, capturing stdout / stderr. Runs with agentd's privileges (uid 0). The command path must be a valid ELF in the filesystem.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cmd":  {"type": "string", "description": "Command to exec, e.g. \"ls.elf\" or \"/wc.elf\"."},
+          "args": {"type": "array",  "items": {"type": "string"},
+                   "description": "Argument list passed after argv[0]=cmd. Up to 15 entries."}
+        },
+        "required": ["cmd"]
+      },
+      "outputExample": {"exit_code": 0, "stdout": "inittab\npasswd\n", "stderr": ""}
+    }
+  ]
+}

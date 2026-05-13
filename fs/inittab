@@ -9,4 +9,6 @@
 once httpd.elf
 once httpsd.elf
 once sshd.elf
+# Session 64: JSON-RPC tool surface for external agents on loopback.
+respawn agentd.elf
 once sh.elf selftest

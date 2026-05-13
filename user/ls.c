@@ -1,26 +1,134 @@
 /*
- * ls — list directory entries, one per line.
+ * ls — list directory entries.
  *
- *   ls                -> contents of cwd
+ *   ls                -> contents of cwd, one per line
  *   ls /etc           -> contents of /etc
+ *   ls --json         -> {"path":"...","entries":[{...}]}
  *   ls /etc | wc -l   -> count entries via pipeline
  *
- * Why a binary AND a shell builtin? Because shell builtins can't
- * appear in pipelines (they'd run inline in the shell instead of in
- * a forked child). The builtin is for snappy interactive use; this
- * binary is what `ls /etc | wc -l` actually exec()s into.
+ * --json adds mode + (uid, gid) per entry; humans only see the name.
+ * AdventFS doesn't store a creation/size that's cheap to read without
+ * an open()+stat(), so size is intentionally omitted.
  *
- * No flags today: no -l, no -a, no -1 (we always list one per line).
+ * Why a binary AND a shell builtin? Shell builtins can't appear in
+ * pipelines (they'd run inline in the shell instead of in a forked
+ * child). The builtin is for snappy interactive use; this binary is
+ * what `ls /etc | wc -l` actually exec()s into.
  */
 
 #include "libuser.h"
+#include "../libjson/libjson.h"
+
+/* Build "<dir>/<name>" into out. Handles dir=="/", dir=="", trailing
+ * slash. Returns 0 on success, -1 on overflow. */
+static int join_path(const char *dir, const char *name, char *out, int cap) {
+    int o = 0;
+    if (dir && dir[0] && !(dir[0] == '.' && dir[1] == 0)) {
+        for (int i = 0; dir[i]; i++) {
+            if (o >= cap - 2) return -1;
+            out[o++] = dir[i];
+        }
+        if (o > 0 && out[o - 1] != '/') {
+            if (o >= cap - 1) return -1;
+            out[o++] = '/';
+        }
+    }
+    for (int i = 0; name[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = name[i];
+    }
+    out[o] = 0;
+    return 0;
+}
+
+static int emit_human(const char *path) {
+    int  iter = 0;
+    char name[17];
+    int  shown = 0;
+    for (;;) {
+        for (int i = 0; i < 17; i++) name[i] = 0;
+        int idx = sys_readdir(path, &iter, name);
+        if (idx < 0) break;
+        sys_write(1, name, (int)strlen(name));
+        sys_write(1, "\n", 1);
+        shown++;
+    }
+    if (shown == 0) {
+        sys_write(2, "ls: empty or no such directory\n", 31);
+        return 1;
+    }
+    return 0;
+}
+
+static int emit_json(const char *path) {
+    char buf[2048];
+    struct json_w w;
+    json_w_init(&w, buf, sizeof(buf));
+
+    json_obj_begin(&w);
+      json_key(&w, "path"); json_str(&w, path);
+      json_key(&w, "entries");
+      json_arr_begin(&w);
+
+        int  iter = 0;
+        char name[17];
+        int  shown = 0;
+        for (;;) {
+            for (int i = 0; i < 17; i++) name[i] = 0;
+            int idx = sys_readdir(path, &iter, name);
+            if (idx < 0) break;
+
+            /* Look up mode + owner via the full path (the kernel
+             * needs an absolute or cwd-relative path; we built `path`
+             * to be absolute or "."). */
+            char full[80];
+            int  has_meta = 0, mode = 0, uid = 0, gid = 0;
+            if (join_path(path, name, full, sizeof(full)) == 0) {
+                mode = sys_fs_mode(full);
+                int owner = sys_fs_owner(full);
+                if (mode >= 0 && owner >= 0) {
+                    has_meta = 1;
+                    uid = (owner >> 16) & 0xFFFF;
+                    gid = owner & 0xFFFF;
+                }
+            }
+
+            json_obj_begin(&w);
+              json_key(&w, "name"); json_str(&w, name);
+              if (has_meta) {
+                  json_key(&w, "mode"); json_int(&w, mode);
+                  json_key(&w, "uid");  json_int(&w, uid);
+                  json_key(&w, "gid");  json_int(&w, gid);
+              }
+            json_obj_end(&w);
+            shown++;
+        }
+        if (shown == 0 && !json_w_ok(&w)) {
+            /* Even an empty directory is a successful listing; only
+             * a truly bad path produces no result and no entries. The
+             * agent can distinguish by reading the array length. */
+        }
+      json_arr_end(&w);
+    json_obj_end(&w);
+
+    if (!json_w_ok(&w)) {
+        sys_write(2, "ls: JSON buffer overflow\n", 25);
+        return 1;
+    }
+    sys_write(1, buf, json_w_len(&w));
+    sys_write(1, "\n", 1);
+    return 0;
+}
 
 int main(int argc, char **argv) {
-    /* Resolve the path argument. Bare or "." means cwd, fetched
-     * via SYS_GETCWD because SYS_READDIR takes a path string. */
-    char  cwd_buf[128];
+    int json_mode = 0;
     const char *path = ".";
-    if (argc >= 2) path = argv[1];
+    char  cwd_buf[128];
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--json") == 0) json_mode = 1;
+        else path = argv[i];
+    }
 
     if (path[0] == '.' && path[1] == 0) {
         if (sys_getcwd(cwd_buf, sizeof(cwd_buf)) < 0) {
@@ -30,29 +138,5 @@ int main(int argc, char **argv) {
         path = cwd_buf;
     }
 
-    int  iter = 0;
-    char name[17];
-    int  shown = 0;
-    for (;;) {
-        /* Pre-zero so we can append \n at the right spot regardless
-         * of whether the kernel filled all 16 slots (the on-disk
-         * name is 16 bytes NUL-padded; SYS_READDIR doesn't append
-         * a 17th NUL when the name is exactly 16 chars). */
-        for (int i = 0; i < 17; i++) name[i] = 0;
-        int idx = sys_readdir(path, &iter, name);
-        if (idx < 0) break;
-        sys_write(1, name, (int)strlen(name));
-        sys_write(1, "\n", 1);
-        shown++;
-    }
-
-    if (shown == 0) {
-        /* Distinguishing "empty dir" from "bad path" requires a
-         * separate sys_open + fs_entry_type — we don't have an
-         * is_dir helper exposed to userspace. Plain message either
-         * way; the t17 tests cover the non-empty path. */
-        sys_write(2, "ls: empty or no such directory\n", 31);
-        return 1;
-    }
-    return 0;
+    return json_mode ? emit_json(path) : emit_human(path);
 }

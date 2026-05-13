@@ -80,6 +80,8 @@ USER_PROGRAMS = [
     ('kill.elf',  'user/_obj/kill.bin',  None),
     ('ls.elf',    'user/_obj/ls.bin',    None),
     ('pwd.elf',   'user/_obj/pwd.bin',   None),
+    # Session 64: process listing for the agent-RPC tool surface.
+    ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
     ('nc.elf',    'user/_obj/nc.bin',    None),
     ('wget.elf',  'user/_obj/wget.bin',  None),
@@ -111,6 +113,8 @@ USER_PROGRAMS = [
     ('rsatest.elf',    'user/_obj/rsatest.bin',    None),
     # gclient.elf (session 62, out-of-process WM client) removed with
     # the WM.
+    # Session 64: JSON-RPC tool surface for external agents.
+    ('agentd.elf',     'user/_obj/agentd.bin',     None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
@@ -142,6 +146,10 @@ DATA_FILES = [
     ('test-ca.der', 'fs/etc/ssl/test-ca.der', 'ssl'),
     ('server.der',  'fs/etc/ssl/server.der',  'ssl'),
     ('server.key',  'fs/etc/ssl/server.key',  'ssl', 0o600),
+    # Session 64: tool manifest for the agent-RPC daemon. Mirrors
+    # what agentd's dispatcher accepts; agents read this to learn
+    # what they can call.
+    ('agent.tools.json', 'fs/etc/agent.tools.json', 'etc'),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

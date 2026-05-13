@@ -16,7 +16,9 @@
  * any mix of listeners and clients up to TCP_MAX_TCBS at once.
  */
 
-#define SOCK_MAX           16     /* bumped to fit fork-per-conn httpd */
+#define SOCK_MAX           24     /* bumped in session 64 to keep parity
+                                    * with TCP_MAX_TCBS when the agentd
+                                    * listener joined the boot service set. */
 /* Session 45 bump: 2048 → 4096 to give the TLS receive path room for
  * one real-world server flight (Cloudflare's is ~2.5 KiB). The TCP
  * window we advertise = this size. Larger values (8K+) blew the

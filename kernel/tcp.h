@@ -31,8 +31,14 @@
 /* Pool size — bumped to 16 in session 30 for fork-per-conn httpd.
  * Each accepted connection holds 2 TCBs (server-side conn + client-
  * side conn for loopback tests). 1 LISTEN + 3 concurrent loopback
- * connections = 7 TCBs minimum; bumped to 16 with headroom. */
-#define TCP_MAX_TCBS 16
+ * connections = 7 TCBs minimum; bumped to 16 with headroom.
+ *
+ * Session 64 added the agentd listener — fourth permanent LISTEN TCB
+ * alongside httpd/httpsd/sshd, plus the t47 selftest opens its own
+ * connection. With 4 listeners + the t21 multi-conn TCP test's three
+ * concurrent server-side TCBs + headroom we ran out at 16; bumped
+ * to 24. */
+#define TCP_MAX_TCBS 24
 
 enum {
     TCP_CLOSED = 0,

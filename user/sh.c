@@ -3440,6 +3440,166 @@ static void selftest(void) {
         printf("  result: %d/%d clients succeeded\n", ok, n_clients);
     }
 
+    puts("[t47] agentd: JSON-RPC tool surface over TCP loopback\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 64: agentd is started by init from /etc/inittab.
+         * It binds 127.0.0.1:7000 and serves newline-framed JSON-RPC.
+         * The selftest opens a single connection, pipelines three
+         * requests through it, parses each response, and checks the
+         * obvious invariants.
+         *
+         * Round-trip 1: time      — expect numeric epoch matching sys_time.
+         * Round-trip 2: getuid    — expect uid==0 (agentd inherits init).
+         * Round-trip 3: shell.exec("ls.elf",[]) — expect inittab in stdout.
+         * Round-trip 4: bogus method → error envelope with code -32601.
+         *
+         * Note: agentd is a `respawn` service. If our test crashes
+         * the loopback socket but agentd is mid-fork, init re-spawns
+         * it within ~200 ms — but we shouldn't crash it. Each
+         * round-trip is one line in, one line out.
+         */
+        const unsigned char ip_lo[4] = {127, 0, 0, 1};
+        int sk = sys_socket();
+        if (sk < 0) {
+            puts("  FAIL  sys_socket() returned -1\n");
+        } else if (sys_connect(sk, ip_lo, 7000) < 0) {
+            puts("  FAIL  could not connect to 127.0.0.1:7000\n");
+            sys_close(sk);
+        } else {
+            /* ---- 1) method=time ---- */
+            const char *req1 =
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"time\"}\n";
+            sys_write(sk, req1, (int)strlen(req1));
+
+            static char rbuf[2048];
+            int  rn = 0;
+            /* Read one line. agentd's response is well under 256 bytes. */
+            while (rn < (int)sizeof(rbuf) - 1) {
+                char c;
+                int n = sys_read(sk, &c, 1);
+                if (n <= 0) break;
+                rbuf[rn++] = c;
+                if (c == '\n') break;
+            }
+            rbuf[rn] = 0;
+            printf("  resp1 (%d bytes): %s", rn, rbuf);
+
+            uint32_t now = sys_time();
+            int has_id1   = 0, has_epoch = 0, epoch_sane = 0;
+            for (int i = 0; i + 6 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"id\":1", 6) == 0) has_id1 = 1;
+            }
+            for (int i = 0; i + 8 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"epoch\":", 8) == 0) {
+                    has_epoch = 1;
+                    /* Parse the number after the colon. */
+                    int j = i + 8;
+                    uint32_t v = 0;
+                    while (j < rn && rbuf[j] >= '0' && rbuf[j] <= '9') {
+                        v = v * 10 + (rbuf[j] - '0'); j++;
+                    }
+                    /* Within 5s of our sys_time read. */
+                    if (v + 5 >= now && now + 5 >= v) epoch_sane = 1;
+                }
+            }
+            EXPECT(has_id1,     "response carries id=1 from request");
+            EXPECT(has_epoch,   "response contains an \"epoch\" key");
+            EXPECT(epoch_sane,  "epoch value within 5s of sys_time()");
+
+            /* ---- 2) method=getuid ---- */
+            const char *req2 =
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"getuid\"}\n";
+            sys_write(sk, req2, (int)strlen(req2));
+            rn = 0;
+            while (rn < (int)sizeof(rbuf) - 1) {
+                char c;
+                int n = sys_read(sk, &c, 1);
+                if (n <= 0) break;
+                rbuf[rn++] = c;
+                if (c == '\n') break;
+            }
+            rbuf[rn] = 0;
+            printf("  resp2 (%d bytes): %s", rn, rbuf);
+
+            int has_uid0 = 0;
+            for (int i = 0; i + 8 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"uid\":0", 7) == 0) has_uid0 = 1;
+            }
+            EXPECT(has_uid0, "getuid returned uid=0 (agentd inherits init)");
+
+            /* ---- 3) method=shell.exec ls.elf /etc ---- */
+            const char *req3 =
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shell.exec\","
+                 "\"params\":{\"cmd\":\"ls.elf\",\"args\":[\"/etc\"]}}\n";
+            sys_write(sk, req3, (int)strlen(req3));
+            rn = 0;
+            while (rn < (int)sizeof(rbuf) - 1) {
+                char c;
+                int n = sys_read(sk, &c, 1);
+                if (n <= 0) break;
+                rbuf[rn++] = c;
+                if (c == '\n') break;
+            }
+            rbuf[rn] = 0;
+            /* libuser's printf doesn't grok "%.*s"; trim newline and
+             * emit the header + body in two writes. */
+            int print_n = rn;
+            while (print_n > 0 && (rbuf[print_n - 1] == '\n' || rbuf[print_n - 1] == '\r'))
+                print_n--;
+            rbuf[print_n] = 0;
+            printf("  resp3 (%d bytes): %s\n", rn, rbuf);
+
+            int has_id3 = 0, has_exit0 = 0, has_inittab = 0;
+            for (int i = 0; i + 6 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"id\":3", 6) == 0) has_id3 = 1;
+            }
+            for (int i = 0; i + 14 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"exit_code\":0", 13) == 0) has_exit0 = 1;
+            }
+            for (int i = 0; i + 7 <= rn; i++) {
+                if (memcmp(rbuf + i, "inittab", 7) == 0) has_inittab = 1;
+            }
+            EXPECT(has_id3,    "shell.exec response carries id=3");
+            EXPECT(has_exit0,  "shell.exec exit_code is 0 for ls.elf /etc");
+            EXPECT(has_inittab,"ls.elf stdout (in JSON-escaped form) lists 'inittab'");
+
+            /* ---- 4) method=bogus → error envelope ---- */
+            const char *req4 =
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"no.such.method\"}\n";
+            sys_write(sk, req4, (int)strlen(req4));
+            rn = 0;
+            while (rn < (int)sizeof(rbuf) - 1) {
+                char c;
+                int n = sys_read(sk, &c, 1);
+                if (n <= 0) break;
+                rbuf[rn++] = c;
+                if (c == '\n') break;
+            }
+            rbuf[rn] = 0;
+            printf("  resp4 (%d bytes): %s", rn, rbuf);
+
+            int has_error = 0, has_code_neg32601 = 0;
+            for (int i = 0; i + 9 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"error\":", 8) == 0) has_error = 1;
+            }
+            for (int i = 0; i + 13 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"code\":-32601", 13) == 0)
+                    has_code_neg32601 = 1;
+            }
+            EXPECT(has_error,         "unknown method produced an error envelope");
+            EXPECT(has_code_neg32601, "error code is -32601 (Method not found)");
+
+            sys_close(sk);
+        }
+
+        #undef EXPECT
+    }
+
     puts("=== selftest done ===\n\n");
 }
 

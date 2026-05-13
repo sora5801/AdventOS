@@ -3,15 +3,19 @@
  *
  *   echo hello world | wc      ->  1 2 12  (the 12th byte is the \n)
  *   wc /etc/inittab            ->  10 28 301 /etc/inittab
+ *   wc --json /etc/inittab     ->  {"files":[{"path":"...","lines":N,...}]}
  *
- * Flags: -l (lines), -w (words), -c (bytes). Default (no flag) prints
- * all three. Multiple flags may combine (`-lw` shows lines+words).
+ * Flags: -l (lines), -w (words), -c (bytes), --json (structured output).
+ * Without -l/-w/-c the human output prints all three. --json always
+ * emits all three counts per file regardless of which flags are set;
+ * agents that want a subset can pick the keys they need.
  *
  * Word counting follows POSIX: a "word" is a maximal run of
  * non-whitespace characters. Whitespace is space / tab / newline.
  */
 
 #include "libuser.h"
+#include "../libjson/libjson.h"
 
 static void count_fd(int fd, uint32_t *l, uint32_t *w, uint32_t *b) {
     char     buf[256];
@@ -40,10 +44,19 @@ static void emit(uint32_t l, uint32_t w, uint32_t b,
 
 int main(int argc, char **argv) {
     int show_l = 0, show_w = 0, show_c = 0;
+    int json_mode = 0;
     int argi   = 1;
 
-    /* Parse flags: -l / -w / -c, possibly grouped (`-lw` etc.). */
-    while (argi < argc && argv[argi][0] == '-' && argv[argi][1]) {
+    /* Parse flags. --json is a long flag, handled before short flags
+     * (so `wc --json -l file` still works). Short flags may be
+     * grouped (`-lw`). */
+    while (argi < argc && argv[argi][0] == '-') {
+        if (strcmp(argv[argi], "--json") == 0) {
+            json_mode = 1;
+            argi++;
+            continue;
+        }
+        if (argv[argi][1] == 0) break;     /* lone "-" is a filename (stdin) */
         for (int k = 1; argv[argi][k]; k++) {
             switch (argv[argi][k]) {
                 case 'l': show_l = 1; break;
@@ -60,6 +73,67 @@ int main(int argc, char **argv) {
         show_l = show_w = show_c = 1;
     }
 
+    if (json_mode) {
+        char obuf[2048];
+        struct json_w jw;
+        json_w_init(&jw, obuf, sizeof(obuf));
+        json_obj_begin(&jw);
+          json_key(&jw, "files");
+          json_arr_begin(&jw);
+          if (argi >= argc) {
+              uint32_t l = 0, w = 0, b = 0;
+              count_fd(0, &l, &w, &b);
+              json_obj_begin(&jw);
+                json_key(&jw, "path");  json_str(&jw, "-");
+                json_key(&jw, "lines"); json_uint(&jw, l);
+                json_key(&jw, "words"); json_uint(&jw, w);
+                json_key(&jw, "bytes"); json_uint(&jw, b);
+              json_obj_end(&jw);
+          } else {
+              uint32_t tl = 0, tw = 0, tb = 0; int nfiles = 0;
+              for (int i = argi; i < argc; i++) {
+                  int fd = sys_open(argv[i]);
+                  if (fd < 0) {
+                      json_obj_begin(&jw);
+                        json_key(&jw, "path");  json_str(&jw, argv[i]);
+                        json_key(&jw, "error"); json_str(&jw, "cannot open");
+                      json_obj_end(&jw);
+                      continue;
+                  }
+                  uint32_t l = 0, w = 0, b = 0;
+                  count_fd(fd, &l, &w, &b);
+                  sys_close(fd);
+                  tl += l; tw += w; tb += b; nfiles++;
+                  json_obj_begin(&jw);
+                    json_key(&jw, "path");  json_str(&jw, argv[i]);
+                    json_key(&jw, "lines"); json_uint(&jw, l);
+                    json_key(&jw, "words"); json_uint(&jw, w);
+                    json_key(&jw, "bytes"); json_uint(&jw, b);
+                  json_obj_end(&jw);
+              }
+              if (nfiles > 1) {
+                  /* Emit a total entry with path="total" so agents
+                   * can find it positionally OR by name. */
+                  json_obj_begin(&jw);
+                    json_key(&jw, "path");  json_str(&jw, "total");
+                    json_key(&jw, "lines"); json_uint(&jw, tl);
+                    json_key(&jw, "words"); json_uint(&jw, tw);
+                    json_key(&jw, "bytes"); json_uint(&jw, tb);
+                  json_obj_end(&jw);
+              }
+          }
+          json_arr_end(&jw);
+        json_obj_end(&jw);
+        if (!json_w_ok(&jw)) {
+            sys_write(2, "wc: JSON buffer overflow\n", 25);
+            return 1;
+        }
+        sys_write(1, obuf, json_w_len(&jw));
+        sys_write(1, "\n", 1);
+        return 0;
+    }
+
+    /* Human-readable path (original logic). */
     if (argi >= argc) {
         uint32_t l = 0, w = 0, b = 0;
         count_fd(0, &l, &w, &b);

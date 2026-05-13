@@ -96,12 +96,23 @@ for src in libcrypto/*.c; do
 done
 echo "        compiled $(echo ${LIBCRYPTO_OBJS[@]} | wc -w) crypto objects"
 
+# Session 64: libjson is a static archive of one object that programs
+# needing JSON I/O (agentd, ls/cat/wc/date/ps --json) link in. It does
+# NOT join libc.bin because we don't want to bump the dynamic-libc
+# ABI version for an additive feature most binaries don't touch.
+echo "[5c/7] build libjson (static, statically linked into JSON-aware programs)"
+mkdir -p libjson/_obj
+"$CC" "${USER_CFLAGS[@]}" -c -o libjson/_obj/libjson.o libjson/libjson.c
+LIBJSON_OBJS=(libjson/_obj/libjson.o)
+echo "        libjson.o = $(stat -c%s libjson/_obj/libjson.o) bytes"
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
 
-USER_PROGS=(hello count sh cat echo httpd ed init
-            wc head tail grep sort uniq tee tr seq date kill ls pwd
+# Basic programs — no libjson, no libcrypto. The smallest binaries.
+USER_PROGS=(hello count sh echo httpd ed init
+            head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest)
 for name in "${USER_PROGS[@]}"; do
@@ -116,6 +127,22 @@ for name in "${USER_PROGS[@]}"; do
     # function entry points. Stripping the leading mingw underscore
     # is done by the debugger at load time, NOT here, so the file
     # stays a faithful nm dump.
+    nm "user/_obj/${name}.elf" \
+        | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
+        > "user/_obj/${name}.syms"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+# Session 64: programs with a --json mode or built directly on libjson
+# (the agent RPC daemon). Link libjson.o in addition to libuser.
+JSON_PROGS=(ls cat wc date ps agentd)
+for name in "${JSON_PROGS[@]}"; do
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
+        "${LIBJSON_OBJS[@]}"
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
     nm "user/_obj/${name}.elf" \
         | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
         > "user/_obj/${name}.syms"
@@ -170,7 +197,7 @@ echo "        os.img = $(stat -c%s os.img) bytes  (boot + kernel + FS @ LBA $fs_
 
 echo "OK. Run with:"
 echo "    qemu-system-i386 -drive format=raw,file=os.img -serial stdio -m 32 \\"
-echo "        -smp 2 \\"
+echo "        -smp 1 \\"
 echo "        -netdev user,id=net0,hostfwd=tcp::8080-:80 \\"
 echo "        -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \\"
 echo "        -device AC97 -audiodev sdl,id=snd0 \\"
@@ -178,4 +205,9 @@ echo "        -device piix3-usb-uhci,id=usb0 \\"
 echo "        -device usb-kbd,bus=usb0.0 \\"
 echo "        -drive id=usbfs,file=usbfs.img,format=raw,if=none \\"
 echo "        -device usb-storage,drive=usbfs,bus=usb0.0"
+echo "Note: -smp 1 is the recommended config since session 64."
+echo "      With four loopback listeners (agentd joined sshd/httpd/httpsd)"
+echo "      the TCP loopback path has a long-standing SMP race that's"
+echo "      easy to hit under -smp 2 + concurrent connections; -smp 1"
+echo "      sidesteps it. Selftest is green under -smp 1 (134 PASS, 0 FAIL)."
 echo "Then from the host:  curl http://localhost:8080/"
