@@ -81,8 +81,8 @@ typedef unsigned int   size_t;
 #define SYS_GETCPU       51
 #define SYS_FBINFO       52
 #define SYS_SMP_STATS    53
-#define SYS_MOUSE_STATE  54
-#define SYS_FB_MMAP      55
+/* 54 (SYS_MOUSE_STATE) and 55 (SYS_FB_MMAP) retired — see kernel/syscall.h.
+ * Slots stay reserved for ABI stability; the dispatcher returns 0. */
 #define SYS_AUDIO_PLAY   56
 #define SYS_BLOCK_INFO   57
 #define SYS_BLOCK_READ   58
@@ -100,7 +100,9 @@ typedef unsigned int   size_t;
 #define SYS_CHOWN         70
 #define SYS_OPENPTY       71
 
-/* Session 57 — GUI + debugger plumbing (mirror of kernel/syscall.h). */
+/* Session 57 — debugger plumbing (mirror of kernel/syscall.h). The
+ * SYS_FB_TAKEOVER and SYS_MOUSE_INJECT slots were retired with the
+ * WM and mouse driver but stay allocated for ABI stability. */
 #define SYS_FB_TAKEOVER   72
 #define SYS_KBD_POLL      73
 #define SYS_MOUSE_INJECT  74
@@ -252,16 +254,9 @@ int      sys_getcpu(void);
 int      sys_fbinfo(unsigned int out[4]);
 int      sys_smp_stats(unsigned int out[8]);
 
-/* Mouse: fills out[0..3] = x, y, buttons, packets. Returns 1 always
- * (driver maintains state even with no mouse — initial cursor is
- * mid-screen, buttons=0). buttons is a bitmask of 0x01=L, 0x02=R,
- * 0x04=M. */
-int      sys_mouse_state(int out[4]);
-
-/* Map the framebuffer into the calling process's address space.
- * Returns the user VA (use SYS_FBINFO to learn pitch/bpp/size).
- * Returns NULL if VBE/fbcon isn't enabled. */
-void    *sys_fb_mmap(void);
+/* sys_mouse_state and sys_fb_mmap were removed when AdventOS narrowed
+ * to a CLI-only OS for developers and AI agents. The kernel slots
+ * still exist but return 0. */
 
 /* Queue PCM data for playback on the AC97 codec. Format: 16-bit
  * signed little-endian stereo at 48 kHz. n must be a multiple of
@@ -314,20 +309,19 @@ int      sys_chown   (const char *path, int uid, int gid);
  * the remote shell. Returns 0 on success, -1 if the pty table is full. */
 int      sys_openpty(int fds[2]);
 
-/* ---- Session 57: GUI + debugger ----
+/* ---- Session 57: debugger plumbing ----
  *
- *   fb_takeover(on)   : on=1 freezes kernel fbcon writes; on=0 resumes.
- *                       Lets the WM own the framebuffer without fbcon
- *                       tearing into its rendering.
+ * The fb_takeover / mouse_inject wrappers from this batch were
+ * removed with the WM and mouse driver; only kbd_poll and ptrace
+ * remain.
+ *
  *   kbd_poll()        : non-blocking — returns next keystroke byte or 0.
- *                       Bypasses the cooked TTY layer (WM wants raw
- *                       keystrokes regardless of the global TTY mode).
- *   mouse_inject(x,y,b): force absolute cursor state, for tests.
+ *                       Bypasses the cooked TTY layer; useful when a
+ *                       CLI program wants edge-triggered keyboard input
+ *                       without changing the global TTY mode.
  *   ptrace(op,pid,a)  : ptrace multiplexed syscall — see syscall.h for
  *                       the op set + ptrace_args layout. */
-int      sys_fb_takeover (int on);
 int      sys_kbd_poll    (void);
-int      sys_mouse_inject(int x, int y, int btns);
 int      sys_ptrace      (int op, int pid, void *args);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);

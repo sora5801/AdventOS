@@ -61,13 +61,12 @@
 #define SYS_SMP_STATS    53 /* (eax=53, ebx=uint32_t out[8]) -> N CPUs.
                               Fills out[i] with LAPIC-timer tick count on CPU i.
                               Lets [t22] verify APs are actually scheduling. */
-#define SYS_MOUSE_STATE  54 /* (eax=54, ebx=int32_t out[4]) -> 1 if mouse alive.
-                              Fills out[]: x, y, buttons, packets_count.
-                              Returns 0 if PS/2 mouse not detected. */
-#define SYS_FB_MMAP      55 /* (eax=55) -> user VA mapped to the linear FB,
-                              or 0 if VBE/fbcon disabled. The mapping is
-                              RW user; munmap via SYS_MUNMAP(va, fb_size).
-                              fb_size = pitch * height — read via SYS_FBINFO. */
+/* SYS_MOUSE_STATE (54) and SYS_FB_MMAP (55) — retired; the WM and
+ * mouse driver were removed when AdventOS narrowed its target audience
+ * to developers and AI agents who only need a CLI. The slot numbers
+ * stay allocated for ABI stability but the dispatcher returns -1. */
+#define SYS_MOUSE_STATE  54
+#define SYS_FB_MMAP      55
 #define SYS_AUDIO_PLAY   56 /* (eax=56, ebx=ptr, ecx=n_bytes) -> bytes accepted,
                               or -1 if no AC97 codec. n_bytes must be a
                               multiple of 4 (one stereo 16-bit sample). PCM
@@ -113,22 +112,14 @@
 
 /* ---- Session 57: GUI + window manager support ---- */
 
-#define SYS_FB_TAKEOVER   72 /* (eax=72, ebx=on) -> 0. When on, freezes
-                                fbcon — kernel writes to fb stop landing on
-                                the framebuffer. When off, restores normal
-                                console output. Lets a userspace window
-                                manager fully own the framebuffer without
-                                fbcon tearing into its rendering. */
+/* SYS_FB_TAKEOVER (72) — retired with the WM. Stays as a no-op slot. */
+#define SYS_FB_TAKEOVER   72
 #define SYS_KBD_POLL      73 /* (eax=73) -> next ASCII key from the kbd
-                                ring, or 0 if empty. Non-blocking — the
-                                WM polls this at frame rate instead of
-                                a blocking sys_read on fd 0 that would
-                                stall the 60 fps loop. */
-#define SYS_MOUSE_INJECT  74 /* (eax=74, ebx=x, ecx=y, edx=btns) -> 0.
-                                Test helper for the WM selftest: forces
-                                the mouse driver's reported cursor to
-                                (x,y) with the given button bitmask, as
-                                if a real PS/2 packet had arrived. */
+                                ring, or 0 if empty. Non-blocking — kept
+                                because a CLI program can still want
+                                edge-triggered keyboard polling. */
+/* SYS_MOUSE_INJECT (74) — retired with the mouse driver. */
+#define SYS_MOUSE_INJECT  74
 
 /* ---- Session 57: ptrace-based debugger support ---- */
 

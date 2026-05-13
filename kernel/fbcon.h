@@ -45,7 +45,8 @@ int  fbcon_cur_col(void);
 int  fbcon_cols(void);
 int  fbcon_rows(void);
 
-/* Direct primitive — handy for selftest demos and future GUI bits.
+/* Direct primitive — handy for selftest demos and any future
+ * graphical splash content the kernel itself wants to paint.
  * Coordinates clipped silently. */
 void fbcon_fill_rect(uint32_t x, uint32_t y,
                      uint32_t w, uint32_t h,

@@ -23,7 +23,6 @@
 #include "lapic.h"
 #include "smp.h"
 #include "vbe.h"
-#include "mouse.h"
 #include "ac97.h"
 #include "bkl.h"
 #include "blkdev.h"
@@ -462,22 +461,19 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
-        case SYS_FB_TAKEOVER: {
-            /* When `a` is non-zero, freeze fbcon so kernel writes
-             * to the framebuffer stop landing on screen — the userspace
-             * window manager takes over. When zero, restore. We don't
-             * also touch the back buffer; the WM redraws every frame
-             * so any "ghost" pre-takeover content gets overwritten. */
-            extern void fbcon_set_enabled(int on);
-            fbcon_set_enabled(a == 0);
-            ret = 0;
+        /* SYS_FB_TAKEOVER / SYS_MOUSE_INJECT were retired with the
+         * WM and mouse driver. The slots stay so syscall numbering is
+         * stable, but the dispatcher returns -1. */
+        case SYS_FB_TAKEOVER:
+        case SYS_MOUSE_INJECT:
+            ret = -1;
             break;
-        }
         case SYS_KBD_POLL: {
-            /* Non-blocking keyboard read for the WM event loop. Returns
-             * the next byte from the input ring, or 0 if empty. Bypasses
-             * the cooked/raw TTY dance entirely — the WM wants raw
-             * keystrokes regardless of TTY_ICANON state. */
+            /* Non-blocking keyboard read. Returns the next byte from
+             * the input ring, or 0 if empty. Bypasses the cooked/raw
+             * TTY dance — useful for CLI programs that want edge-
+             * triggered input without the canonical-mode line-edit
+             * machinery. */
             extern int  keyboard_has_char(void);
             extern char keyboard_getc(void);
             if (keyboard_has_char()) {
@@ -485,18 +481,6 @@ void syscall_dispatch(struct registers *r) {
             } else {
                 ret = 0;
             }
-            break;
-        }
-        case SYS_MOUSE_INJECT: {
-            /* Force the mouse driver's reported cursor to absolute
-             * (a, b) with button mask `c`. Test-only — lets the WM
-             * selftest drive the cursor deterministically instead of
-             * relying on a real PS/2 event. Distinct from the existing
-             * mouse_inject(dx, dy, btns) which the USB HID path uses
-             * for relative deltas. */
-            extern void mouse_set_state(int x, int y, int btns);
-            mouse_set_state((int)a, (int)b, (int)c);
-            ret = 0;
             break;
         }
         case SYS_PTRACE: {
@@ -731,23 +715,10 @@ void syscall_dispatch(struct registers *r) {
             ret = n;
             break;
         }
-        case SYS_MOUSE_STATE: {
-            int32_t *uout = (int32_t *)(uintptr_t)a;
-            if (!uout || (uintptr_t)uout >= 0xC0000000u) { ret = -1; break; }
-            struct mouse_state ms;
-            mouse_get_state(&ms);
-            uout[0] = ms.x;
-            uout[1] = ms.y;
-            uout[2] = (int32_t)ms.buttons;
-            uout[3] = (int32_t)ms.packets;
-            /* "Alive" means we've ever seen a packet OR cursor position
-             * is non-default. The init centers the cursor, so a freshly
-             * booted system without mouse activity reports alive=1
-             * because mouse_init sets x/y to mid-screen. That's fine —
-             * the GUI just polls and draws. */
-            ret = 1;
+        case SYS_MOUSE_STATE:
+            /* Retired with the mouse driver — see syscall.h. */
+            ret = 0;
             break;
-        }
         case SYS_AUDIO_PLAY: {
             const void *upcm = (const void *)(uintptr_t)a;
             int         n    = (int)b;
@@ -923,82 +894,13 @@ void syscall_dispatch(struct registers *r) {
             ret = fs_chown_idx(idx, (uint16_t)new_uid, (uint16_t)new_gid);
             break;
         }
-        case SYS_FB_MMAP: {
-            /* Map the framebuffer's physical pages into the calling
-             * task's PD with USER+WRITABLE flags, at a fresh user VA
-             * carved out of the mmap window. Returns the VA, or 0
-             * if VBE/fbcon isn't enabled.
-             *
-             * Unlike file-backed mmap (which lazy-loads via #PF on
-             * first touch), the FB mapping is eager — we install
-             * every page right now with a real physical backing
-             * (the FB itself, not zero-filled pages). The FB pages
-             * are at fb_phys (typically 0xFD000000 on QEMU std-vga)
-             * and were already mapped into the kernel PD by
-             * vbe_init; we add a parallel USER-flagged mapping in
-             * the user PD pointing at the same physical bytes. */
-            const struct vbe_state *v = vbe_state();
-            if (!v->enabled) { ret = 0; break; }
-
-            struct task *t = task_current();
-            uint32_t fb_size = v->fb_size;
-            uint32_t aligned = (fb_size + 0xFFFu) & ~0xFFFu;
-            if (t->mmap_brk + aligned > USER_MMAP_MAX) { ret = 0; break; }
-
-            uint32_t va_start = t->mmap_brk;
-            uint32_t va_end   = va_start + aligned;
-            uint32_t fb_phys  = v->fb_phys & ~0xFFFu;
-
-            /* Eager-map every FB page. Use paging_map_in (per-PD)
-             * with PTE_USER + PTE_WRITABLE. The physical pages are
-             * the same MMIO region the kernel maps in vbe_init —
-             * we're just adding USER access for the calling
-             * process. */
-            for (uint32_t va = va_start; va < va_end; va += 0x1000) {
-                uint32_t phys = fb_phys + (va - va_start);
-                if (paging_map_in((uint32_t *)(uintptr_t)t->cr3,
-                                  va, phys,
-                                  PTE_USER | PTE_WRITABLE) != 0) {
-                    /* Roll back — unmap what we mapped, restore brk. */
-                    for (uint32_t v2 = va_start; v2 < va; v2 += 0x1000) {
-                        uint32_t *pd = (uint32_t *)(uintptr_t)t->cr3;
-                        uint32_t pdi = v2 >> 22;
-                        if (pd[pdi] & 1) {
-                            uint32_t *pt = (uint32_t *)(uintptr_t)
-                                           (pd[pdi] & ~0xFFFu);
-                            pt[(v2 >> 12) & 0x3FF] = 0;
-                        }
-                    }
-                    ret = 0;
-                    goto fb_mmap_done;
-                }
-                /* Active PD — flush TLB on this CPU. paging_map_in
-                 * does this for the kernel master PD only. */
-                __asm__ volatile ("invlpg (%0)" :: "r"(va) : "memory");
-            }
-
-            t->mmap_brk = va_end;
-            /* Track in the mmap region table so SYS_MUNMAP can find
-             * it. fs_idx = -1 marks it as device-backed (no file
-             * source). The lazy-load path in mmap_handle_fault
-             * checks fs_idx and skips reads for negative indices
-             * — but we've already eagerly mapped, so no fault
-             * should ever land here. */
-            for (int i = 0; i < TASK_MMAP_MAX; i++) {
-                if (!t->mmaps[i].in_use) {
-                    t->mmaps[i].in_use      = 1;
-                    t->mmaps[i].va_start    = va_start;
-                    t->mmaps[i].va_end      = va_end;
-                    t->mmaps[i].fs_idx      = -1;
-                    t->mmaps[i].file_offset = 0;
-                    t->mmaps[i].file_length = 0;
-                    break;
-                }
-            }
-            ret = (int32_t)va_start;
-        fb_mmap_done:
+        case SYS_FB_MMAP:
+            /* Retired with the WM. Userspace doesn't get raw FB access
+             * any more — the kernel still owns the framebuffer for
+             * fbcon, but only as a text-rendering backend for
+             * kprintf / TTY. */
+            ret = 0;
             break;
-        }
         case SYS_FBINFO: {
             /* Report VBE/fbcon status to userspace. ebx is a writable
              * uint32_t out[4]; we fill it with width/height/bpp/pitch

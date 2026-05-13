@@ -86,9 +86,8 @@ USER_PROGRAMS = [
     ('telnet.elf','user/_obj/telnet.bin',None),
     ('irc.elf',   'user/_obj/irc.bin',   None),
     ('ircd.elf',  'user/_obj/ircd.bin',  None),
-    # GUI demo (session 34) — user-mmaps the framebuffer + polls the
-    # PS/2 mouse to draw a cursor and a few interactive tiles.
-    ('gui.elf',   'user/_obj/gui.bin',   None),
+    # gui.elf (sessions 34/57/61-63) was removed when AdventOS narrowed
+    # to a CLI-only OS for developers and AI agents.
     # Session 37: AC97 audio test program — generates PCM tones.
     ('beep.elf',  'user/_obj/beep.bin',  None),
     # Session 36: TLS 1.3 + HTTPS using libcrypto.
@@ -110,8 +109,8 @@ USER_PROGRAMS = [
     ('dbgtest.elf',    'user/_obj/dbgtest.bin',    None),
     # Session 58: RSA-PKCS#1 v1.5 sign/verify exerciser.
     ('rsatest.elf',    'user/_obj/rsatest.bin',    None),
-    # Session 62: out-of-process WM client demo.
-    ('gclient.elf',    'user/_obj/gclient.bin',    None),
+    # gclient.elf (session 62, out-of-process WM client) removed with
+    # the WM.
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

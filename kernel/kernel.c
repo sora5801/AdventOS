@@ -41,7 +41,6 @@
 #include "shell.h"
 #include "vbe.h"
 #include "fbcon.h"
-#include "mouse.h"
 #include "dyld.h"
 #include "ac97.h"
 #include "usb_core.h"
@@ -178,12 +177,9 @@ void kmain(uint32_t boot_drive) {
     vbe_init();
     fbcon_init();
 
-    /* PS/2 mouse — runs the BIOS controller handshake and wires
-     * IRQ12. Done AFTER vbe_init so the cursor-clamp box can read
-     * the actual screen dimensions. If the BIOS doesn't expose a
-     * PS/2 mouse, the driver stays dormant and SYS_MOUSE_STATE
-     * returns the (0,0) initial state. */
-    mouse_init();
+    /* PS/2 mouse driver was removed when AdventOS narrowed to a
+     * CLI-only OS for developers and AI agents. IRQ12 stays
+     * masked by default. */
 
     kputs("[boot] initializing ATA driver... ");
     ata_init();

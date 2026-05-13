@@ -228,23 +228,9 @@ int sys_smp_stats(unsigned int out[8]) {
     return ret;
 }
 
-int sys_mouse_state(int out[4]) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(SYS_MOUSE_STATE), "b"(out)
-                      : "memory");
-    return ret;
-}
-
-void *sys_fb_mmap(void) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(SYS_FB_MMAP)
-                      : "memory");
-    return (void *)(unsigned long)ret;
-}
+/* sys_mouse_state and sys_fb_mmap were removed when AdventOS narrowed
+ * to a CLI-only OS. The kernel slots still return 0 if some stale binary
+ * issues the syscall directly. */
 
 int sys_audio_play(const void *pcm, int n) {
     int ret;
@@ -366,31 +352,16 @@ int sys_openpty(int fds[2]) {
     return ret;
 }
 
-/* ---- Session 57: WM + debugger syscalls ---- */
-
-int sys_fb_takeover(int on) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(SYS_FB_TAKEOVER), "b"(on)
-                      : "memory");
-    return ret;
-}
+/* ---- Session 57: debugger syscalls ----
+ *
+ * The fb_takeover and mouse_inject wrappers were removed with the WM
+ * and mouse driver. */
 
 int sys_kbd_poll(void) {
     int ret;
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_KBD_POLL)
-                      : "memory");
-    return ret;
-}
-
-int sys_mouse_inject(int x, int y, int btns) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(SYS_MOUSE_INJECT), "b"(x), "c"(y), "d"(btns)
                       : "memory");
     return ret;
 }
