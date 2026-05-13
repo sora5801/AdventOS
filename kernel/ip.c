@@ -3,6 +3,7 @@
 #include "icmp.h"
 #include "tcp.h"
 #include "udp.h"
+#include "netlock.h"
 #include "string.h"
 #include "kprintf.h"
 
@@ -36,9 +37,14 @@ static uint16_t g_ip_id;        /* monotonically increasing for outbound */
  * sent to the guest's own assigned IP, so without this nc /
  * wget / irc-client-against-localhost-server scenarios fail.
  *
- * The dispatch is bounded-depth (TCP handshake = 3-4 levels of
- * recursion); we cli around it so a real-NIC packet IRQ doesn't
- * race the loopback handler on g_tcbs. */
+ * Session 66: serialised against the rtl8139 IRQ-side ip_rx via the
+ * recursive net_lock. Pre-session 66 we only cli'd on the local CPU,
+ * which kept IRQs on THIS cpu out — but did nothing about a peer CPU
+ * running rtl_irq → ip_rx → tcp_rx in parallel. With four loopback
+ * listeners in g_tcbs the find_tcb_for_seg scan was wide enough to
+ * lose the race deterministically (see docs/66). net_lock is
+ * recursive so the tcp_rx → spawn → tcp_send_seg → ip_send →
+ * try_loopback → tcp_rx chain re-enters safely. */
 static int try_loopback(const struct ip_addr *dst, uint8_t proto,
                         const void *payload, uint32_t len) {
     int is_lo = (dst->b[0] == 127);
@@ -63,14 +69,16 @@ static int try_loopback(const struct ip_addr *dst, uint8_t proto,
     lhdr.src        = *dst;
     lhdr.dst        = *dst;
 
-    uint32_t flags;
-    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) :: "memory");
+    /* net_lock CLIs on this CPU AND blocks peer CPUs from running
+     * ip_rx / sock_* concurrently. The previous bare cli/popfl only
+     * did the first half. */
+    net_lock();
     switch (proto) {
         case IP_PROTO_TCP: tcp_rx(&lhdr, payload, (int)len); break;
         case IP_PROTO_UDP: udp_rx(&lhdr, payload, (int)len); break;
         default: break;
     }
-    __asm__ volatile ("pushl %0; popfl" :: "r"(flags) : "memory", "cc");
+    net_unlock();
     return 1;
 }
 
@@ -139,10 +147,25 @@ void ip_rx(const struct eth_hdr *eth, const void *payload, uint32_t len) {
     const uint8_t *body  = (const uint8_t *)payload + ihl;
     uint32_t       blen  = (uint32_t)ntohs(iph->total_len) - ihl;
 
+    /* IRQ path (rtl_irq → eth_rx → ip_rx). The BKL is NOT held in
+     * IRQ context, so we serialise with syscall-side net traffic via
+     * net_lock. icmp_rx is single-shot (echo reply) and doesn't
+     * touch g_tcbs/g_socks; we cover only the protocols that do. */
     switch (iph->proto) {
-        case IP_PROTO_ICMP: icmp_rx(eth, iph, body, blen); break;
-        case IP_PROTO_TCP:  tcp_rx (iph, body, (int)blen); break;
-        case IP_PROTO_UDP:  udp_rx (iph, body, (int)blen); break;
-        default:                                            break;
+        case IP_PROTO_ICMP:
+            icmp_rx(eth, iph, body, blen);
+            break;
+        case IP_PROTO_TCP:
+            net_lock();
+            tcp_rx(iph, body, (int)blen);
+            net_unlock();
+            break;
+        case IP_PROTO_UDP:
+            net_lock();
+            udp_rx(iph, body, (int)blen);
+            net_unlock();
+            break;
+        default:
+            break;
     }
 }

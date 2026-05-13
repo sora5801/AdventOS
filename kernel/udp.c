@@ -1,4 +1,5 @@
 #include "udp.h"
+#include "netlock.h"
 #include "string.h"
 #include "kprintf.h"
 
@@ -16,10 +17,17 @@ void udp_init(void) {
 int udp_listen(uint16_t port, udp_recv_cb cb) {
     if (port == 0) return -1;
 
+    /* Session 66: serialise against IRQ-side udp_rx (which scans
+     * g_listeners under net_lock). Without this, a DHCP renewal or
+     * dns_resolve re-registration on CPU0 could race with the NIC
+     * RX path on CPU1 reading a half-written slot. */
+    net_lock();
+
     /* Replace existing registration for the same port. */
     for (int i = 0; i < UDP_MAX_LISTENERS; i++) {
         if (g_listeners[i].port == port) {
             g_listeners[i].cb = cb;
+            net_unlock();
             return 0;
         }
     }
@@ -28,9 +36,11 @@ int udp_listen(uint16_t port, udp_recv_cb cb) {
         if (g_listeners[i].port == 0) {
             g_listeners[i].port = port;
             g_listeners[i].cb   = cb;
+            net_unlock();
             return 0;
         }
     }
+    net_unlock();
     return -1;
 }
 

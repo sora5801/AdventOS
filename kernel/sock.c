@@ -1,6 +1,7 @@
 #include "sock.h"
 #include "tcp.h"
 #include "task.h"
+#include "netlock.h"
 #include "string.h"
 #include "kprintf.h"
 
@@ -49,6 +50,7 @@ void sock_init(void) {
 }
 
 int sock_create(void) {
+    net_lock();
     for (int i = 0; i < SOCK_MAX; i++) {
         if (g_socks[i].state == SOCK_FREE) {
             memset(&g_socks[i], 0, sizeof(g_socks[i]));
@@ -56,22 +58,28 @@ int sock_create(void) {
             g_socks[i].refcount = 1;
             g_socks[i].tcb      = 0;
             q_init(&g_socks[i], 0);
+            net_unlock();
             return i;
         }
     }
+    net_unlock();
     return -1;
 }
 
 void sock_inc_ref(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return;
-    if (g_socks[idx].state == SOCK_FREE) return;
+    net_lock();
+    if (g_socks[idx].state == SOCK_FREE) { net_unlock(); return; }
     g_socks[idx].refcount++;
+    net_unlock();
 }
 
 int sock_bind(int idx, uint16_t port) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
-    if (g_socks[idx].state != SOCK_NEW) return -1;
+    net_lock();
+    if (g_socks[idx].state != SOCK_NEW) { net_unlock(); return -1; }
     g_socks[idx].port = port;
+    net_unlock();
     return 0;
 }
 
@@ -162,7 +170,8 @@ static void on_close(struct tcb *t) {
 
 int sock_listen(int idx, int backlog) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
-    if (g_socks[idx].state != SOCK_NEW) return -1;
+    net_lock();
+    if (g_socks[idx].state != SOCK_NEW) { net_unlock(); return -1; }
     g_socks[idx].state = SOCK_LISTEN;
     q_init(&g_socks[idx], backlog);
     /* user_data is sock_idx + 1 so 0 is reserved for "no callback". */
@@ -171,22 +180,35 @@ int sock_listen(int idx, int backlog) {
                                   on_connect, on_recv, on_close, ud);
     if (!g_socks[idx].tcb) {
         g_socks[idx].state = SOCK_NEW;
+        net_unlock();
         return -1;
     }
+    net_unlock();
     return 0;
 }
 
 int sock_accept(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
-    if (g_socks[idx].state != SOCK_LISTEN) return -1;
+    net_lock();
+    if (g_socks[idx].state != SOCK_LISTEN) { net_unlock(); return -1; }
 
     /* Block until something's queued. Multiple SYNs can land while
      * we're blocked here; each one pushes a fresh conn-sock into
-     * the listener's pending ring (capped at backlog). */
+     * the listener's pending ring (capped at backlog).
+     *
+     * Drop net_lock around task_yield — otherwise the IRQ-side
+     * on_connect can't run on the peer CPU to push entries into
+     * the queue we're waiting on (and yielding from inside a held
+     * spinlock would deadlock the system anyway). */
     while (q_empty(&g_socks[idx])) {
+        net_unlock();
         task_yield();
+        net_lock();
+        if (g_socks[idx].state != SOCK_LISTEN) { net_unlock(); return -1; }
     }
-    return q_pop(&g_socks[idx]);
+    int conn = q_pop(&g_socks[idx]);
+    net_unlock();
+    return conn;
 }
 
 /* Session 62 — peek helpers for the non-blocking accept/read path.
@@ -196,24 +218,35 @@ int sock_accept(int idx) {
  * available. */
 int sock_accept_avail(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
-    if (g_socks[idx].state != SOCK_LISTEN) return -1;
-    return q_empty(&g_socks[idx]) ? 0 : 1;
+    net_lock();
+    if (g_socks[idx].state != SOCK_LISTEN) { net_unlock(); return -1; }
+    int r = q_empty(&g_socks[idx]) ? 0 : 1;
+    net_unlock();
+    return r;
 }
 
 int sock_read_avail(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    net_lock();
     struct sock *s = &g_socks[idx];
-    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) return -1;
-    return (s->rx_head != s->rx_tail || s->peer_closed) ? 1 : 0;
+    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) {
+        net_unlock();
+        return -1;
+    }
+    int r = (s->rx_head != s->rx_tail || s->peer_closed) ? 1 : 0;
+    net_unlock();
+    return r;
 }
 
 int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
-    if (g_socks[idx].state != SOCK_NEW) return -1;
     if (!dst) return -1;
 
     struct ip_addr remote;
     for (int i = 0; i < 4; i++) remote.b[i] = dst[i];
+
+    net_lock();
+    if (g_socks[idx].state != SOCK_NEW) { net_unlock(); return -1; }
 
     g_socks[idx].state        = SOCK_CONNECTING;
     g_socks[idx].peer_closed  = 0;
@@ -222,10 +255,14 @@ int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
     q_init(&g_socks[idx], 0);
 
     void *ud = (void *)(uintptr_t)(idx + 1);
+    /* tcp_connect runs under net_lock; for loopback its internal
+     * tcp_send_seg → ip_send → try_loopback → tcp_rx chain re-enters
+     * the same lock via the recursive-acquire shortcut. */
     struct tcb *t = tcp_connect(&remote, port,
                                 on_connect, on_recv, on_close, ud);
     if (!t) {
         g_socks[idx].state = SOCK_NEW;
+        net_unlock();
         return -1;
     }
     g_socks[idx].tcb = t;
@@ -234,7 +271,9 @@ int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
      * ~5 seconds at 10ms/yield resolution before giving up. */
     int spins = 0;
     while (g_socks[idx].state == SOCK_CONNECTING && spins < 500) {
+        net_unlock();
         task_yield();
+        net_lock();
         spins++;
         /* If the TCB got released (peer RST etc.) we won't see
          * a state change from on_connect — detect via tcb state. */
@@ -243,20 +282,35 @@ int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
     if (g_socks[idx].state != SOCK_CONNECTED) {
         g_socks[idx].state = SOCK_NEW;
         g_socks[idx].tcb   = 0;
+        net_unlock();
         return -1;
     }
+    net_unlock();
     return 0;
 }
 
 int sock_read(int idx, void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    net_lock();
     struct sock *s = &g_socks[idx];
-    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) return -1;
+    if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) {
+        net_unlock();
+        return -1;
+    }
 
     /* Block until some data has arrived OR the peer has closed and
-     * the buffer is drained. */
+     * the buffer is drained. Drop net_lock around the yield so the
+     * IRQ-driven on_recv on a peer CPU can actually push bytes into
+     * the ring we're waiting on. */
     while (s->rx_head == s->rx_tail && !s->peer_closed) {
+        net_unlock();
         task_yield();
+        net_lock();
+        /* Re-check state in case the sock was closed under us. */
+        if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) {
+            net_unlock();
+            return -1;
+        }
     }
 
     int copied = 0;
@@ -265,21 +319,26 @@ int sock_read(int idx, void *buf, int n) {
         out[copied++] = (char)s->rx_buf[s->rx_tail];
         s->rx_tail = (s->rx_tail + 1) % SOCK_RX_BUF;
     }
+    net_unlock();
     return copied;     /* 0 = EOF (peer closed and ring drained) */
 }
 
 int sock_write(int idx, const void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    net_lock();
     struct sock *s = &g_socks[idx];
-    if (s->state != SOCK_CONNECTED) return -1;
-    if (!s->tcb) return -1;
-    return tcp_send(s->tcb, buf, n);
+    if (s->state != SOCK_CONNECTED) { net_unlock(); return -1; }
+    if (!s->tcb)                    { net_unlock(); return -1; }
+    int r = tcp_send(s->tcb, buf, n);
+    net_unlock();
+    return r;
 }
 
 int sock_close(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    net_lock();
     struct sock *s = &g_socks[idx];
-    if (s->state == SOCK_FREE) return -1;
+    if (s->state == SOCK_FREE) { net_unlock(); return -1; }
 
     /* Refcount: an fd close decrements; only when it hits zero do
      * we tear down the underlying TCB and free the slot. fork()
@@ -289,6 +348,7 @@ int sock_close(int idx) {
      * need to avoid since they fork for full duplex. */
     if (s->refcount > 1) {
         s->refcount--;
+        net_unlock();
         return 0;
     }
     if (s->tcb) {
@@ -299,5 +359,6 @@ int sock_close(int idx) {
     s->state    = SOCK_FREE;
     s->refcount = 0;
     q_init(s, 0);
+    net_unlock();
     return 0;
 }

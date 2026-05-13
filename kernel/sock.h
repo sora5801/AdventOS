@@ -38,7 +38,13 @@ enum {
 struct tcb;        /* forward */
 
 struct sock {
-    int               state;
+    /* Volatile because the syscall-side wait loops in sock_connect /
+     * sock_accept / sock_read drop net_lock around task_yield and
+     * then re-read the state; without volatile the compiler is free
+     * to hoist the load out of the loop and busy-wait forever on a
+     * cached value. The same applies to peer_closed and the rx
+     * head/tail (already volatile below). */
+    volatile int      state;
     int               refcount;     /* fork bumps, close decrements; 0 = free */
     uint16_t          port;
     struct tcb       *tcb;          /* live underlying TCP control block */
