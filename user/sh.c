@@ -3600,6 +3600,176 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t48] agentd: MCP protocol — initialize + tools/list + tools/call\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 65: agentd now speaks Model Context Protocol on the
+         * same TCP/JSON-RPC channel.  An MCP-aware client (Claude
+         * Desktop, Claude Code's agents) bootstraps with three turns:
+         *
+         *   1. initialize         negotiates protocol version + caps
+         *   2. tools/list         enumerates exposed tools
+         *   3. tools/call         invokes a specific tool by name
+         *
+         * The legacy direct-method path still works (covered by t47);
+         * t48 exercises only the MCP shape. All three round-trips
+         * share one TCP connection, mirroring what a real client
+         * does over its persistent stdio/socket pipe.
+         */
+        const unsigned char ip_lo[4] = {127, 0, 0, 1};
+        int sk = sys_socket();
+        if (sk < 0) {
+            puts("  FAIL  sys_socket() returned -1\n");
+        } else if (sys_connect(sk, ip_lo, 7000) < 0) {
+            puts("  FAIL  could not connect to 127.0.0.1:7000\n");
+            sys_close(sk);
+        } else {
+            static char rbuf[4096];
+
+            /* Read one newline-terminated response into rbuf. Drains
+             * via larger chunks (256 bytes) so multi-segment responses
+             * settle cleanly. Returns the count read; 0 means EOF. */
+            #define READ_LINE() do { \
+                rn = 0; \
+                while (rn < (int)sizeof(rbuf) - 1) { \
+                    int max = (int)sizeof(rbuf) - 1 - rn; \
+                    if (max > 256) max = 256; \
+                    int n = sys_read(sk, rbuf + rn, max); \
+                    if (n <= 0) break; \
+                    int saw_nl = 0; \
+                    for (int i = 0; i < n; i++) { \
+                        if (rbuf[rn + i] == '\n') { \
+                            rn += i + 1; saw_nl = 1; break; \
+                        } \
+                    } \
+                    if (saw_nl) break; \
+                    rn += n; \
+                } \
+                rbuf[rn] = 0; \
+            } while (0)
+
+            /* ---- 1) initialize ---- */
+            const char *req1 =
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                 "\"params\":{\"protocolVersion\":\"2024-11-05\","
+                 "\"capabilities\":{},"
+                 "\"clientInfo\":{\"name\":\"selftest\",\"version\":\"1.0\"}}}\n";
+            sys_write(sk, req1, (int)strlen(req1));
+            int rn;
+            READ_LINE();
+            printf("  resp1 (%d bytes): %s", rn, rbuf);
+
+            int has_proto_ver  = 0;
+            int has_server_info = 0;
+            int has_caps_tools = 0;
+            for (int i = 0; i + 28 <= rn; i++) {
+                /* The exact substring "\"protocolVersion\":\"2024-11-05\"" */
+                if (memcmp(rbuf + i,
+                           "\"protocolVersion\":\"2024-11-05\"", 30) == 0)
+                    has_proto_ver = 1;
+            }
+            for (int i = 0; i + 30 <= rn; i++) {
+                if (memcmp(rbuf + i,
+                           "\"name\":\"adventos-agentd\"", 24) == 0)
+                    has_server_info = 1;
+            }
+            for (int i = 0; i + 16 <= rn; i++) {
+                /* "tools":{} inside capabilities */
+                if (memcmp(rbuf + i, "\"tools\":{}", 10) == 0)
+                    has_caps_tools = 1;
+            }
+            EXPECT(has_proto_ver,
+                   "initialize result carries protocolVersion=\"2024-11-05\"");
+            EXPECT(has_server_info,
+                   "initialize result carries serverInfo.name=\"adventos-agentd\"");
+            EXPECT(has_caps_tools,
+                   "initialize result advertises tools capability");
+
+            /* ---- 2) tools/list ---- */
+            const char *req2 =
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
+            sys_write(sk, req2, (int)strlen(req2));
+            READ_LINE();
+            printf("  resp2 (%d bytes, first 200):\n", rn);
+            int hdr_max = rn > 200 ? 200 : rn;
+            char saved = rbuf[hdr_max];
+            rbuf[hdr_max] = 0;
+            puts(rbuf);
+            rbuf[hdr_max] = saved;
+
+            /* Count the tools entries by matching {"name":". Each
+             * tool object starts that way. Eight tools shipped from
+             * /etc/agent.tools.json. */
+            int n_tools = 0;
+            for (int i = 0; i + 9 <= rn; i++) {
+                if (memcmp(rbuf + i, "{\"name\":\"", 9) == 0) n_tools++;
+            }
+            int has_time_tool = 0;
+            for (int i = 0; i + 16 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"name\":\"time\"", 13) == 0)
+                    has_time_tool = 1;
+            }
+            int has_shell_tool = 0;
+            for (int i = 0; i + 20 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"name\":\"shell.exec\"", 19) == 0)
+                    has_shell_tool = 1;
+            }
+            printf("  tools/list returned %d tool entries\n", n_tools);
+            EXPECT(n_tools == 8,
+                   "tools/list returned 8 tools (matches manifest)");
+            EXPECT(has_time_tool,
+                   "tools/list includes \"time\"");
+            EXPECT(has_shell_tool,
+                   "tools/list includes \"shell.exec\"");
+
+            /* ---- 3) tools/call name="time" ---- */
+            const char *req3 =
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+                 "\"params\":{\"name\":\"time\",\"arguments\":{}}}\n";
+            sys_write(sk, req3, (int)strlen(req3));
+            READ_LINE();
+            printf("  resp3 (%d bytes): %s", rn, rbuf);
+
+            int has_content    = 0;
+            int has_type_text  = 0;
+            int has_is_error_false = 0;
+            int has_epoch_text = 0;
+            for (int i = 0; i + 11 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"content\":[", 11) == 0)
+                    has_content = 1;
+            }
+            for (int i = 0; i + 14 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"type\":\"text\"", 13) == 0)
+                    has_type_text = 1;
+            }
+            for (int i = 0; i + 16 <= rn; i++) {
+                if (memcmp(rbuf + i, "\"isError\":false", 15) == 0)
+                    has_is_error_false = 1;
+            }
+            /* Inner result for "time" is {"epoch":N}. After JSON-
+             * escaping for embedding in the MCP "text" field, the
+             * quotes become \" so we look for \"epoch\":. */
+            for (int i = 0; i + 11 <= rn; i++) {
+                if (memcmp(rbuf + i, "\\\"epoch\\\":", 10) == 0)
+                    has_epoch_text = 1;
+            }
+            EXPECT(has_content,        "tools/call response has content[] array");
+            EXPECT(has_type_text,      "content[0].type == \"text\"");
+            EXPECT(has_is_error_false, "isError == false");
+            EXPECT(has_epoch_text,
+                   "content[0].text carries the wrapped {\\\"epoch\\\":N} body");
+
+            #undef READ_LINE
+            sys_close(sk);
+        }
+
+        #undef EXPECT
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
