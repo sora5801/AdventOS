@@ -33,8 +33,15 @@
 /* Bumped from 200 → 256 in session 38: kernel.bin grew past 100 KiB
  * with all the SMP machinery (BKL + g_kvprintf_lock + ac97 + tls
  * etc.), pushing it past sector 200. The FS would land at the wrong
- * offset. 256 sectors = 128 KiB of boot+kernel headroom. */
-#define FS_DISK_OFFSET_SECTORS  256u
+ * offset. 256 sectors = 128 KiB of boot+kernel headroom.
+ *
+ * Bumped 256 → 384 in session 71: kernel.bin grew past 128 KiB with
+ * the syscall sandbox + per-task resource limits (was 127152B, became
+ * 131248B). On-disk kernel was overlapping the FS region — the
+ * bootloader's DAP2 was widened to 256 sectors in the same session
+ * so the full 192 KiB pre-FS region gets loaded into RAM. Keep this
+ * value in lockstep with build.sh::fs_lba. */
+#define FS_DISK_OFFSET_SECTORS  384u
 #define FS_SUPER_SECTORS        5u    /* superblock = 1 header + 4 entry sectors */
 #define FS_NAME_MAX             16
 #define FS_MAX_FILES            64    /* bumped from 32 in session 29 (network apps) */

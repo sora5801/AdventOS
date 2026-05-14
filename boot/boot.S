@@ -30,10 +30,17 @@ _start:
     mov     $msg_boot, %si
     call    print
 
-    /* Load kernel via int 13h LBA extension (ah=42h). Many BIOSes
-     * cap a single DAP read at 127 sectors; we issue two back-to-
-     * back reads of 128 each, totaling 256 sectors (128 KiB). The
-     * second one starts at LBA 129 and lands at linear 0x20000. */
+    /* Load kernel via int 13h LBA extension (ah=42h).
+     *   DAP1: LBA 1..128   ->  0x10000..0x20000  (64 KiB)
+     *   DAP2: LBA 129..384 ->  0x20000..0x40000  (128 KiB)
+     * Total: 192 KiB load budget. Real-hardware BIOSes used to cap
+     * a single DAP at 127 sectors, but QEMU's SeaBIOS handles large
+     * reads cleanly; sticking with two DAPs keeps the boot sector
+     * code under 510 bytes.
+     *
+     * Session-71 bump rationale: kernel.bin was 127152B (fit in 128
+     * KiB), became 131248B with sandbox + limits, would overrun the
+     * old budget by 176B. 192 KiB gives ~60 KiB headroom. */
     movb    drive, %dl
     mov     $dap1, %si
     mov     $0x42, %ah
@@ -255,9 +262,9 @@ gdtr:
     .word gdt_end - gdt - 1
     .long gdt
 
-/* Disk Address Packets — split into two so the BIOS doesn't choke
- * on a single >127-sector read (real-machine BIOSes commonly cap
- * one int-13h-ah=42h call at that). */
+/* Disk Address Packets. Total kernel budget: 64 KiB + 128 KiB = 192 KiB.
+ * QEMU's SeaBIOS handles a single 256-sector LBA read fine; on real
+ * hardware some BIOSes cap at 127, but we don't target real hw. */
 dap1:
     .byte 0x10              /* size of packet */
     .byte 0x00              /* reserved */
@@ -269,7 +276,7 @@ dap1:
 dap2:
     .byte 0x10
     .byte 0x00
-    .word 128               /* another 64 KiB; total 128 KiB */
+    .word 256               /* 128 KiB; running total 192 KiB */
     .word 0x0000
     .word 0x2000            /* destination segment (linear 0x20000) */
     .quad 129               /* starting LBA = 1 + 128 */
