@@ -14,4 +14,8 @@ typedef void (*irq_handler_fn)(struct registers *r);
 
 void isr_register_irq(int irq, irq_handler_fn handler);
 
+/* Session 68 diagnostic — prints a unique tag so we can verify the
+ * running kernel.bin contains the heartbeat + lock-free trace code. */
+void isr_print_build_marker(void);
+
 #endif

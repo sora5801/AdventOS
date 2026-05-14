@@ -3,9 +3,21 @@
 #
 # Targets:
 #   make           build os.img
-#   make run       boot the OS image in QEMU (graphical + serial→stdio)
-#   make run-headless  same but no QEMU window
+#   make run       boot the OS image in QEMU (graphical window + USB keyboard
+#                  + rtl8139 networking + serial tee to stdio)
+#   make run-bare  bare QEMU — no USB keyboard, no network. Useful for
+#                  isolating driver init failures; the PS/2 keyboard built
+#                  into i440fx still works.
+#   make run-debug --d guest_errors,int + halt-on-shutdown. Same input
+#                  setup as `make run`.
 #   make clean     wipe build artifacts
+#
+# `make run-headless` was removed. On Windows / MSYS2, -display none has
+# no working input source — neither the COM1 RX IRQ (IRQ 4 never fires
+# for piped/non-TTY stdin in QEMU's i440fx + i8259 config) nor QMP
+# `sendkey` routes to PS/2 IRQ 1 without an active display backend. If
+# you want headless, drive the OS through the agentd JSON-RPC endpoint
+# on 127.0.0.1:7000 or ssh into port 2222.
 #
 
 SHELL := bash
@@ -44,7 +56,7 @@ BOOT_OBJ := boot/boot.o
 
 # --- Rules ----------------------------------------------------------------
 
-.PHONY: all clean run run-headless run-debug
+.PHONY: all clean run run-bare run-debug
 
 all: os.img
 
@@ -90,12 +102,35 @@ clean:
 	@rm -f os.img
 	@echo "  CLEAN"
 
+# Recommended run. Graphical SDL/GTK window so typing actually reaches
+# the guest; `-serial stdio` tees kernel kprintf to the host terminal
+# so you can see the boot log. -smp 1 because -smp 2 + agentd in
+# inittab hits a TCP-loopback race (docs/66-smp-loopback-fix.md).
+#
+# usb-kbd is the input path: the kernel's USB-HID polling task
+# (kernel/usb_hid.c:usb_hid_kbd_task) reads 8-byte boot-protocol
+# reports every ~50ms and injects ASCII into the kbd ring buffer.
+# Even without usb-kbd the PS/2 keyboard built into i440fx (i8042 on
+# IRQ 1) still delivers — useful as a fallback if USB enumeration
+# fails for any reason.
+#
+# rtl8139 networking is included so the agent endpoints (port 7000
+# JSON-RPC and port 2222 sshd) work from the host; port 8080 forwards
+# to the in-guest httpd.
 run: os.img
-	$(QEMU) -drive format=raw,file=os.img -serial stdio -m 32
+	$(QEMU) -drive format=raw,file=os.img -serial stdio -m 32 \
+	        -smp 1 \
+	        -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::7000-:7000,hostfwd=tcp::2222-:2222 \
+	        -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	        -device piix3-usb-uhci,id=usb0 \
+	        -device usb-kbd,bus=usb0.0
 
-run-headless: os.img
-	$(QEMU) -drive format=raw,file=os.img -serial stdio -display none -m 32 -no-reboot
+# Bare boot — graphical window, no USB device, no network. Falls back
+# to the PS/2 keyboard. Good for isolating driver init bugs.
+run-bare: os.img
+	$(QEMU) -drive format=raw,file=os.img -serial stdio -m 32 -smp 1
 
 run-debug: os.img
-	$(QEMU) -drive format=raw,file=os.img -serial stdio -m 32 \
+	$(QEMU) -drive format=raw,file=os.img -serial stdio -m 32 -smp 1 \
+	        -device piix3-usb-uhci,id=usb0 -device usb-kbd,bus=usb0.0 \
 	        -d guest_errors,int -no-reboot -no-shutdown

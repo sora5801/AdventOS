@@ -1,6 +1,7 @@
 #include "isr.h"
 #include "kprintf.h"
 #include "pic.h"
+#include "serial.h"
 #include "syscall.h"
 #include "signal.h"
 #include "mmap.h"
@@ -41,6 +42,16 @@ static irq_handler_fn irq_handlers[16];
 
 void isr_register_irq(int irq, irq_handler_fn handler) {
     if (irq >= 0 && irq < 16) irq_handlers[irq] = handler;
+}
+
+/* Session 68 build marker. Lock-free direct UART write — fine in any
+ * context, fine before kprintf locks are usable. Lets a glance at the
+ * boot log tell you which kernel.bin you're actually running. The
+ * version tag bumps when we make IRQ-routing or scheduler-relevant
+ * changes that are easy to confuse with a stale build. */
+void isr_print_build_marker(void) {
+    const char *m = "[isr] v68 IRQ wiring: PIC mode, poll fallback\n";
+    while (*m) serial_putc(*m++);
 }
 
 /* Stop the current task for a tracer (session 57). Called from the

@@ -12,6 +12,7 @@
 #include "gdt.h"
 #include "tss.h"
 #include "idt.h"
+#include "isr.h"
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
@@ -101,6 +102,8 @@ void kmain(uint32_t boot_drive) {
     kputs("[boot] installing IDT... ");
     idt_init();
     kputs("ok\n");
+
+    isr_print_build_marker();
 
     kputs("[boot] remapping PIC to 0x20/0x28... ");
     pic_remap(PIC1_OFFSET, PIC2_OFFSET);

@@ -17,4 +17,11 @@ char keyboard_wait_char(void);
  * tests without needing an actual keyboard / serial peer. */
 void keyboard_inject(const char *bytes, int n);
 
+/* Session 68: drain the PS/2 controller's output buffer in polling
+ * mode. Same scancode-set-1 processing as the IRQ-driven path. Safe
+ * to call from any context — no locks, just port I/O. Used by
+ * keyboard_wait_char to actively pull keypresses when IRQ 1 isn't
+ * firing (QEMU 10.x / chipset-routing issue). */
+void keyboard_poll_once(void);
+
 #endif
