@@ -220,6 +220,31 @@ struct task {
     #define SANDBOX_RECENT_N 16
     uint32_t      sandbox_recent[SANDBOX_RECENT_N];
     uint8_t       sandbox_recent_head;
+
+    /* Session 71: per-task resource limits.
+     *
+     * Caps default to 0 = "no limit". A cap of N means the
+     * resource is forbidden from exceeding N. SYS_SETLIMIT can
+     * only TIGHTEN — non-zero caps are MIN()d with the incoming
+     * non-zero value; zero in the incoming struct means "leave
+     * this field alone".  Inherited verbatim across fork+exec,
+     * symmetric with the session-70 sandbox mask.
+     *
+     * cur_* are running counters maintained by the enforcement
+     * sites — pmm alloc/free sites bump cur_rss_pages, PIT IRQ
+     * bumps cur_cpu_ticks. cur_fds is derived on-demand from the
+     * fd table when procfs renders it (no field).
+     *
+     * wall_deadline_ticks is an ABSOLUTE pit_ticks() target set
+     * by SYS_SETLIMIT (kernel adds the current tick count to the
+     * caller-supplied relative ms). 0 = no deadline. PIT IRQ
+     * compares pit_ticks() to it and posts SIGKILL on overrun. */
+    uint32_t      max_rss_pages;
+    uint32_t      max_cpu_ticks;
+    uint32_t      max_fds;
+    uint32_t      wall_deadline_ticks;
+    uint32_t      cur_rss_pages;
+    uint32_t      cur_cpu_ticks;
 };
 
 #define USER_HEAP_START  0x40200000u

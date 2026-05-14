@@ -37,6 +37,7 @@ enum {
     PNODE_PID_DIR     = 8,
     PNODE_PID_STATUS  = 9,
     PNODE_PID_SANDBOX = 10,    /* session 70 */
+    PNODE_PID_LIMITS  = 11,    /* session 71 */
 };
 
 /* Static top-level files (visible in `ls /proc`). The pid-numbered
@@ -258,6 +259,58 @@ static int gen_sandbox(int pid, char *buf, int cap) {
     return o;
 }
 
+/* /proc/<pid>/limits — session 71.
+ *
+ * Layout:
+ *   RssPages:   <cur> / <cap>      ("/-" suffix if no cap)
+ *   CpuTicks:   <cur> / <cap>
+ *   Fds:        <live> / <cap>
+ *   WallTicks:  <now> / <deadline>
+ *
+ * "0" in a cap field is printed as "-" so unset caps don't look
+ * like a hard 0. Same pattern across all four fields. */
+static int gen_limits(int pid, char *buf, int cap_buf) {
+    struct task *t = 0;
+    for (uint32_t i = 0; i < 16; i++) {
+        struct task *tt = task_at(i);
+        if (tt && (int)tt->id == pid) { t = tt; break; }
+    }
+    if (!t) return 0;
+
+    /* Count live fds for the "current" half of the Fds: line. */
+    int live_fds = 0;
+    for (int i = 0; i < TASK_MAX_FDS; i++) {
+        if (t->fds[i].kind != FD_FREE) live_fds++;
+    }
+
+    int o = 0;
+    sb_str(buf, &o, cap_buf, "RssPages:   ");
+    sb_dec(buf, &o, cap_buf, t->cur_rss_pages);
+    sb_str(buf, &o, cap_buf, " / ");
+    if (t->max_rss_pages) sb_dec(buf, &o, cap_buf, t->max_rss_pages);
+    else                  sb_str(buf, &o, cap_buf, "-");
+
+    sb_str(buf, &o, cap_buf, "\nCpuTicks:   ");
+    sb_dec(buf, &o, cap_buf, t->cur_cpu_ticks);
+    sb_str(buf, &o, cap_buf, " / ");
+    if (t->max_cpu_ticks) sb_dec(buf, &o, cap_buf, t->max_cpu_ticks);
+    else                  sb_str(buf, &o, cap_buf, "-");
+
+    sb_str(buf, &o, cap_buf, "\nFds:        ");
+    sb_dec(buf, &o, cap_buf, (uint32_t)live_fds);
+    sb_str(buf, &o, cap_buf, " / ");
+    if (t->max_fds)       sb_dec(buf, &o, cap_buf, t->max_fds);
+    else                  sb_str(buf, &o, cap_buf, "-");
+
+    sb_str(buf, &o, cap_buf, "\nWallTicks:  ");
+    sb_dec(buf, &o, cap_buf, pit_ticks());
+    sb_str(buf, &o, cap_buf, " / ");
+    if (t->wall_deadline_ticks) sb_dec(buf, &o, cap_buf, t->wall_deadline_ticks);
+    else                        sb_str(buf, &o, cap_buf, "-");
+    sb_str(buf, &o, cap_buf, "\n");
+    return o;
+}
+
 /* ---- VFS ops ------------------------------------------------------- */
 
 /* Parse a leading non-negative decimal integer. Returns -1 if no
@@ -337,6 +390,13 @@ static int procfs_open(void *fs_data, const char *rel, struct vfs_inode *out) {
         out->is_dir  = 0;
         return 0;
     }
+    if (rel[n] == '/' && strcmp(rel + n + 1, "limits") == 0) {
+        out->kind    = FD_PROCFS;
+        out->obj_idx = PROC_MAKE(PNODE_PID_LIMITS, pid);
+        out->size    = 256;
+        out->is_dir  = 0;
+        return 0;
+    }
     return -1;
 }
 
@@ -356,6 +416,7 @@ int procfs_read_by_id(int id, uint32_t offset, void *buf, uint32_t n) {
         case PNODE_BCACHE:     len = gen_bcache (tmp, sizeof(tmp));      break;
         case PNODE_PID_STATUS:  len = gen_status (pid, tmp, sizeof(tmp));  break;
         case PNODE_PID_SANDBOX: len = gen_sandbox(pid, tmp, sizeof(tmp));  break;
+        case PNODE_PID_LIMITS:  len = gen_limits (pid, tmp, sizeof(tmp));  break;
         default: return 0;
     }
 
@@ -432,6 +493,7 @@ static int procfs_readdir(void *fs_data, const char *rel, int *iter, char *name)
     } pid_files[] = {
         { "status",  PNODE_PID_STATUS  },
         { "sandbox", PNODE_PID_SANDBOX },
+        { "limits",  PNODE_PID_LIMITS  },
     };
     int n_pid_files = (int)(sizeof(pid_files) / sizeof(pid_files[0]));
 

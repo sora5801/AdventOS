@@ -28,9 +28,24 @@
 #include "bkl.h"
 #include "blkdev.h"
 
+/* Count currently-live fd slots — used both by the session-71 max_fds
+ * cap check and (someday) by procfs renderers. Slots 0/1/2 are always
+ * counted as live; slot 3+ count if their kind != FD_FREE. */
+static int count_live_fds(struct task *t) {
+    int n = 0;
+    for (int fd = 0; fd < TASK_MAX_FDS; fd++) {
+        if (t->fds[fd].kind != FD_FREE) n++;
+    }
+    return n;
+}
+
 /* Allocate the lowest free fd >= 3 in the calling task's table.
- * Returns the fd index or -1 if the table is full. */
+ * Returns the fd index or -1 if the table is full, OR if a session-71
+ * max_fds limit is set and we'd exceed it. */
 static int alloc_fd(struct task *t) {
+    if (t->max_fds && (uint32_t)count_live_fds(t) >= t->max_fds) {
+        return -1;
+    }
     for (int fd = 3; fd < TASK_MAX_FDS; fd++) {
         if (t->fds[fd].kind == FD_FREE) return fd;
     }
@@ -604,6 +619,51 @@ void syscall_dispatch(struct registers *r) {
                 }
             }
             t->sandbox_active = 1;
+            ret = 0;
+            break;
+        }
+        case SYS_SETLIMIT: {
+            /* Session 71: tighten resource caps for this task.
+             *
+             * Zero in any field means "don't touch this cap". A
+             * non-zero value is MIN()d into the existing cap so caps
+             * can only tighten — symmetric with the sandbox API. The
+             * struct also exposes max_wall_ms (relative); we add the
+             * current PIT tick count to get an absolute deadline that
+             * survives reschedules cleanly. */
+            const struct sys_limits *l = (const struct sys_limits *)(uintptr_t)a;
+            if (!l)                                  { ret = -1; break; }
+
+            struct task *t = task_current();
+
+            if (l->max_rss_kb) {
+                uint32_t want = l->max_rss_kb / 4;          /* kB → 4-KiB pages */
+                if (want == 0) want = 1;                     /* never round to "no limit" */
+                if (t->max_rss_pages == 0 || want < t->max_rss_pages) {
+                    t->max_rss_pages = want;
+                }
+            }
+            if (l->max_cpu_ms) {
+                uint32_t want = l->max_cpu_ms / 10;          /* ms → 10ms ticks */
+                if (want == 0) want = 1;
+                if (t->max_cpu_ticks == 0 || want < t->max_cpu_ticks) {
+                    t->max_cpu_ticks = want;
+                }
+            }
+            if (l->max_fds) {
+                if (t->max_fds == 0 || l->max_fds < t->max_fds) {
+                    t->max_fds = l->max_fds;
+                }
+            }
+            if (l->max_wall_ms) {
+                uint32_t delta = l->max_wall_ms / 10;
+                if (delta == 0) delta = 1;
+                uint32_t want_deadline = pit_ticks() + delta;
+                if (t->wall_deadline_ticks == 0 ||
+                    want_deadline < t->wall_deadline_ticks) {
+                    t->wall_deadline_ticks = want_deadline;
+                }
+            }
             ret = 0;
             break;
         }
@@ -1403,12 +1463,18 @@ void syscall_dispatch(struct registers *r) {
 
             if (new_pg > cur_pg) {
                 /* Grow: map fresh pages from cur_pg to new_pg. If
-                 * any allocation fails, roll back the pages we
-                 * managed to map and report failure (return
-                 * unchanged break). */
+                 * any allocation fails OR session-71 max_rss_pages
+                 * would be exceeded, roll back the pages we managed
+                 * to map and report failure (return unchanged break). */
                 uint32_t mapped_to = cur_pg;
                 int ok = 1;
                 for (uint32_t va = cur_pg; va < new_pg; va += 4096) {
+                    /* Session 71 RSS cap check before alloc. */
+                    if (t->max_rss_pages &&
+                        t->cur_rss_pages >= t->max_rss_pages) {
+                        ok = 0;
+                        break;
+                    }
                     void *page = pmm_alloc_page();
                     if (!page) { ok = 0; break; }
                     /* Zero the page so the user heap doesn't expose
@@ -1423,6 +1489,7 @@ void syscall_dispatch(struct registers *r) {
                         ok = 0;
                         break;
                     }
+                    t->cur_rss_pages++;     /* session 71 RSS count */
                     mapped_to = va + 4096;
                 }
                 if (!ok) {

@@ -396,15 +396,27 @@ static int drain_fd(int fd, char *buf, int cap) {
     return total;
 }
 
+/* Session 71 — parsed-out resource caps for the shell.exec_sandboxed
+ * path. NULL on the bare shell.exec path. */
+struct sb_limits_in {
+    int      have;            /* any non-zero field => 1 */
+    uint32_t max_rss_kb;
+    uint32_t max_cpu_ms;
+    uint32_t max_fds;
+    uint32_t max_wall_ms;
+};
+
 /* Common shell.exec / shell.exec_sandboxed engine.  The sandboxed
- * variant just rewrites argv to ["sandbox.elf", policy, "--", cmd,
- * args...] and execs the wrapper instead of the bare command.  The
- * wrapper installs the policy in-process and execs into the real
- * target, which inherits the mask.  All the stdout/stderr capture
- * machinery stays identical. */
+ * variant rewrites argv to ["sandbox.elf", policy, "--", cmd, args...]
+ * and execs the wrapper instead of the bare command.  Resource limits,
+ * if supplied, are installed by the agentd-side fork *in the child*
+ * before the wrapper exec — that way the wrapper, sandbox.elf, and
+ * the eventual target all share the same caps without burning argv
+ * slots on --rss-kb / --cpu-ms / etc. */
 static int shell_exec_inner(struct json_w *w,
                             const struct json_v *params,
-                            const char *policy /* NULL = no sandbox */) {
+                            const char *policy            /* NULL = no sandbox */,
+                            const struct sb_limits_in *L  /* NULL = no caps */) {
     const struct json_v *cmd_v = json_obj_get(params, "cmd");
     int cmd_len = 0;
     const char *cmd = json_to_str(cmd_v, &cmd_len);
@@ -456,6 +468,18 @@ static int shell_exec_inner(struct json_w *w,
         sys_dup2(err_pp[1], 2);
         sys_close(out_pp[0]); sys_close(out_pp[1]);
         sys_close(err_pp[0]); sys_close(err_pp[1]);
+        /* Session 71: install caps in the child before exec. Caps
+         * survive exec, so sandbox.elf and the eventual target both
+         * inherit them. We do this only for sandboxed runs — bare
+         * shell.exec stays uncapped. */
+        if (L && L->have) {
+            struct sys_limits sl;
+            sl.max_rss_kb  = L->max_rss_kb;
+            sl.max_cpu_ms  = L->max_cpu_ms;
+            sl.max_fds     = L->max_fds;
+            sl.max_wall_ms = L->max_wall_ms;
+            sys_setlimit(&sl);
+        }
         sys_exec(exec_path, argv);
         sys_write(2, "agentd-exec: cannot exec\n", 25);
         sys_exit(127);
@@ -470,37 +494,59 @@ static int shell_exec_inner(struct json_w *w,
     sys_close(out_pp[0]);
     sys_close(err_pp[0]);
 
-    /* Session 70: before reaping, peek at /proc/<child>/sandbox.
-     * The child is in TASK_STATE_ZOMBIE at this point; procfs still
-     * shows zombies so the per-task sandbox ring is readable. Once
-     * sys_wait reaps the task, the state vanishes. This is only
-     * worth doing in the sandboxed variant — the bare shell.exec
-     * doesn't have a policy and the file would show Active:0. */
+    /* Session 70 + 71: before reaping, peek at /proc/<child>/sandbox
+     * AND /proc/<child>/limits. The child is in TASK_STATE_ZOMBIE at
+     * this point; procfs still shows zombies so both per-task files
+     * are readable. Once sys_wait reaps the task, the state vanishes.
+     * Only meaningful for the sandboxed variant — the bare shell.exec
+     * has no policy and no caps so both files would be uninformative. */
     static char sb_buf[1024];
+    static char lm_buf[512];
     int sb_n = 0;
+    int lm_n = 0;
     if (policy) {
-        char path[32];
-        int pp = 0;
+        /* Build "/proc/<pid>/" prefix once. */
+        char path[40];
+        int  pp_len = 0;
         const char *p1 = "/proc/";
-        while (*p1) path[pp++] = *p1++;
-        /* base-10 child pid */
+        while (*p1) path[pp_len++] = *p1++;
         int n = pid;
-        if (n == 0) path[pp++] = '0';
+        if (n == 0) path[pp_len++] = '0';
         else {
             char tmp[8]; int ti = 0;
             while (n) { tmp[ti++] = (char)('0' + n%10); n /= 10; }
-            while (ti) path[pp++] = tmp[--ti];
+            while (ti) path[pp_len++] = tmp[--ti];
         }
-        const char *p2 = "/sandbox";
-        while (*p2) path[pp++] = *p2++;
-        path[pp] = 0;
+        path[pp_len++] = '/';
 
-        int sfd = sys_open(path);
-        if (sfd >= 0) {
-            sb_n = sys_read(sfd, sb_buf, sizeof(sb_buf) - 1);
-            sys_close(sfd);
-            if (sb_n < 0) sb_n = 0;
-            sb_buf[sb_n] = 0;
+        /* /proc/<pid>/sandbox */
+        {
+            int t = pp_len;
+            const char *p2 = "sandbox";
+            while (*p2) path[t++] = *p2++;
+            path[t] = 0;
+            int sfd = sys_open(path);
+            if (sfd >= 0) {
+                sb_n = sys_read(sfd, sb_buf, sizeof(sb_buf) - 1);
+                sys_close(sfd);
+                if (sb_n < 0) sb_n = 0;
+                sb_buf[sb_n] = 0;
+            }
+        }
+
+        /* /proc/<pid>/limits */
+        {
+            int t = pp_len;
+            const char *p2 = "limits";
+            while (*p2) path[t++] = *p2++;
+            path[t] = 0;
+            int sfd = sys_open(path);
+            if (sfd >= 0) {
+                lm_n = sys_read(sfd, lm_buf, sizeof(lm_buf) - 1);
+                sys_close(sfd);
+                if (lm_n < 0) lm_n = 0;
+                lm_buf[lm_n] = 0;
+            }
         }
     }
 
@@ -520,13 +566,14 @@ static int shell_exec_inner(struct json_w *w,
           json_key(w, "policy");       json_str_n(w, policy, pol_len);
           json_key(w, "child_pid");    json_int  (w, pid);
           json_key(w, "sandbox_log");  json_str_n(w, sb_buf, sb_n);
+          json_key(w, "limits_state"); json_str_n(w, lm_buf, lm_n);
       }
     json_obj_end(w);
     return 0;
 }
 
 static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
-    return shell_exec_inner(w, params, /*policy=*/0);
+    return shell_exec_inner(w, params, /*policy=*/0, /*limits=*/0);
 }
 
 /* Session 70: exec a command under a syscall sandbox policy. The
@@ -568,7 +615,42 @@ static int emit_shell_exec_sandboxed(struct json_w *w,
     }
     policy_buf[p_len] = 0;
 
-    return shell_exec_inner(w, params, policy_buf);
+    /* Session 71 — optional `limits` object. Any subset of the four
+     * fields may be present; missing fields default to 0 = "no cap".
+     * Bad shapes (limits present but not an object, or a field that
+     * isn't a non-negative number) fail with Invalid Params. */
+    struct sb_limits_in lim;
+    lim.have        = 0;
+    lim.max_rss_kb  = 0;
+    lim.max_cpu_ms  = 0;
+    lim.max_fds     = 0;
+    lim.max_wall_ms = 0;
+
+    const struct json_v *lim_v = json_obj_get(params, "limits");
+    if (lim_v) {
+        if (lim_v->type != JSON_OBJ) return -32602;
+        const struct json_v *f;
+        if ((f = json_obj_get(lim_v, "max_rss_kb")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            lim.max_rss_kb = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_cpu_ms")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            lim.max_cpu_ms = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_fds")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            lim.max_fds = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_wall_ms")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            lim.max_wall_ms = (uint32_t)json_to_int(f);
+        }
+        if (lim.max_rss_kb || lim.max_cpu_ms ||
+            lim.max_fds   || lim.max_wall_ms) lim.have = 1;
+    }
+
+    return shell_exec_inner(w, params, policy_buf, lim.have ? &lim : 0);
 }
 
 /* ============================================================

@@ -815,6 +815,21 @@ struct task *task_fork(struct registers *parent_regs) {
     child->sandbox_active  = parent->sandbox_active;
     child->sandbox_denials = 0;
 
+    /* 5g. Inherit resource limits (session 71). Caps copy verbatim;
+     *     CPU/wall counters reset to 0 since the child is a fresh
+     *     scheduling subject. cur_rss_pages, however, is set to the
+     *     parent's value: paging_clone_user_pd allocated a new page
+     *     for every parent page, so the child's RSS is structurally
+     *     identical at this instant. (If max_rss_pages was 0 / no
+     *     cap, cur_rss_pages tracking still matters for procfs but
+     *     never triggers a kill.) */
+    child->max_rss_pages       = parent->max_rss_pages;
+    child->max_cpu_ticks       = parent->max_cpu_ticks;
+    child->max_fds             = parent->max_fds;
+    child->wall_deadline_ticks = parent->wall_deadline_ticks;
+    child->cur_rss_pages       = parent->cur_rss_pages;
+    child->cur_cpu_ticks       = 0;
+
     /* 6. Splice into the round-robin ring under the scheduler lock —
      * APs may be picking from the ring concurrently. Transition
      * state to READY in the same critical section so the moment

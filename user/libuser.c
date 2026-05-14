@@ -515,6 +515,23 @@ void sandbox_policy_netclient(uint32_t mask[4]) {
     sb_allow(mask, SYS_FD_NB);
 }
 
+/* Session 71: resource-limit wrapper + helper. */
+int sys_setlimit(const struct sys_limits *l) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SETLIMIT), "b"(l)
+                      : "memory");
+    return ret;
+}
+
+void limits_default(struct sys_limits *l) {
+    l->max_rss_kb  = 0;
+    l->max_cpu_ms  = 0;
+    l->max_fds     = 0;
+    l->max_wall_ms = 0;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

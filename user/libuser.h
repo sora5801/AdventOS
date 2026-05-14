@@ -115,6 +115,7 @@ typedef unsigned int   size_t;
 /* Session 67 — serial keyboard input testing hook. */
 #define SYS_SERIAL_INJECT 81
 #define SYS_SANDBOX_INSTALL 82
+#define SYS_SETLIMIT       83
 
 /* Session 70: syscall sandbox.
  *
@@ -143,6 +144,24 @@ void sandbox_policy_minimal  (uint32_t mask[4]);
 void sandbox_policy_compute  (uint32_t mask[4]);
 void sandbox_policy_readfs   (uint32_t mask[4]);
 void sandbox_policy_netclient(uint32_t mask[4]);
+
+/* Session 71: per-task resource limits.
+ *
+ * SYS_SETLIMIT tightens each cap to MIN(current, new). Zero in a
+ * field means "leave alone", non-zero MIN()s in. So setting only
+ * .max_cpu_ms = 5000 raises a CPU cap without touching RSS / fd /
+ * wall-clock caps. Inherited verbatim across fork+exec.
+ *
+ * The mirror struct here MUST match kernel/syscall.h's layout. */
+struct sys_limits {
+    uint32_t max_rss_kb;       /* heap+mmap pages, in kilobytes */
+    uint32_t max_cpu_ms;       /* total CPU time the task may consume */
+    uint32_t max_fds;          /* max simultaneously-open fds */
+    uint32_t max_wall_ms;      /* relative wall-clock deadline */
+};
+
+int sys_setlimit(const struct sys_limits *l);
+void limits_default(struct sys_limits *l);   /* all-zeros = "no change" */
 
 /* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
  * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to

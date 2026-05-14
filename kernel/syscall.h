@@ -206,6 +206,39 @@
  * use today (highest is SYS_SANDBOX_INSTALL = 82), leaves headroom. */
 #define SANDBOX_MASK_WORDS  4
 
+/* ---- Session 71: per-task resource limits ----
+ *
+ * Companion to the syscall sandbox. The sandbox stops a task from
+ * talking to the system; the limits stop it from consuming it. A
+ * compute-policy tool that mallocs(1 << 30) or spins forever needs
+ * a kernel-side cap, not just an allow-list.
+ *
+ * Each task carries four caps (RSS, CPU time, fd count, wall-clock
+ * deadline) and matching usage counters. Caps are zero by default
+ * (no limit). SYS_SETLIMIT tightens — zero in a request field means
+ * "leave this cap alone", non-zero MIN()s into the current value.
+ * That makes it ergonomic to set only the cap you care about.
+ *
+ * Enforcement sites:
+ *   - max_rss_pages : pmm_alloc in SYS_BRK + mmap_handle_fault
+ *   - max_cpu_ticks : PIT IRQ accumulates cur_cpu_ticks, posts
+ *                     SIGKILL when cur >= cap
+ *   - max_fds       : alloc_fd refuses past N live entries
+ *   - wall_deadline : PIT IRQ checks pit_ticks() >= deadline, SIGKILL
+ *
+ * Overrun on the IRQ side flags pending SIGKILL; the existing
+ * signal_check_and_deliver tail of irq_handler delivers it on the
+ * iret-to-ring-3 path. */
+#define SYS_SETLIMIT 83        /* (eax=83, ebx=const struct sys_limits *)
+                                * -> 0 on success, -1 on bad pointer. */
+
+struct sys_limits {
+    uint32_t max_rss_kb;       /* kernel converts to pages internally */
+    uint32_t max_cpu_ms;       /* kernel converts to PIT ticks (÷ 10) */
+    uint32_t max_fds;
+    uint32_t max_wall_ms;      /* relative; kernel adds pit_ticks() */
+};
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

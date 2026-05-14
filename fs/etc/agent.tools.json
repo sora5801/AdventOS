@@ -67,7 +67,7 @@
     },
     {
       "name": "shell.exec_sandboxed",
-      "description": "Like shell.exec, but the spawned process runs under a syscall sandbox. Any syscall not in the named policy returns -1 and bumps a per-process denial counter. Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit the same mask. The response includes `sandbox_log`, a snapshot of /proc/<child_pid>/sandbox captured just before the child is reaped, so the caller can see what syscalls (if any) the policy actually blocked.",
+      "description": "Like shell.exec, but the spawned process runs under a syscall sandbox AND optional resource caps. Any syscall not in the named policy returns -1 and bumps a per-process denial counter; exceeding a resource cap kills the child with SIGSEGV (RSS) or SIGKILL (CPU / wall-clock). Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit both the mask and the caps. The response includes `sandbox_log` (snapshot of /proc/<child_pid>/sandbox) and `limits_state` (snapshot of /proc/<child_pid>/limits) captured just before the child is reaped.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -76,7 +76,17 @@
                      "description": "Args after argv[0]=cmd. Up to 12 entries (3 are reserved for the sandbox wrapper prefix)."},
           "policy": {"type": "string",
                      "enum": ["minimal", "compute", "readfs", "netclient"],
-                     "description": "Syscall allow-list template. minimal = compute (no I/O); compute = + mmap/munmap; readfs = + read-only filesystem; netclient = + outbound TCP/UDP + DNS."}
+                     "description": "Syscall allow-list template. minimal = compute (no I/O); compute = + mmap/munmap; readfs = + read-only filesystem; netclient = + outbound TCP/UDP + DNS."},
+          "limits": {
+            "type": "object",
+            "description": "Optional per-task resource caps (session 71). All fields are non-negative integers; 0 or omitted = no cap. Monotonic-tighten: once set, the child cannot loosen them.",
+            "properties": {
+              "max_rss_kb":  {"type": "integer", "description": "Max heap+mmap resident size, in kilobytes. Overrun on alloc -> -1 / SIGSEGV."},
+              "max_cpu_ms":  {"type": "integer", "description": "Max total CPU time the task may consume, in milliseconds (PIT 10 ms granularity). Overrun -> SIGKILL."},
+              "max_fds":     {"type": "integer", "description": "Max simultaneously-open file descriptors. Overrun -> alloc_fd returns -1."},
+              "max_wall_ms": {"type": "integer", "description": "Wall-clock deadline relative to setlimit, in milliseconds. Overrun -> SIGKILL."}
+            }
+          }
         },
         "required": ["cmd", "policy"]
       }

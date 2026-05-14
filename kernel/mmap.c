@@ -3,6 +3,7 @@
 #include "fs.h"
 #include "pmm.h"
 #include "paging.h"
+#include "signal.h"
 #include "string.h"
 #include "kprintf.h"
 
@@ -85,10 +86,24 @@ int mmap_handle_fault(struct registers *r, uint32_t cr2) {
 
     uint32_t va_page = cr2 & ~(PAGE_4K - 1u);
 
+    /* Session 71: RSS cap check before page alloc. Returning -1 from
+     * the fault handler routes through isr.c's default-case panic by
+     * design, but we want SIGSEGV-shaped delivery instead — the task
+     * can be killed cleanly. Post SIGSEGV pending, then return 0
+     * (claim we handled it). signal_check_and_deliver at the iret
+     * tail picks it up; the task's signal default for SIGSEGV is to
+     * terminate. The unmapped page stays unmapped — fine, the task
+     * is dying. */
+    if (t->max_rss_pages && t->cur_rss_pages >= t->max_rss_pages) {
+        t->sig_pending |= (1u << SIGSEGV);
+        return 0;
+    }
+
     /* Allocate + zero a fresh page. Page is identity-mapped under the
      * kernel master PD so we can fill it via its physical address. */
     void *page = pmm_alloc_page();
     if (!page) return -1;
+    t->cur_rss_pages++;     /* session 71 RSS count */
     for (int i = 0; i < (int)PAGE_4K / 4; i++) ((uint32_t *)page)[i] = 0;
 
     /* Fill the file-backed portion. The mapping covers

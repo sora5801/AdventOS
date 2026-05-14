@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "task.h"
 #include "serial.h"
+#include "signal.h"
 #include "../include/io.h"
 
 #define PIT_FREQ      1193182u
@@ -15,6 +16,36 @@ static uint32_t          ticks_per_sec;
 static void pit_irq(struct registers *r) {
     (void)r;
     ticks++;
+
+    /* Session 71: per-task CPU + wall-clock accounting.
+     *
+     * Charges this tick to whichever user task was on-CPU when the
+     * IRQ fired. Kernel tasks (is_user == 0) are exempt — we don't
+     * want to terminate the idle thread for "exceeding" its CPU
+     * cap. Overrun queues SIGKILL into sig_pending; the existing
+     * signal_check_and_deliver tail of irq_handler picks it up on
+     * the iret-to-ring-3 path. We can't task_exit from IRQ context
+     * directly — the BKL discipline and reaper interactions are
+     * subtle — so the pending-signal route is the right shape.
+     *
+     * SIGKILL's default action is uncatchable terminate; the task
+     * dies on the next return to ring 3, which happens immediately
+     * after this handler since pit_irq runs in the preempted
+     * context's stack. */
+    struct task *cur = task_current();
+    if (cur && cur->is_user) {
+        if (cur->max_cpu_ticks) {
+            cur->cur_cpu_ticks++;
+            if (cur->cur_cpu_ticks >= cur->max_cpu_ticks) {
+                cur->sig_pending |= (1u << SIGKILL);
+            }
+        }
+        if (cur->wall_deadline_ticks &&
+            ticks >= cur->wall_deadline_ticks) {
+            cur->sig_pending |= (1u << SIGKILL);
+        }
+    }
+
     /* Session 67 wired the COM1 RX path to be IRQ-driven, but in
      * practice IRQ 4 never fires under our QEMU config (`-display
      * none -serial stdio` + the i440fx i8259 model). Bytes typed at
