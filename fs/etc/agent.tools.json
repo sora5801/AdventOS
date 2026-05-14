@@ -67,7 +67,7 @@
     },
     {
       "name": "shell.exec_sandboxed",
-      "description": "Like shell.exec, but the spawned process runs under a syscall sandbox. Any syscall not in the named policy returns -1 and bumps a per-process denial counter. Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit the same mask.",
+      "description": "Like shell.exec, but the spawned process runs under a syscall sandbox. Any syscall not in the named policy returns -1 and bumps a per-process denial counter. Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit the same mask. The response includes `sandbox_log`, a snapshot of /proc/<child_pid>/sandbox captured just before the child is reaped, so the caller can see what syscalls (if any) the policy actually blocked.",
       "inputSchema": {
         "type": "object",
         "properties": {

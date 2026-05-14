@@ -199,12 +199,27 @@ struct task {
      * (each install AND-s into the current value) and inherited
      * verbatim across fork+exec.
      *
-     * `sandbox_denials` is a simple counter bumped on each blocked
-     * syscall — exposed via procfs and useful for catching unexpected
-     * policy mismatches in development. */
+     * `sandbox_denials` is the total count of blocked syscalls.
+     * `sandbox_recent` is a circular buffer of the most-recent
+     * SANDBOX_RECENT_N denials, with `sandbox_recent_head` pointing
+     * at the next slot to overwrite. Exposed via /proc/<pid>/sandbox
+     * so a supervising agent can inspect what its sandboxed child
+     * was attempting — much friendlier than tail'ing serial. */
     uint32_t      sandbox_mask[4];    /* SANDBOX_MASK_WORDS = 4 */
     int           sandbox_active;
     uint32_t      sandbox_denials;
+
+    /* Ring buffer of recent denial events. Each slot packs
+     * (pit_tick_low << 16) | (syscall_no & 0xFFFF). pit_tick_low
+     * wraps every ~11 minutes at 100 Hz which is fine for "what
+     * just happened" debugging; absolute time can be recovered
+     * from uptime if a supervisor cares. Slot value 0 = unused.
+     * NOTE: a denial whose tick_low and sc both happen to be 0
+     * looks unused — that's syscall SYS_WRITE at PIT tick zero,
+     * not realistically reachable, so the ambiguity is fine. */
+    #define SANDBOX_RECENT_N 16
+    uint32_t      sandbox_recent[SANDBOX_RECENT_N];
+    uint8_t       sandbox_recent_head;
 };
 
 #define USER_HEAP_START  0x40200000u

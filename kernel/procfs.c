@@ -6,6 +6,7 @@
 #include "bcache.h"
 #include "string.h"
 #include "kprintf.h"
+#include "syscall.h"
 
 /*
  * /proc filesystem — synthesizes file content from live kernel state
@@ -35,6 +36,7 @@ enum {
     PNODE_BCACHE      = 7,
     PNODE_PID_DIR     = 8,
     PNODE_PID_STATUS  = 9,
+    PNODE_PID_SANDBOX = 10,    /* session 70 */
 };
 
 /* Static top-level files (visible in `ls /proc`). The pid-numbered
@@ -73,6 +75,14 @@ static void sb_pad_dec(char *buf, int *o, int cap, uint32_t v, int width) {
     while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
     while (ti < width && *o < cap - 1) { buf[(*o)++] = ' '; width--; }
     while (ti > 0 && *o < cap - 1) buf[(*o)++] = tmp[--ti];
+}
+
+/* 8-hex-digit, zero-padded — used by the sandbox node for mask dumps. */
+static void sb_hex32(char *buf, int *o, int cap, uint32_t v) {
+    static const char d[] = "0123456789abcdef";
+    for (int i = 7; i >= 0 && *o < cap - 1; i--) {
+        buf[(*o)++] = d[(v >> (i * 4)) & 0xF];
+    }
 }
 
 /* ---- generators ---------------------------------------------------- */
@@ -188,6 +198,66 @@ static int gen_status(int pid, char *buf, int cap) {
     return o;
 }
 
+/* /proc/<pid>/sandbox — session 70.
+ *
+ * Layout:
+ *   Active:    0|1
+ *   Denials:   <total>
+ *   Mask:      <hex0> <hex1> <hex2> <hex3>
+ *   Recent:                          (only present if Denials > 0)
+ *     tick=<lo16> sc=<NN> SYS_NAME
+ *     ...                            (up to SANDBOX_RECENT_N entries,
+ *                                     oldest first)
+ *
+ * Stable plain-text format intended both for human eyes and for
+ * /proc-aware agents that just grep for "Denials:" or split lines
+ * starting with "  tick=". A future /proc/<pid>/sandbox.json could
+ * emit the same data as JSON for richer tooling. */
+static int gen_sandbox(int pid, char *buf, int cap) {
+    struct task *t = 0;
+    for (uint32_t i = 0; i < 16; i++) {
+        struct task *tt = task_at(i);
+        if (tt && (int)tt->id == pid) { t = tt; break; }
+    }
+    if (!t) return 0;
+
+    int o = 0;
+    sb_str(buf, &o, cap, "Active:    ");
+    sb_dec(buf, &o, cap, (uint32_t)(t->sandbox_active ? 1 : 0));
+    sb_str(buf, &o, cap, "\nDenials:   ");
+    sb_dec(buf, &o, cap, t->sandbox_denials);
+    sb_str(buf, &o, cap, "\nMask:      ");
+    for (int i = 0; i < 4; i++) {
+        if (i) sb_str(buf, &o, cap, " ");
+        sb_hex32(buf, &o, cap, t->sandbox_mask[i]);
+    }
+    sb_str(buf, &o, cap, "\n");
+
+    if (t->sandbox_denials > 0) {
+        sb_str(buf, &o, cap, "Recent:\n");
+
+        /* Walk the ring from oldest to newest. The head points at
+         * the NEXT slot to overwrite, so (head + i) % N visits in
+         * chronological order. Slot value 0 = never written (the
+         * memset(t, 0, ...) at task alloc time). */
+        for (int i = 0; i < SANDBOX_RECENT_N; i++) {
+            int     idx   = (t->sandbox_recent_head + i) % SANDBOX_RECENT_N;
+            uint32_t e    = t->sandbox_recent[idx];
+            if (e == 0) continue;
+            uint16_t tick = (uint16_t)(e >> 16);
+            uint16_t sc   = (uint16_t)(e & 0xFFFFu);
+            sb_str(buf, &o, cap, "  tick=");
+            sb_dec(buf, &o, cap, tick);
+            sb_str(buf, &o, cap, " sc=");
+            sb_dec(buf, &o, cap, sc);
+            sb_str(buf, &o, cap, " ");
+            sb_str(buf, &o, cap, syscall_name(sc));
+            sb_str(buf, &o, cap, "\n");
+        }
+    }
+    return o;
+}
+
 /* ---- VFS ops ------------------------------------------------------- */
 
 /* Parse a leading non-negative decimal integer. Returns -1 if no
@@ -260,6 +330,13 @@ static int procfs_open(void *fs_data, const char *rel, struct vfs_inode *out) {
         out->is_dir  = 0;
         return 0;
     }
+    if (rel[n] == '/' && strcmp(rel + n + 1, "sandbox") == 0) {
+        out->kind    = FD_PROCFS;
+        out->obj_idx = PROC_MAKE(PNODE_PID_SANDBOX, pid);
+        out->size    = 1024;
+        out->is_dir  = 0;
+        return 0;
+    }
     return -1;
 }
 
@@ -277,7 +354,8 @@ int procfs_read_by_id(int id, uint32_t offset, void *buf, uint32_t n) {
         case PNODE_VERSION:    len = gen_version(tmp, sizeof(tmp));      break;
         case PNODE_MOUNTS:     len = gen_mounts (tmp, sizeof(tmp));      break;
         case PNODE_BCACHE:     len = gen_bcache (tmp, sizeof(tmp));      break;
-        case PNODE_PID_STATUS: len = gen_status(pid, tmp, sizeof(tmp));  break;
+        case PNODE_PID_STATUS:  len = gen_status (pid, tmp, sizeof(tmp));  break;
+        case PNODE_PID_SANDBOX: len = gen_sandbox(pid, tmp, sizeof(tmp));  break;
         default: return 0;
     }
 
@@ -342,19 +420,29 @@ static int procfs_readdir(void *fs_data, const char *rel, int *iter, char *name)
         return -1;
     }
 
-    /* Listing /proc/<pid>: just one file, "status". */
+    /* Listing /proc/<pid>: status + sandbox. */
     int pid;
     int n = parse_pid(rel, &pid);
     if (n < 0 || rel[n] != 0)  return -1;
     if (!pid_is_live(pid))     return -1;
 
-    if (*iter == 0) {
-        const char *fn = "status";
+    static const struct {
+        const char *name;
+        int         kind;
+    } pid_files[] = {
+        { "status",  PNODE_PID_STATUS  },
+        { "sandbox", PNODE_PID_SANDBOX },
+    };
+    int n_pid_files = (int)(sizeof(pid_files) / sizeof(pid_files[0]));
+
+    if (*iter < n_pid_files) {
+        int i = *iter;
+        const char *fn = pid_files[i].name;
         int j = 0;
         while (fn[j] && j < 15) { name[j] = fn[j]; j++; }
         if (j < 16) name[j] = 0;
-        *iter = 1;
-        return PROC_MAKE(PNODE_PID_STATUS, pid);
+        *iter = i + 1;
+        return PROC_MAKE(pid_files[i].kind, pid);
     }
     return -1;
 }

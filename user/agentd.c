@@ -470,6 +470,40 @@ static int shell_exec_inner(struct json_w *w,
     sys_close(out_pp[0]);
     sys_close(err_pp[0]);
 
+    /* Session 70: before reaping, peek at /proc/<child>/sandbox.
+     * The child is in TASK_STATE_ZOMBIE at this point; procfs still
+     * shows zombies so the per-task sandbox ring is readable. Once
+     * sys_wait reaps the task, the state vanishes. This is only
+     * worth doing in the sandboxed variant — the bare shell.exec
+     * doesn't have a policy and the file would show Active:0. */
+    static char sb_buf[1024];
+    int sb_n = 0;
+    if (policy) {
+        char path[32];
+        int pp = 0;
+        const char *p1 = "/proc/";
+        while (*p1) path[pp++] = *p1++;
+        /* base-10 child pid */
+        int n = pid;
+        if (n == 0) path[pp++] = '0';
+        else {
+            char tmp[8]; int ti = 0;
+            while (n) { tmp[ti++] = (char)('0' + n%10); n /= 10; }
+            while (ti) path[pp++] = tmp[--ti];
+        }
+        const char *p2 = "/sandbox";
+        while (*p2) path[pp++] = *p2++;
+        path[pp] = 0;
+
+        int sfd = sys_open(path);
+        if (sfd >= 0) {
+            sb_n = sys_read(sfd, sb_buf, sizeof(sb_buf) - 1);
+            sys_close(sfd);
+            if (sb_n < 0) sb_n = 0;
+            sb_buf[sb_n] = 0;
+        }
+    }
+
     int code = 0;
     sys_wait(&code);
 
@@ -483,7 +517,9 @@ static int shell_exec_inner(struct json_w *w,
       json_key(w, "stdout");    json_str_n(w, out_buf, out_n);
       json_key(w, "stderr");    json_str_n(w, err_buf, err_n);
       if (policy) {
-          json_key(w, "policy"); json_str_n(w, policy, pol_len);
+          json_key(w, "policy");       json_str_n(w, policy, pol_len);
+          json_key(w, "child_pid");    json_int  (w, pid);
+          json_key(w, "sandbox_log");  json_str_n(w, sb_buf, sb_n);
       }
     json_obj_end(w);
     return 0;

@@ -72,6 +72,94 @@ static void release_fd(struct task_fd *e) {
 
 #define USER_STR_MAX 256
 
+/* Session 70: syscall-number → short name. Used by procfs when
+ * dumping the sandbox denial ring so an agent can grep the file
+ * for "SYS_OPEN" instead of decoding "sc=10" itself.
+ *
+ * Compiled as a literal lookup table (gcc folds the switch under
+ * -O2 into a constant table); cheap and stable across boots. */
+const char *syscall_name(unsigned num) {
+    switch (num) {
+        case SYS_WRITE:           return "SYS_WRITE";
+        case SYS_GETPID:          return "SYS_GETPID";
+        case SYS_EXIT:            return "SYS_EXIT";
+        case SYS_YIELD:           return "SYS_YIELD";
+        case SYS_WRITE_STR:       return "SYS_WRITE_STR";
+        case SYS_SLEEP_MS:        return "SYS_SLEEP_MS";
+        case SYS_TIME:            return "SYS_TIME";
+        case SYS_READ_LINE:       return "SYS_READ_LINE";
+        case SYS_OPEN:            return "SYS_OPEN";
+        case SYS_READ:            return "SYS_READ";
+        case SYS_WRITE_FD:        return "SYS_WRITE_FD";
+        case SYS_CLOSE:           return "SYS_CLOSE";
+        case SYS_SOCKET:          return "SYS_SOCKET";
+        case SYS_BIND:            return "SYS_BIND";
+        case SYS_LISTEN:          return "SYS_LISTEN";
+        case SYS_ACCEPT:          return "SYS_ACCEPT";
+        case SYS_FORK:            return "SYS_FORK";
+        case SYS_EXEC:            return "SYS_EXEC";
+        case SYS_WAIT:            return "SYS_WAIT";
+        case SYS_PIPE:            return "SYS_PIPE";
+        case SYS_DUP2:            return "SYS_DUP2";
+        case SYS_OPEN_W:          return "SYS_OPEN_W";
+        case SYS_KILL:            return "SYS_KILL";
+        case SYS_SIGACTION:       return "SYS_SIGACTION";
+        case SYS_SIGRETURN:       return "SYS_SIGRETURN";
+        case SYS_BRK:             return "SYS_BRK";
+        case SYS_TTY_SET_MODE:    return "SYS_TTY_SET_MODE";
+        case SYS_TTY_GET_MODE:    return "SYS_TTY_GET_MODE";
+        case SYS_TTY_INJECT:      return "SYS_TTY_INJECT";
+        case SYS_FS_WRITE:        return "SYS_FS_WRITE";
+        case SYS_SETPGID:         return "SYS_SETPGID";
+        case SYS_GETPGID:         return "SYS_GETPGID";
+        case SYS_SETSID:          return "SYS_SETSID";
+        case SYS_GETSID:          return "SYS_GETSID";
+        case SYS_KILLPG:          return "SYS_KILLPG";
+        case SYS_TCSETPGRP:       return "SYS_TCSETPGRP";
+        case SYS_TCGETPGRP:       return "SYS_TCGETPGRP";
+        case SYS_DNS_RESOLVE:     return "SYS_DNS_RESOLVE";
+        case SYS_FS_FREE_SECTORS: return "SYS_FS_FREE_SECTORS";
+        case SYS_MMAP:            return "SYS_MMAP";
+        case SYS_MUNMAP:          return "SYS_MUNMAP";
+        case SYS_MKDIR:           return "SYS_MKDIR";
+        case SYS_CHDIR:           return "SYS_CHDIR";
+        case SYS_GETCWD:          return "SYS_GETCWD";
+        case SYS_READDIR:         return "SYS_READDIR";
+        case SYS_BCACHE_SYNC:     return "SYS_BCACHE_SYNC";
+        case SYS_BCACHE_STATS:    return "SYS_BCACHE_STATS";
+        case SYS_CONNECT:         return "SYS_CONNECT";
+        case SYS_WAIT_NB:         return "SYS_WAIT_NB";
+        case SYS_GETCPU:          return "SYS_GETCPU";
+        case SYS_FBINFO:          return "SYS_FBINFO";
+        case SYS_SMP_STATS:       return "SYS_SMP_STATS";
+        case SYS_AUDIO_PLAY:      return "SYS_AUDIO_PLAY";
+        case SYS_BLOCK_INFO:      return "SYS_BLOCK_INFO";
+        case SYS_BLOCK_READ:      return "SYS_BLOCK_READ";
+        case SYS_BLOCK_WRITE:     return "SYS_BLOCK_WRITE";
+        case SYS_TTY_CURSOR:      return "SYS_TTY_CURSOR";
+        case SYS_TTY_CLEAR:       return "SYS_TTY_CLEAR";
+        case SYS_TTY_CLEAR_EOL:   return "SYS_TTY_CLEAR_EOL";
+        case SYS_GETUID:          return "SYS_GETUID";
+        case SYS_GETGID:          return "SYS_GETGID";
+        case SYS_SETUID:          return "SYS_SETUID";
+        case SYS_SETGID:          return "SYS_SETGID";
+        case SYS_FS_OWNER:        return "SYS_FS_OWNER";
+        case SYS_FS_MODE:         return "SYS_FS_MODE";
+        case SYS_CHMOD:           return "SYS_CHMOD";
+        case SYS_CHOWN:           return "SYS_CHOWN";
+        case SYS_OPENPTY:         return "SYS_OPENPTY";
+        case SYS_KBD_POLL:        return "SYS_KBD_POLL";
+        case SYS_PTRACE:          return "SYS_PTRACE";
+        case SYS_NTP_SYNC:        return "SYS_NTP_SYNC";
+        case SYS_DNS_CACHE_STATS: return "SYS_DNS_CACHE_STATS";
+        case SYS_DHCP_INFO:       return "SYS_DHCP_INFO";
+        case SYS_FD_NB:           return "SYS_FD_NB";
+        case SYS_SERIAL_INJECT:   return "SYS_SERIAL_INJECT";
+        case SYS_SANDBOX_INSTALL: return "SYS_SANDBOX_INSTALL";
+        default:                  return "SYS_???";
+    }
+}
+
 void syscall_dispatch(struct registers *r) {
     /* The 0xEE IDT gate cleared IF on entry, but several syscalls below
      * (SYS_SLEEP_MS, SYS_YIELD, SYS_EXIT->schedule, SYS_WRITE_STR over a
@@ -124,8 +212,20 @@ void syscall_dispatch(struct registers *r) {
         }
         if (!allowed) {
             t_sb->sandbox_denials++;
+
+            /* Record into the per-task ring for /proc/<pid>/sandbox.
+             * Packed: high 16 = low 16 of PIT ticks (~11 min wrap),
+             * low 16 = syscall number. */
+            uint32_t tick_low = pit_ticks() & 0xFFFFu;
+            uint32_t entry    = (tick_low << 16) | (num & 0xFFFFu);
+            uint8_t  idx      = t_sb->sandbox_recent_head;
+            t_sb->sandbox_recent[idx] = entry;
+            t_sb->sandbox_recent_head =
+                (uint8_t)((idx + 1) % SANDBOX_RECENT_N);
+
             /* Log first denial + every 16th after, so a tight loop
-             * doesn't drown the serial line. */
+             * doesn't drown the serial line. /proc/<pid>/sandbox has
+             * the full ring for finer-grained inspection. */
             if (t_sb->sandbox_denials == 1 ||
                 (t_sb->sandbox_denials & 0xF) == 0) {
                 kprintf("[sandbox] pid=%u denied syscall %u "

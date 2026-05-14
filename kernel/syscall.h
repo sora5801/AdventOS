@@ -309,4 +309,10 @@ struct sys_dhcp_info {
 
 void syscall_dispatch(struct registers *r);
 
+/* Session 70: short name for a syscall number ("SYS_OPEN", "SYS_WRITE",
+ * etc.), or "SYS_???" if the number is unknown. Used by procfs to
+ * render the sandbox denial ring buffer. Returns a stable const
+ * string — no caller-side free. */
+const char *syscall_name(unsigned num);
+
 #endif
