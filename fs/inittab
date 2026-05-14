@@ -11,4 +11,10 @@ once httpsd.elf
 once sshd.elf
 # Session 64: JSON-RPC tool surface for external agents on loopback.
 respawn agentd.elf
-once sh.elf selftest
+# Session 67 wired headless serial keyboard input, so sh boots straight
+# to an interactive prompt now. The selftest battery (t1..t49) used to
+# run as part of this line — added "selftest" as argv[1] to trigger it
+# in user/sh.c's main. Dropped for boot speed; the selftest() body is
+# still in sh.c, just unreached at boot. Bring it back temporarily by
+# editing this line to `once sh.elf selftest` and rebuilding.
+once sh.elf
