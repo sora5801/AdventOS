@@ -30,25 +30,33 @@ _start:
     mov     $msg_boot, %si
     call    print
 
-    /* Load kernel via int 13h LBA extension (ah=42h).
-     *   DAP1: LBA 1..128   ->  0x10000..0x20000  (64 KiB)
-     *   DAP2: LBA 129..384 ->  0x20000..0x40000  (128 KiB)
-     * Total: 192 KiB load budget. Real-hardware BIOSes used to cap
-     * a single DAP at 127 sectors, but QEMU's SeaBIOS handles large
-     * reads cleanly; sticking with two DAPs keeps the boot sector
-     * code under 510 bytes.
+    /* Load kernel via int 13h LBA extension (ah=42h).  We split the
+     * load into THREE 128-sector (64 KiB) reads — QEMU's SeaBIOS
+     * accepts 128 per call but rejects 256, so each individual DAP
+     * stays ≤ 128.
+     *   read 1: LBA   1..128 -> 0x10000  (dap1)
+     *   read 2: LBA 129..256 -> 0x20000  (dap2)
+     *   read 3: LBA 257..384 -> 0x30000  (dap2 reused, modified)
+     * Total: 192 KiB load budget.  DL is preserved by int-13h-ah=42h
+     * so we only need `movb drive, %dl` once; AH is *not* preserved
+     * (set to status code) so it gets reloaded per call.
      *
-     * Session-71 bump rationale: kernel.bin was 127152B (fit in 128
-     * KiB), became 131248B with sandbox + limits, would overrun the
-     * old budget by 176B. 192 KiB gives ~60 KiB headroom. */
+     * For the third read we patch dap2 in place (new segment +
+     * starting LBA) — saves 16 bytes vs declaring a third DAP entry
+     * and keeps the boot sector under 510 bytes. */
     movb    drive, %dl
     mov     $dap1, %si
     mov     $0x42, %ah
     int     $0x13
     jc      disk_err
 
-    movb    drive, %dl
     mov     $dap2, %si
+    mov     $0x42, %ah
+    int     $0x13
+    jc      disk_err
+
+    movw    $0x3000, dap2+6      /* segment for read 3 */
+    movw    $257,    dap2+8      /* LBA low 16 for read 3 (high 48 stays 0) */
     mov     $0x42, %ah
     int     $0x13
     jc      disk_err
@@ -243,7 +251,7 @@ pm_entry:
 
 drive:      .byte 0
 msg_boot:   .asciz "AdventOS bootloader v0.1\r\nLoading kernel..."
-msg_loaded: .asciz " ok\r\nEntering protected mode\r\n"
+msg_loaded: .asciz " ok\r\n"
 msg_err:    .asciz "\r\nFATAL: disk read failed\r\n"
 
 .align 8
@@ -276,7 +284,7 @@ dap1:
 dap2:
     .byte 0x10
     .byte 0x00
-    .word 256               /* 128 KiB; running total 192 KiB */
+    .word 128               /* 64 KiB; modified in place for read 3 */
     .word 0x0000
     .word 0x2000            /* destination segment (linear 0x20000) */
     .quad 129               /* starting LBA = 1 + 128 */
