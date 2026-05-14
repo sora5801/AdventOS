@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
      * the 3-way handshake while the parent is mid-fork. */
     if (sys_listen(s, 8) < 0)        { puts("httpd: listen() failed\n"); return 1; }
 
-    puts("httpd: listening on port 80 (userspace, backlog=8)\n");
+    /* listening — silent */
 
     for (;;) {
         int conn = sys_accept(s);
