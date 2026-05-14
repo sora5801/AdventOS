@@ -2,6 +2,7 @@
 #include "isr.h"
 #include "pic.h"
 #include "task.h"
+#include "serial.h"
 #include "../include/io.h"
 
 #define PIT_FREQ      1193182u
@@ -14,6 +15,18 @@ static uint32_t          ticks_per_sec;
 static void pit_irq(struct registers *r) {
     (void)r;
     ticks++;
+    /* Session 67 wired the COM1 RX path to be IRQ-driven, but in
+     * practice IRQ 4 never fires under our QEMU config (`-display
+     * none -serial stdio` + the i440fx i8259 model). Bytes typed at
+     * the host terminal land in the UART RBR but the i8259 doesn't
+     * assert the line back to the CPU. Rather than fight QEMU's
+     * device model, fall back to PIT-tick polling: 100 Hz means
+     * worst-case 10 ms input latency, imperceptible for human typing
+     * and a no-op for the 99% of ticks when the RBR is empty (one
+     * `inb` of LSR). The IRQ handler stays installed so if we ever
+     * migrate to a kernel/QEMU combo where it works, we get the
+     * faster path for free. */
+    serial_poll_once();
     /* Round-robin preemption. schedule() is a no-op until task_init
      * runs, so it's safe to invoke from boot onward. */
     schedule();

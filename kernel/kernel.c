@@ -280,8 +280,8 @@ void kmain(uint32_t boot_drive) {
 
     kputs("[boot] spawning reaper + demo tasks A, B\n");
     task_reaper_start();
-    task_make_runnable(task_create(demo_task_a, "demo_a"));
-    task_make_runnable(task_create(demo_task_b, "demo_b"));
+    /*task_make_runnable(task_create(demo_task_a, "demo_a"));*/
+    /*task_make_runnable(task_create(demo_task_b, "demo_b"));*/
 
     /* The bcache syncer needs the task system + interrupts up so its
      * pit_sleep() loop can actually be scheduled. */

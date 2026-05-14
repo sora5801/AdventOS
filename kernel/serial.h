@@ -25,4 +25,10 @@ char serial_getc(void);
  * the byte actually crossing the UART silicon. */
 void serial_inject_bytes(const char *bytes, int n);
 
+/* Session 68 fallback: drain the UART RBR via polling. Called from
+ * the PIT tick handler because IRQ 4 doesn't fire under our QEMU
+ * `-display none -serial stdio` config. Cheap when there's no data
+ * (one inb of LSR); cheaper than blocking on input we'll never see. */
+void serial_poll_once(void);
+
 #endif

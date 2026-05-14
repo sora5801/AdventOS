@@ -151,11 +151,15 @@ char keyboard_wait_char(void) {
      * place to wait — the shared kbd ring. PS/2, USB-HID, COM1, and
      * SYS_TTY_INJECT all funnel into the same queue. */
     for (;;) {
-        if (kbd_head != kbd_tail) {
-            char c = kbd_buf[kbd_tail];
-            kbd_tail = (kbd_tail + 1) % BUF_SIZE;
-            return c;
-        }
-        __asm__ volatile ("sti; hlt");
+    __asm__ volatile ("cli");
+
+    if (kbd_head != kbd_tail) {
+        char c = kbd_buf[kbd_tail];
+        kbd_tail = (kbd_tail + 1) % BUF_SIZE;
+        __asm__ volatile ("sti");
+        return c;
     }
+
+    __asm__ volatile ("sti; hlt");
+}
 }

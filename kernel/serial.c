@@ -65,11 +65,22 @@ void serial_inject_bytes(const char *bytes, int n) {
 
 static void serial_irq(struct registers *r) {
     (void)r;
-    /* Drain everything the FIFO is currently holding. The 16550 RX
-     * FIFO is 14 bytes deep in the threshold we configured, but a
-     * fast typist or a pasted line can deliver more than that
-     * between IRQs — looping until LSR bit 0 clears handles both. */
+    /* Drain everything the FIFO is currently holding. */
    while (inb(COM1_PORT + 5) & 1) {
+        char raw = (char)inb(COM1_PORT);
+        char c   = translate_for_kbd(raw);
+        keyboard_inject(&c, 1);
+    }
+}
+
+/* Polling fallback called from the PIT tick handler. IRQ 4 doesn't
+ * fire reliably under our QEMU `-display none + -serial stdio`
+ * config (the i8259 emulation route from the 16550 to the CPU
+ * doesn't assert for piped/non-TTY stdin), so we drain the RBR
+ * directly on every 10 ms tick. Cheap when LSR.DR is clear — one
+ * `inb` and we return. */
+void serial_poll_once(void) {
+    while (inb(COM1_PORT + 5) & 1) {
         char raw = (char)inb(COM1_PORT);
         char c   = translate_for_kbd(raw);
         keyboard_inject(&c, 1);
@@ -82,7 +93,12 @@ void serial_init(void) {
     outb(COM1_PORT + 0, 0x03);   /* Divisor LSB: 38400 baud */
     outb(COM1_PORT + 1, 0x00);   /* Divisor MSB */
     outb(COM1_PORT + 3, 0x03);   /* 8N1, DLAB off */
-    outb(COM1_PORT + 2, 0x07);   /* FIFO enable, clear, 14-byte threshold */
+    outb(COM1_PORT + 2, 0x00);   /* FIFO off — 16450-compat mode, one byte
+                                  * per LSR.DR transition. Sidesteps a
+                                  * QEMU quirk where the 16550 FIFO mode
+                                  * was eating RX bytes without ever
+                                  * raising LSR.DR for our polling
+                                  * loop. */
     outb(COM1_PORT + 4, 0x0B);   /* IRQs enabled at MCR (RTS/DSR/OUT2) */
 }
 
