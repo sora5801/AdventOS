@@ -165,12 +165,55 @@ for name in "${TLS_PROGS[@]}"; do
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
 done
 
+fs_lba=384   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS (bumped from 256 in session 71)
+
+# --- Session 72: build-time size assertions ---------------------------
+#
+# A whole class of silent breakage comes from a binary or data file
+# outgrowing a hardcoded buffer / disk-offset constant. Session 71 hit
+# this twice in one commit: kernel.bin overran both the bootloader's
+# load budget AND the fs_lba cutoff, then the agentd manifest overran
+# its 4 KiB sys_read buffer. Each fails at runtime in a confusing way
+# (boot hang for the first, "manifest parse failed" for the second).
+#
+# These checks fail fast at build time with a precise "fix it here"
+# pointer. Update the constants below in lockstep with the files they
+# mirror.
+BOOTLOADER_LOAD_SECTORS=384   # 3 DAP reads of 128 sectors in boot/boot.S
+AGENTD_MANIFEST_MAX=8192      # MANIFEST_MAX in user/agentd.c
+
+kernel_size=$(stat -c%s kernel/kernel.bin)
+on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS
+load_budget=$(( BOOTLOADER_LOAD_SECTORS * 512 ))       # bootloader reads ≥ kernel
+kernel_budget=$on_disk_budget
+[ "$load_budget" -lt "$kernel_budget" ] && kernel_budget=$load_budget
+if [ "$kernel_size" -gt "$kernel_budget" ]; then
+    echo "ERROR: kernel.bin is $kernel_size bytes, max is $kernel_budget" >&2
+    if [ "$on_disk_budget" -le "$load_budget" ]; then
+        echo "  hit limit: kernel must end before FS at LBA $fs_lba" >&2
+        echo "  fix:       bump FS_DISK_OFFSET_SECTORS in kernel/fs.h" >&2
+        echo "             AND fs_lba in build.sh (in lockstep)" >&2
+    else
+        echo "  hit limit: bootloader only loads $BOOTLOADER_LOAD_SECTORS sectors" >&2
+        echo "  fix:       add another in-place DAP read in boot/boot.S" >&2
+        echo "             and bump BOOTLOADER_LOAD_SECTORS here to match" >&2
+    fi
+    exit 1
+fi
+
+manifest_size=$(stat -c%s fs/etc/agent.tools.json)
+if [ "$manifest_size" -gt "$AGENTD_MANIFEST_MAX" ]; then
+    echo "ERROR: agent.tools.json is $manifest_size bytes, MANIFEST_MAX is $AGENTD_MANIFEST_MAX" >&2
+    echo "  fix: bump MANIFEST_MAX (and SCRATCH_MAX / g_tools_arr) in" >&2
+    echo "       user/agentd.c, then bump AGENTD_MANIFEST_MAX here to match." >&2
+    exit 1
+fi
+
 echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
 
-echo "[7/7] mkfs + append AdventFS at LBA 200"
+echo "[7/7] mkfs + append AdventFS at LBA $fs_lba"
 python mkfs.py
-fs_lba=384   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS (bumped from 256 in session 71)
 fs_offset=$(( fs_lba * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$fs_offset" ]; then
