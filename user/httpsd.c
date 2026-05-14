@@ -82,7 +82,6 @@ static void serve_one(int conn) {
         sys_close(conn);
         return;
     }
-    puts("httpsd: TLS handshake OK\n");
 
     char req[1024];
     int n = tls_recv(&t, req, sizeof(req) - 1);
@@ -92,8 +91,7 @@ static void serve_one(int conn) {
         putchar('\n');
     }
 
-    int sent = tls_send(&t, REPLY, sizeof(REPLY) - 1);
-    printf("httpsd: sent %d encrypted bytes\n", sent);
+    (void)tls_send(&t, REPLY, sizeof(REPLY) - 1);
     /* Send TLS close_notify before TCP close so real clients
      * (OpenSSL, Schannel) don't log "unexpected eof". */
     tls_close_notify(&t);
@@ -134,11 +132,9 @@ int main(int argc, char **argv) {
     /* Build the keypair + cert once, before binding. Both stay in
      * .data and the fork()d child handlers inherit them via COW. */
     if (!g_force_self_signed && load_cert_from_disk() == 0) {
-        printf("httpsd: loaded leaf cert from /etc/ssl/server.der "
-               "(%d bytes DER, CA-signed)\n", g_cert_len);
+        /* loaded CA-signed cert — silent */
     } else {
-        puts("httpsd: /etc/ssl/server.der missing — synthesizing "
-             "self-signed cert from DEMO_SEED\n");
+        /* fall back to self-signed — silent */
         p256_keypair_from_seed(g_pub, g_priv, DEMO_SEED);
         g_cert_len = x509_build_self_signed_p256(
             g_pub, g_priv, "AdventOS demo cert",
@@ -147,8 +143,6 @@ int main(int argc, char **argv) {
             puts("httpsd: x509 build failed\n");
             return 1;
         }
-        printf("httpsd: built self-signed ECDSA-P256 cert (%d bytes DER)\n",
-               g_cert_len);
     }
 
     int srv = sys_socket();
@@ -163,8 +157,8 @@ int main(int argc, char **argv) {
         sys_close(srv);
         return 1;
     }
-    printf("httpsd: listening on TLS port %d (ECDSA-P256, self-signed=%d)\n",
-           g_port, g_force_self_signed);
+    /* listening — silent */
+    (void)g_force_self_signed;
 
     for (;;) {
         int conn = sys_accept(srv);

@@ -160,7 +160,7 @@ static int find_service_by_pid(int pid) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    printf("init: pid=%d, reading /etc/inittab\n", sys_getpid());
+    /* pid + inittab-readahead chatter silenced */
 
     /* Slurp inittab. */
     static char tab[2048];
@@ -172,19 +172,16 @@ int main(int argc, char **argv) {
     }
 
     int nsvc = (n > 0) ? parse_inittab(tab) : 0;
-    printf("init: %d service(s) in inittab\n", nsvc);
+    (void)nsvc;     /* service-count log silenced */
 
     /* Spawn everything once. */
     for (int i = 0; i < MAX_SERVICES; i++) {
         if (!g_services[i].in_use) continue;
         spawn_service(&g_services[i]);
-        printf("init: started '%s' as pid %d (%s)\n",
-               g_services[i].argv[0],
-               g_services[i].pid,
-               g_services[i].respawn ? "respawn" : "once");
+        /* "started 'X' as pid Y" log silenced */
     }
 
-    puts("init: entering reap+respawn loop\n");
+    /* entering reap+respawn loop — silent */
 
     /* The classic init main loop: wait for ANY child, react. */
     for (;;) {
@@ -200,20 +197,17 @@ int main(int argc, char **argv) {
         int idx = find_service_by_pid(pid);
         if (idx < 0) {
             /* Adopted orphan — reaped on behalf of a dead grandparent.
-             * Print so the demo can verify it. */
-            printf("init: reaped orphan pid=%d code=%d\n", pid, code);
+             * Silent now; uncomment for debugging. */
+            (void)code;
             continue;
         }
 
         struct service *s = &g_services[idx];
-        printf("init: '%s' (pid=%d) exited code=%d\n",
-               s->argv[0], pid, code);
+        /* "exited code=N" log silenced */
+        (void)code;
         if (s->respawn) {
-            int new_pid = spawn_service(s);
-            if (new_pid > 0) {
-                printf("init: respawned '%s' as pid=%d\n",
-                       s->argv[0], new_pid);
-            }
+            (void)spawn_service(s);
+            /* "respawned" log silenced */
         } else {
             s->pid = -1;       /* dead, don't restart */
         }

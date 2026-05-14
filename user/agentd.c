@@ -199,8 +199,7 @@ static void load_tools_manifest(void) {
         return;
     }
     g_tools_arr_len = json_w_len(&w);
-    printf("agentd: manifest loaded — %d bytes, %d tools\n",
-           g_tools_arr_len, json_arr_len(tools));
+    /* manifest loaded — silent */
 }
 
 /* ============================================================
@@ -732,8 +731,7 @@ int main(int argc, char **argv) {
                                 { puts("agentd: bind() failed\n");   return 1; }
     if (sys_listen(s, 4) < 0)   { puts("agentd: listen() failed\n"); return 1; }
 
-    printf("agentd: listening on 127.0.0.1:%d (JSON-RPC 2.0 + MCP %s)\n",
-           (int)AGENTD_PORT, MCP_PROTO_VER);
+    /* listening — silent */
 
     for (;;) {
         int conn = sys_accept(s);

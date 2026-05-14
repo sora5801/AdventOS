@@ -66,27 +66,10 @@
 static uint8_t g_host_pk[32];
 static uint8_t g_host_sk[64];
 
-static void hex_byte(uint8_t b, char out[2]) {
-    static const char *d = "0123456789abcdef";
-    out[0] = d[b >> 4];
-    out[1] = d[b & 0xF];
-}
-
-/* Print SHA-256(public-key) as 64 lowercase-hex chars — the OpenSSH
- * "SHA256:<base64>" fingerprint without the base64 (libuser doesn't
- * have a base64 encoder and a hex print is just as good for the
- * across-reboots-stability sanity check this is for). */
-static void print_host_fingerprint(void) {
-    uint8_t digest[32];
-    struct sha256 s;
-    sha256_init(&s);
-    sha256_update(&s, g_host_pk, 32);
-    sha256_final(&s, digest);
-    char hex[65];
-    for (int i = 0; i < 32; i++) hex_byte(digest[i], hex + i*2);
-    hex[64] = 0;
-    printf("sshd: host key sha256: %s\n", hex);
-}
+/* The SHA-256(public-key) fingerprint that used to print at startup
+ * was removed when boot-time chatter was silenced. If you want it
+ * back for a `sshd -v` mode in the future, the implementation was a
+ * one-shot sha256_update over g_host_pk[32] + hex encode. */
 
 /* Either load the existing seed from /etc/ssh_host_key or generate
  * a fresh one and persist it. Either way, fills g_host_pk + g_host_sk.
@@ -103,7 +86,6 @@ static int load_or_generate_host_key(void) {
         sys_close(fd);
         if (n == 32) {
             ed25519_keypair_from_seed(g_host_pk, g_host_sk, seed);
-            printf("sshd: loaded host key from %s\n", HOSTKEY_PATH);
             return 0;
         }
         printf("sshd: %s present but %d bytes (need 32); regenerating\n",
@@ -129,9 +111,7 @@ static int load_or_generate_host_key(void) {
      * shutdown (qemu killed before the syncer's periodic flush)
      * would lose the file, defeating the whole "stable across
      * reboots" point. Writeback alone doesn't survive `kill -9`. */
-    int synced = (int)sys_bcache_sync();
-    printf("sshd: generated fresh host key (saved to %s, mode 0600, "
-           "%d block(s) synced)\n", HOSTKEY_PATH, synced);
+    (void)sys_bcache_sync();
     return 0;
 }
 
@@ -805,7 +785,6 @@ static int do_newkeys(struct ssh_conn *c, int initial) {
         ssh_put_cstring(&p, "server-sig-algs");
         ssh_put_cstring(&p, "ssh-ed25519");
         if (send_packet(c, pkt, (int)(p - pkt)) < 0) return -1;
-        puts("sshd: sent EXT_INFO server-sig-algs=ssh-ed25519\n");
     }
     return 0;
 }
@@ -829,11 +808,9 @@ static int do_newkeys(struct ssh_conn *c, int initial) {
  * it after — otherwise the TX child keeps writing under stale keys
  * because COW gave it its own copy of `c`). */
 static int do_rekey(struct ssh_conn *c) {
-    puts("sshd: rekey requested by client\n");
     if (send_kexinit(c)        < 0) return -1;
     if (do_kex_ecdh (c, 0)     < 0) return -1;
     if (do_newkeys (c, 0)      < 0) return -1;
-    puts("sshd: rekey complete, new keys live\n");
     return 0;
 }
 
@@ -975,7 +952,6 @@ static int do_userauth(struct ssh_conn *c, struct user_entry **out_user) {
             if (ed25519_verify(sig, auth_blob, auth_blob_len, pk_raw) == 0) {
                 uint8_t s = SSH_MSG_USERAUTH_SUCCESS;
                 if (send_packet(c, &s, 1) < 0) return -1;
-                printf("sshd: pubkey auth ok user='%s'\n", username);
                 *out_user = u;
                 return 0;
             }
@@ -1265,7 +1241,6 @@ static int run_shell(struct ssh_conn *c, struct channel *ch) {
     }
     int master = pty[0];
     int slave  = pty[1];
-    printf("sshd: pty allocated master=%d slave=%d\n", master, slave);
 
     /* Fork order matters: TX FIRST, then shell.
      *
@@ -1397,17 +1372,14 @@ static void serve_one(int conn) {
     c.fd = conn;
 
     if (do_banner(&c)        < 0) goto bye;
-    printf("sshd: client %s\n", c.v_c);
     if (send_kexinit(&c)      < 0) goto bye;
     if (recv_kexinit(&c)      < 0) goto bye;
     if (do_kex_ecdh(&c, 1)    < 0) goto bye;
     if (do_newkeys (&c, 1)    < 0) goto bye;
-    puts("sshd: KEX complete, transport secured\n");
 
     if (do_service_request(&c) < 0) goto bye;
     struct user_entry *u;
     if (do_userauth(&c, &u)    < 0) goto bye;
-    printf("sshd: authenticated user=%s uid=%d\n", u->name, u->uid);
 
     sys_setgid(u->gid);
     if (sys_setuid(u->uid) < 0) goto bye;
@@ -1431,10 +1403,9 @@ int main(int argc, char **argv) {
         puts("sshd: cannot read /etc/passwd — refusing to start\n");
         return 1;
     }
-    printf("sshd: loaded %d users from /etc/passwd\n", g_n_users);
+    /* user-list-loaded chatter silenced */
 
     load_or_generate_host_key();
-    print_host_fingerprint();
 
     /* Register the built-in demo pubkey for `guest`. The selftest's
      * ssh.elf @key mode derives the matching private key from the
@@ -1447,18 +1418,16 @@ int main(int argc, char **argv) {
     /* Also pull in any keys the user has dropped in /etc/ssh_keys.
      * Format per line: "<user> ssh-ed25519 <base64-blob> [comment]". */
     if (load_auth_keys_file("/etc/ssh_keys") == 0) {
-        printf("sshd: loaded /etc/ssh_keys, total %d authorized key(s)\n",
-               g_n_auth_keys);
+        /* ssh_keys loaded — silent */
     } else {
-        printf("sshd: no /etc/ssh_keys file; %d authorized key(s) (demo only)\n",
-               g_n_auth_keys);
+        /* no ssh_keys file — silent (demo-only path) */
     }
 
     int srv = sys_socket();
     if (srv < 0)                              { puts("sshd: socket failed\n");  return 1; }
     if (sys_bind  (srv, SSH_PORT) < 0)        { puts("sshd: bind failed\n");    return 1; }
     if (sys_listen(srv, 4)        < 0)        { puts("sshd: listen failed\n");  return 1; }
-    printf("sshd: listening on SSH-2 port %d\n", SSH_PORT);
+    /* listening — silent */
 
     for (;;) {
         int conn = sys_accept(srv);
