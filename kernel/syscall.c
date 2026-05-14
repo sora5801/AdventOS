@@ -171,6 +171,8 @@ const char *syscall_name(unsigned num) {
         case SYS_FD_NB:           return "SYS_FD_NB";
         case SYS_SERIAL_INJECT:   return "SYS_SERIAL_INJECT";
         case SYS_SANDBOX_INSTALL: return "SYS_SANDBOX_INSTALL";
+        case SYS_SETLIMIT:        return "SYS_SETLIMIT";
+        case SYS_UNLINK:          return "SYS_UNLINK";
         default:                  return "SYS_???";
     }
 }
@@ -665,6 +667,23 @@ void syscall_dispatch(struct registers *r) {
                 }
             }
             ret = 0;
+            break;
+        }
+        case SYS_UNLINK: {
+            /* Session 73: remove a regular file.  Copies the user path
+             * into a kernel-local buffer (we're still on the user CR3
+             * so the deref is fine for the actual content, but the
+             * fs_unlink call walks deep into fs.c and could touch
+             * arbitrary state — buffering is the defensive option). */
+            const char *upath = (const char *)(uintptr_t)a;
+            if (!upath) { ret = -1; break; }
+            char path[128];
+            int  i;
+            for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) {
+                path[i] = upath[i];
+            }
+            path[i] = 0;
+            ret = fs_unlink(path);
             break;
         }
         case SYS_PIPE: {

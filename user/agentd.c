@@ -662,6 +662,151 @@ static int emit_shell_exec_sandboxed(struct json_w *w,
 }
 
 /* ============================================================
+ * Session 73: KV-store tools
+ * ============================================================
+ *
+ * Five tools on top of libuser's kv_* helpers:
+ *
+ *   kv.get  {namespace, key}                 -> {value, found}
+ *   kv.put  {namespace, key, value}          -> {ok}
+ *   kv.del  {namespace, key}                 -> {ok, existed}
+ *   kv.list {namespace, prefix}              -> {keys: [...]}
+ *   kv.stat {namespace, key}                 -> {size, exists}
+ *
+ * Path traversal is rejected at the libuser layer (see kv_validate_*),
+ * so we don't need to sanitize the ns/key strings here — bad shapes
+ * just bubble up as -1 from the underlying kv_* call.
+ *
+ * Values are JSON strings; binary blobs need client-side base64. The
+ * value-field cap is 4 KiB so the wrapping JSON-RPC envelope still
+ * fits in agentd's 8 KiB resp[] buffer.
+ */
+
+#define KV_VALUE_MAX 4096
+
+static const char *kv_arg_str(const struct json_v *params,
+                              const char *field, int *out_len) {
+    const struct json_v *v = json_obj_get(params, field);
+    return json_to_str(v, out_len);
+}
+
+/* nul-copy a json_to_str slice into a fixed C buffer. Caller passes
+ * a stack buffer large enough for the longest valid namespace/key. */
+static int kv_copy_cstr(char *dst, int cap, const char *s, int slen) {
+    if (!s || slen < 0 || slen >= cap) return -1;
+    for (int i = 0; i < slen; i++) dst[i] = s[i];
+    dst[slen] = 0;
+    return 0;
+}
+
+static int emit_kv_get(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, klen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *k  = kv_arg_str(params, "key",       &klen);
+    if (!ns || !k) return -32602;
+
+    char ns_c[40], k_c[80];
+    if (kv_copy_cstr(ns_c, sizeof(ns_c), ns, nlen) < 0) return -32602;
+    if (kv_copy_cstr(k_c,  sizeof(k_c),  k,  klen) < 0) return -32602;
+
+    static char vbuf[KV_VALUE_MAX];
+    int n = kv_get(ns_c, k_c, vbuf, sizeof(vbuf));
+
+    json_obj_begin(w);
+      json_key(w, "found"); json_bool(w, n >= 0);
+      json_key(w, "value");
+      if (n >= 0) json_str_n(w, vbuf, n);
+      else        json_null(w);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_kv_put(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, klen = 0, vlen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *k  = kv_arg_str(params, "key",       &klen);
+    const char *v  = kv_arg_str(params, "value",     &vlen);
+    if (!ns || !k || !v) return -32602;
+    if (vlen > KV_VALUE_MAX) return -32602;
+
+    char ns_c[40], k_c[80];
+    if (kv_copy_cstr(ns_c, sizeof(ns_c), ns, nlen) < 0) return -32602;
+    if (kv_copy_cstr(k_c,  sizeof(k_c),  k,  klen) < 0) return -32602;
+
+    int rc = kv_put(ns_c, k_c, v, vlen);
+    json_obj_begin(w);
+      json_key(w, "ok"); json_bool(w, rc >= 0);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_kv_del(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, klen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *k  = kv_arg_str(params, "key",       &klen);
+    if (!ns || !k) return -32602;
+
+    char ns_c[40], k_c[80];
+    if (kv_copy_cstr(ns_c, sizeof(ns_c), ns, nlen) < 0) return -32602;
+    if (kv_copy_cstr(k_c,  sizeof(k_c),  k,  klen) < 0) return -32602;
+
+    /* Peek with stat to determine existed-before. */
+    int sz, existed = (kv_stat(ns_c, k_c, &sz) == 0);
+    int rc = kv_del(ns_c, k_c);
+    json_obj_begin(w);
+      json_key(w, "ok");      json_bool(w, rc >= 0);
+      json_key(w, "existed"); json_bool(w, existed);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_kv_list(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, plen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *p  = kv_arg_str(params, "prefix",    &plen);   /* optional */
+    if (!ns) return -32602;
+
+    char ns_c[40], p_c[80] = {0};
+    if (kv_copy_cstr(ns_c, sizeof(ns_c), ns, nlen) < 0) return -32602;
+    if (p) {
+        if (kv_copy_cstr(p_c, sizeof(p_c), p, plen) < 0) return -32602;
+    }
+
+    json_obj_begin(w);
+      json_key(w, "keys");
+      json_arr_begin(w);
+        int  iter = 0;
+        char name[16];
+        for (int safety = 0; safety < 256; safety++) {
+            int r = kv_list(ns_c, p ? p_c : 0, &iter, name);
+            if (r < 0) break;
+            json_str(w, name);
+        }
+      json_arr_end(w);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_kv_stat(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, klen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *k  = kv_arg_str(params, "key",       &klen);
+    if (!ns || !k) return -32602;
+
+    char ns_c[40], k_c[80];
+    if (kv_copy_cstr(ns_c, sizeof(ns_c), ns, nlen) < 0) return -32602;
+    if (kv_copy_cstr(k_c,  sizeof(k_c),  k,  klen) < 0) return -32602;
+
+    int  size    = 0;
+    int  exists  = (kv_stat(ns_c, k_c, &size) == 0);
+    json_obj_begin(w);
+      json_key(w, "exists"); json_bool(w, exists);
+      json_key(w, "size");   json_int (w, size);
+    json_obj_end(w);
+    return 0;
+}
+
+/* ============================================================
  * Tool table — used by both direct and MCP dispatch paths
  * ============================================================ */
 
@@ -680,6 +825,12 @@ static const struct method g_methods[] = {
     { "smp_stats",            emit_smp_stats            },
     { "shell.exec",           emit_shell_exec           },
     { "shell.exec_sandboxed", emit_shell_exec_sandboxed },
+    /* Session 73: persistent agent memory. */
+    { "kv.get",               emit_kv_get               },
+    { "kv.put",               emit_kv_put               },
+    { "kv.del",               emit_kv_del               },
+    { "kv.list",              emit_kv_list              },
+    { "kv.stat",              emit_kv_stat              },
     { 0, 0 }
 };
 
@@ -719,12 +870,276 @@ static int handle_initialize(const struct json_v *id, const struct json_v *param
         json_key(&w, "tools");
         json_obj_begin(&w);
         json_obj_end(&w);
+        /* Session 73: advertise the read-only resource surface
+         * (resources/list, resources/templates/list, resources/read).
+         * No subscribe + no list-changed — the resource set is static. */
+        json_key(&w, "resources");
+        json_obj_begin(&w);
+          json_key(&w, "subscribe");   json_bool(&w, 0);
+          json_key(&w, "listChanged"); json_bool(&w, 0);
+        json_obj_end(&w);
       json_obj_end(&w);
       json_key(&w, "serverInfo");
       json_obj_begin(&w);
         json_key(&w, "name");    json_str(&w, "adventos-agentd");
         json_key(&w, "version"); json_str(&w, "1.0.0");
       json_obj_end(&w);
+    json_obj_end(&w);
+    resp_end(&w);
+    return json_w_ok(&w) ? 0 : -32603;
+}
+
+/* ============================================================
+ * Session 73: MCP resource methods
+ * ============================================================
+ *
+ * MCP's resources/... namespace exposes read-only state with stable
+ * URIs and MIME types. Agents that want a structured view of the
+ * box's /proc/N and selected /etc/N files use this instead of
+ * shell.exec-ing `cat` and parsing stdout.
+ *
+ * Three methods:
+ *   resources/list             enumerate the static URIs
+ *   resources/templates/list   parameterized URIs (e.g. /proc/{pid}/.)
+ *   resources/read {uri}       fetch the bytes at a URI
+ *
+ * Static resources are file:// URIs that map 1:1 to FS paths.
+ * The kv:// scheme mirrors the kv.get tool — read-only.
+ *
+ * /etc/passwd is special-cased: hashes get stripped before emit
+ * so a future low-privilege agent reading the resource surface
+ * doesn't see them. */
+
+struct resource_def {
+    const char *uri;
+    const char *name;
+    const char *mime;
+    const char *desc;
+};
+
+static const struct resource_def g_resources[] = {
+    {"file:///proc/cpuinfo",       "cpuinfo",       "text/plain",
+     "CPU vendor / family / features (CPUID-derived)"},
+    {"file:///proc/meminfo",       "meminfo",       "text/plain",
+     "Total / used / free physical pages"},
+    {"file:///proc/uptime",        "uptime",        "text/plain",
+     "Seconds since boot (PIT-derived)"},
+    {"file:///proc/version",       "version",       "text/plain",
+     "Kernel version string"},
+    {"file:///proc/mounts",        "mounts",        "text/plain",
+     "VFS mount table"},
+    {"file:///proc/bcache",        "bcache",        "text/plain",
+     "Block-cache hit/miss/writeback counters"},
+    {"file:///etc/inittab",        "inittab",       "text/plain",
+     "Boot-time service spawn directives"},
+    {"file:///etc/passwd",         "passwd",        "text/plain",
+     "User table — password hashes redacted on read"},
+    {"file:///etc/resolv.conf",    "resolv.conf",   "text/plain",
+     "DNS fail-over nameservers"},
+    {"file:///etc/agent.tools.json","agent.tools.json","application/json",
+     "agentd's tool manifest (the same one served via tools/list)"},
+};
+#define G_RESOURCES_N ((int)(sizeof(g_resources)/sizeof(g_resources[0])))
+
+struct resource_tpl {
+    const char *uri_template;
+    const char *name;
+    const char *mime;
+    const char *desc;
+};
+
+static const struct resource_tpl g_templates[] = {
+    {"file:///proc/{pid}/status",  "pid/status",  "text/plain",
+     "Per-process status (name, pid, ppid, pgid, sid, state)"},
+    {"file:///proc/{pid}/sandbox", "pid/sandbox", "text/plain",
+     "Sandbox mask + denial ring for a specific task (session 70)"},
+    {"file:///proc/{pid}/limits",  "pid/limits",  "text/plain",
+     "Resource caps + current usage for a specific task (session 71)"},
+    {"kv://{namespace}/{key}",     "kv-entry",    "text/plain",
+     "Read-only mirror of kv.get for discoverability"},
+};
+#define G_TEMPLATES_N ((int)(sizeof(g_templates)/sizeof(g_templates[0])))
+
+static int handle_resources_list(const struct json_v *id, const struct json_v *params) {
+    (void)params;
+    struct json_w w;
+    resp_begin_result(&w, id);
+    json_obj_begin(&w);
+      json_key(&w, "resources");
+      json_arr_begin(&w);
+      for (int i = 0; i < G_RESOURCES_N; i++) {
+          json_obj_begin(&w);
+            json_key(&w, "uri");         json_str(&w, g_resources[i].uri);
+            json_key(&w, "name");        json_str(&w, g_resources[i].name);
+            json_key(&w, "mimeType");    json_str(&w, g_resources[i].mime);
+            json_key(&w, "description"); json_str(&w, g_resources[i].desc);
+          json_obj_end(&w);
+      }
+      json_arr_end(&w);
+    json_obj_end(&w);
+    resp_end(&w);
+    return json_w_ok(&w) ? 0 : -32603;
+}
+
+static int handle_resources_templates_list(const struct json_v *id, const struct json_v *params) {
+    (void)params;
+    struct json_w w;
+    resp_begin_result(&w, id);
+    json_obj_begin(&w);
+      json_key(&w, "resourceTemplates");
+      json_arr_begin(&w);
+      for (int i = 0; i < G_TEMPLATES_N; i++) {
+          json_obj_begin(&w);
+            json_key(&w, "uriTemplate"); json_str(&w, g_templates[i].uri_template);
+            json_key(&w, "name");        json_str(&w, g_templates[i].name);
+            json_key(&w, "mimeType");    json_str(&w, g_templates[i].mime);
+            json_key(&w, "description"); json_str(&w, g_templates[i].desc);
+          json_obj_end(&w);
+      }
+      json_arr_end(&w);
+    json_obj_end(&w);
+    resp_end(&w);
+    return json_w_ok(&w) ? 0 : -32603;
+}
+
+/* Strip password hashes from a /etc/passwd buffer in place.
+ *
+ * Format per line: `name:hash:uid:gid:home:shell`.  We replace the
+ * hash field with "x" — the same redaction the Linux shadow-password
+ * convention uses — and shift the rest of the buffer down.  Returns
+ * the new (smaller) length.  Bytewise, in-place, no allocation. */
+static int filter_passwd_hashes(char *buf, int n) {
+    char tmp[2048];
+    int  in_pos  = 0;
+    int  out_pos = 0;
+    while (in_pos < n && out_pos < (int)sizeof(tmp) - 1) {
+        /* Find end of current line (or buffer). */
+        int eol = in_pos;
+        while (eol < n && buf[eol] != '\n') eol++;
+        /* Find the first ':' — separates name from hash. */
+        int c1 = in_pos;
+        while (c1 < eol && buf[c1] != ':') c1++;
+        if (c1 >= eol) {
+            /* Malformed line — copy as-is. */
+            for (int i = in_pos; i < eol && out_pos < (int)sizeof(tmp) - 1; i++) {
+                tmp[out_pos++] = buf[i];
+            }
+        } else {
+            /* Find the second ':' — end of hash field. */
+            int c2 = c1 + 1;
+            while (c2 < eol && buf[c2] != ':') c2++;
+            /* Emit [in_pos..c1] verbatim, ":x", then [c2..eol]. */
+            for (int i = in_pos; i <= c1 && out_pos < (int)sizeof(tmp) - 1; i++) {
+                tmp[out_pos++] = buf[i];
+            }
+            if (out_pos < (int)sizeof(tmp) - 1) tmp[out_pos++] = 'x';
+            for (int i = c2; i < eol && out_pos < (int)sizeof(tmp) - 1; i++) {
+                tmp[out_pos++] = buf[i];
+            }
+        }
+        if (eol < n && out_pos < (int)sizeof(tmp) - 1) {
+            tmp[out_pos++] = '\n';
+        }
+        in_pos = eol + 1;
+    }
+    int copy_n = out_pos;
+    for (int i = 0; i < copy_n; i++) buf[i] = tmp[i];
+    return copy_n;
+}
+
+#define RES_READ_MAX 4096
+
+/* Match `uri` against the prefix and copy the remainder into `out`
+ * (up to cap-1 chars + NUL).  Returns 1 on match, 0 on no-match. */
+static int uri_strip_prefix(const char *uri, int ulen,
+                            const char *prefix,
+                            char *out, int cap) {
+    int pl = 0;
+    while (prefix[pl]) pl++;
+    if (ulen < pl) return 0;
+    for (int i = 0; i < pl; i++) if (uri[i] != prefix[i]) return 0;
+    int o = 0;
+    for (int i = pl; i < ulen && o < cap - 1; i++) out[o++] = uri[i];
+    out[o] = 0;
+    return 1;
+}
+
+static int handle_resources_read(const struct json_v *id, const struct json_v *params) {
+    int ulen = 0;
+    const char *uri = kv_arg_str(params, "uri", &ulen);
+    if (!uri) return -32602;
+
+    static char content[RES_READ_MAX];
+    int  content_n = 0;
+    int  truncated = 0;
+    const char *mime = "text/plain";
+
+    /* file:///<path> — sys_open the FS path. */
+    char fs_path[128];
+    if (uri_strip_prefix(uri, ulen, "file://", fs_path, sizeof(fs_path))) {
+        int fd = sys_open(fs_path);
+        if (fd < 0) return -32602;
+        int n = sys_read(fd, content, sizeof(content) - 1);
+        sys_close(fd);
+        if (n < 0) n = 0;
+        if (n >= (int)sizeof(content) - 1) truncated = 1;
+        content[n] = 0;
+        content_n = n;
+
+        /* /etc/passwd: redact hashes before emitting. */
+        int is_passwd = 1;
+        const char *want = "/etc/passwd";
+        for (int i = 0; want[i]; i++) {
+            if (fs_path[i] != want[i]) { is_passwd = 0; break; }
+        }
+        if (is_passwd && fs_path[11] == 0) {
+            content_n = filter_passwd_hashes(content, content_n);
+            content[content_n] = 0;
+        }
+
+        /* MIME for agent.tools.json -> application/json. */
+        const char *json_path = "/etc/agent.tools.json";
+        int match = 1;
+        for (int i = 0; json_path[i]; i++) {
+            if (fs_path[i] != json_path[i]) { match = 0; break; }
+        }
+        if (match && fs_path[21] == 0) mime = "application/json";
+    }
+    /* kv://<ns>/<key> — read-only mirror of kv.get. */
+    else {
+        char kv_rest[128];
+        if (!uri_strip_prefix(uri, ulen, "kv://", kv_rest, sizeof(kv_rest))) {
+            return -32602;
+        }
+        /* Split on the first '/'. */
+        int slash = -1;
+        for (int i = 0; kv_rest[i]; i++) {
+            if (kv_rest[i] == '/') { slash = i; break; }
+        }
+        if (slash <= 0) return -32602;
+        kv_rest[slash] = 0;
+        int n = kv_get(kv_rest, kv_rest + slash + 1, content, sizeof(content) - 1);
+        if (n < 0) return -32602;
+        content_n = n;
+        content[content_n] = 0;
+    }
+
+    /* Emit MCP-shaped response:
+     *   {"contents": [{"uri": "...", "mimeType": "...", "text": "..."}]} */
+    struct json_w w;
+    resp_begin_result(&w, id);
+    json_obj_begin(&w);
+      json_key(&w, "contents");
+      json_arr_begin(&w);
+        json_obj_begin(&w);
+          json_key(&w, "uri");      json_str_n(&w, uri, ulen);
+          json_key(&w, "mimeType"); json_str  (&w, mime);
+          json_key(&w, "text");     json_str_n(&w, content, content_n);
+          if (truncated) {
+              json_key(&w, "truncated"); json_bool(&w, 1);
+          }
+        json_obj_end(&w);
+      json_arr_end(&w);
     json_obj_end(&w);
     resp_end(&w);
     return json_w_ok(&w) ? 0 : -32603;
@@ -815,6 +1230,13 @@ static int dispatch_method(const struct json_v *id,
     if (str_eq(method, mlen, "initialize"))  return handle_initialize(id, params);
     if (str_eq(method, mlen, "tools/list"))  return handle_tools_list(id, params);
     if (str_eq(method, mlen, "tools/call"))  return handle_tools_call(id, params);
+    /* Session 73: read-only resource surface. */
+    if (str_eq(method, mlen, "resources/list"))
+        return handle_resources_list(id, params);
+    if (str_eq(method, mlen, "resources/templates/list"))
+        return handle_resources_templates_list(id, params);
+    if (str_eq(method, mlen, "resources/read"))
+        return handle_resources_read(id, params);
 
     /* Legacy direct path: method name == tool name. emit into the
      * JSON-RPC envelope's `result` slot directly. */

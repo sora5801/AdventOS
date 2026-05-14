@@ -551,6 +551,72 @@ int fs_chown_idx(int idx, uint16_t uid, uint16_t gid) {
     return fs_write_super_inst(g_root_inst);
 }
 
+/* Session 73: count tasks holding an open fd backed by entry `idx`.
+ * fs.c is stateless on its own — open-file refcounting lives in the
+ * task fd table — so we have to scan it. Returns the number of live
+ * references; zero means "no task has this file open right now". */
+static int fs_entry_open_refs(int idx) {
+    int refs = 0;
+    for (uint32_t t_i = 0; t_i < 16; t_i++) {
+        struct task *tt = task_at(t_i);
+        if (!tt) continue;
+        for (int fd = 0; fd < TASK_MAX_FDS; fd++) {
+            if (tt->fds[fd].kind == FD_FS &&
+                tt->fds[fd].obj_idx == idx) {
+                refs++;
+            }
+        }
+    }
+    return refs;
+}
+
+/* Session 73: remove a regular file by path.
+ *
+ * Steps:
+ *   1. Resolve path to entry index via the regular fs_iopen path.
+ *   2. Refuse if it's not a plain file (no rmdir here).
+ *   3. Refuse if the calling task can't write the parent's permissions
+ *      (session-47 model: owner or root). We require FS_PERM_W on the
+ *      ENTRY ITSELF — POSIX would check the parent directory, but our
+ *      directories don't carry per-dir mode bits today; entry-level
+ *      write permission is a reasonable proxy.
+ *   4. Refuse if any task currently has the file open (EBUSY semantics).
+ *      Real Unix supports unlink-while-open by deferring; we don't.
+ *   5. Free the data blocks back to the bitmap.
+ *   6. Mark the entry FREE and persist the superblock.
+ *
+ * Returns 0 on success, -1 on any failure. */
+int fs_unlink(const char *path) {
+    if (!path || !g_root_inst || !g_root_inst->initialized) return -1;
+
+    int idx = fs_iopen_inst(g_root_inst, path, /*from_root=*/1);
+    if (idx < 0) return -1;
+
+    struct fs_entry *e = &g_root_inst->super.files[idx];
+    if (e->type != FS_TYPE_FILE) return -1;          /* refuse dir / free */
+
+    if (fs_check_perm(idx, FS_PERM_W) <= 0) return -1;
+
+    if (fs_entry_open_refs(idx) > 0) return -1;      /* EBUSY-ish */
+
+    /* Free the file's data blocks. start_sector / size are entry-local;
+     * bitmap is per-instance and indexed by raw sector relative to the
+     * instance's start. The file_count itself stays the same — we just
+     * mark this slot FREE so it can be reused. */
+    if (e->size > 0) {
+        uint32_t n = (e->size + 511u) / 512u;
+        bitmap_free_run(g_root_inst, e->start_sector, n);
+    }
+
+    /* Zero the entry so a stale type / sector / size doesn't survive
+     * in the next find_in_dir scan. memset is cheaper than field-wise
+     * clears and bulletproof against future struct-field additions. */
+    for (int i = 0; i < (int)sizeof(*e); i++) ((uint8_t *)e)[i] = 0;
+    e->type = FS_TYPE_FREE;
+
+    return fs_write_super_inst(g_root_inst);
+}
+
 uint32_t fs_free_sectors(void) {
     if (!g_root_inst || !g_root_inst->initialized) return 0;
     uint32_t free = 0;

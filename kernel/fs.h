@@ -169,6 +169,11 @@ int         fs_check_perm(int idx, int want);
 int         fs_chmod_idx(int idx, uint16_t mode);
 int         fs_chown_idx(int idx, uint16_t uid, uint16_t gid);
 
+/* Session 73: remove a regular file. Refuses directories and files
+ * currently held open by any task. Honors permission checks (owner
+ * or root). Returns 0 on success, -1 on any failure. */
+int         fs_unlink(const char *path);
+
 /* Whole-file write. Path semantics same as fs_open. Creates the file
  * if absent. Allocates a fresh contiguous sector run from the bitmap;
  * old sectors are returned to the free pool on success. */

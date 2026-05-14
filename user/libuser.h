@@ -116,6 +116,7 @@ typedef unsigned int   size_t;
 #define SYS_SERIAL_INJECT 81
 #define SYS_SANDBOX_INSTALL 82
 #define SYS_SETLIMIT       83
+#define SYS_UNLINK         84
 
 /* Session 70: syscall sandbox.
  *
@@ -162,6 +163,31 @@ struct sys_limits {
 
 int sys_setlimit(const struct sys_limits *l);
 void limits_default(struct sys_limits *l);   /* all-zeros = "no change" */
+
+/* Session 73: filesystem unlink + KV-store convenience layer.
+ *
+ * sys_unlink removes a regular file (refuses directories and files
+ * currently open in any task). Returns 0 / -1.
+ *
+ * The kv_* helpers translate (namespace, key, value) into FS paths
+ * under /var/kv/<namespace>/<key>. They reject path-traversal
+ * attempts (slashes, leading dots) at the libuser layer before any
+ * FS call, so a malicious agent cannot escape its namespace.
+ *
+ * Constraints (enforced by validate_ns / validate_key in libuser.c):
+ *   namespace  1..32 chars, [A-Za-z0-9_-]
+ *   key        1..64 chars, [A-Za-z0-9_.-], no leading '.'
+ *   value      up to 65536 bytes per key (FS file size cap)
+ *
+ * Functions returning int: 0 / >0 on success, -1 on validation or
+ * FS failure. kv_list iterates via *iter (caller seeds to 0). */
+int sys_unlink(const char *path);
+
+int kv_get (const char *ns, const char *key, void *buf, int cap);
+int kv_put (const char *ns, const char *key, const void *buf, int len);
+int kv_del (const char *ns, const char *key);
+int kv_list(const char *ns, const char *prefix, int *iter, char *out_key);
+int kv_stat(const char *ns, const char *key, int *out_size);
 
 /* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
  * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to

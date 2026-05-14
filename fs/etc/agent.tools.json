@@ -66,6 +66,67 @@
       }
     },
     {
+      "name": "kv.get",
+      "description": "Read a value from the persistent agent KV store (session 73). Returns {found, value}. Values up to ~4 KiB; longer entries are still on disk but the JSON response caps the value field.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string", "description": "1-32 chars, [A-Za-z0-9_-]"},
+          "key":       {"type": "string", "description": "1-64 chars, [A-Za-z0-9_.-], no leading dot, no slashes"}
+        },
+        "required": ["namespace", "key"]
+      }
+    },
+    {
+      "name": "kv.put",
+      "description": "Write a value to the persistent agent KV store (session 73). Returns {ok}. Backed by AdventFS, survives reboots.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string"},
+          "key":       {"type": "string"},
+          "value":     {"type": "string", "description": "Up to ~4 KiB; binary blobs should be base64-encoded client-side."}
+        },
+        "required": ["namespace", "key", "value"]
+      }
+    },
+    {
+      "name": "kv.del",
+      "description": "Delete a key from the persistent agent KV store (session 73). Returns {ok, existed}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string"},
+          "key":       {"type": "string"}
+        },
+        "required": ["namespace", "key"]
+      }
+    },
+    {
+      "name": "kv.list",
+      "description": "List keys in a namespace, optionally filtered by prefix (session 73). Returns {keys: [...]}. Empty array for a non-existent namespace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string"},
+          "prefix":    {"type": "string", "description": "Optional. Match keys starting with this string."}
+        },
+        "required": ["namespace"]
+      }
+    },
+    {
+      "name": "kv.stat",
+      "description": "Return the size and existence of a key (session 73). Returns {exists, size}. Use before kv.get to decide whether to fetch the full value.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string"},
+          "key":       {"type": "string"}
+        },
+        "required": ["namespace", "key"]
+      }
+    },
+    {
       "name": "shell.exec_sandboxed",
       "description": "Like shell.exec, but the spawned process runs under a syscall sandbox AND optional resource caps. Any syscall not in the named policy returns -1 and bumps a per-process denial counter; exceeding a resource cap kills the child with SIGSEGV (RSS) or SIGKILL (CPU / wall-clock). Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit both the mask and the caps. The response includes `sandbox_log` (snapshot of /proc/<child_pid>/sandbox) and `limits_state` (snapshot of /proc/<child_pid>/limits) captured just before the child is reaped.",
       "inputSchema": {

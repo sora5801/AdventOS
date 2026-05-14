@@ -206,6 +206,13 @@ void kmain(uint32_t boot_drive) {
     vfs_init();
     vfs_mount("/",     "rootfs", fs_rootfs_ops());
     vfs_mount("/proc", "procfs", procfs_ops());
+    /* Session 73: ensure the agent KV root exists.  Both mkdirs are
+     * idempotent (vfs_mkdir returns -1 when the directory already
+     * exists, which we ignore).  Failure is non-fatal: if the FS is
+     * read-only or the slot pool is full, KV operations just fail
+     * cleanly later instead of crashing the boot. */
+    vfs_mkdir("/var");
+    vfs_mkdir("/var/kv");
     kputs("ok\n");
 
     {

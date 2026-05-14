@@ -239,6 +239,14 @@ struct sys_limits {
     uint32_t max_wall_ms;      /* relative; kernel adds pit_ticks() */
 };
 
+/* ---- Session 73: filesystem unlink ---- */
+#define SYS_UNLINK        84   /* (eax=84, ebx=const char *path) -> 0 / -1
+                                * Removes a regular file. Refuses
+                                * directories. Honors session-47
+                                * permission checks (owner or root).
+                                * Refuses to unlink a file that any
+                                * task currently has open. */
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

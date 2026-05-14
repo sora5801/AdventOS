@@ -532,6 +532,164 @@ void limits_default(struct sys_limits *l) {
     l->max_wall_ms = 0;
 }
 
+/* ============================================================
+ * Session 73: filesystem unlink + KV-store helpers
+ * ============================================================ */
+
+int sys_unlink(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_UNLINK), "b"(path)
+                      : "memory");
+    return ret;
+}
+
+/* Path-component validators. Both deliberately strict; we'd rather
+ * reject a borderline-valid name than ship a path-traversal hole.
+ * Returns 1 if valid, 0 if not.  No errno, no diagnostics — the
+ * caller surfaces "Invalid params" upstream. */
+static int kv_validate_ns(const char *ns) {
+    if (!ns || !*ns) return 0;
+    int n = 0;
+    while (ns[n]) {
+        char c = ns[n];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) return 0;
+        if (++n > 32) return 0;
+    }
+    return 1;
+}
+static int kv_validate_key(const char *key) {
+    if (!key || !*key) return 0;
+    if (key[0] == '.') return 0;            /* no leading dot */
+    int n = 0;
+    while (key[n]) {
+        char c = key[n];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+                 c == '.';
+        if (!ok) return 0;                  /* rejects '/' explicitly */
+        if (++n > 64) return 0;
+    }
+    return 1;
+}
+
+/* Build "/var/kv/<ns>/<key>" into out[].  Out buffer must be ≥ 128
+ * chars (32 ns + 64 key + "/var/kv//" + NUL).  Returns -1 on any
+ * validation failure; caller should treat that as a bad-request. */
+static int kv_path(char *out, int cap, const char *ns, const char *key) {
+    if (!kv_validate_ns(ns)) return -1;
+    if (!kv_validate_key(key)) return -1;
+    const char *prefix = "/var/kv/";
+    int o = 0;
+    for (int i = 0; prefix[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = prefix[i];
+    }
+    for (int i = 0; ns[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = ns[i];
+    }
+    if (o >= cap - 1) return -1;
+    out[o++] = '/';
+    for (int i = 0; key[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = key[i];
+    }
+    out[o] = 0;
+    return 0;
+}
+
+/* "/var/kv/<ns>" prefix (no trailing key — used by kv_list). */
+static int kv_ns_path(char *out, int cap, const char *ns) {
+    if (!kv_validate_ns(ns)) return -1;
+    const char *prefix = "/var/kv/";
+    int o = 0;
+    for (int i = 0; prefix[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = prefix[i];
+    }
+    for (int i = 0; ns[i]; i++) {
+        if (o >= cap - 1) return -1;
+        out[o++] = ns[i];
+    }
+    out[o] = 0;
+    return 0;
+}
+
+int kv_get(const char *ns, const char *key, void *buf, int cap) {
+    char path[128];
+    if (kv_path(path, sizeof(path), ns, key) < 0) return -1;
+    int fd = sys_open(path);
+    if (fd < 0) return -1;
+    int n = sys_read(fd, buf, cap);
+    sys_close(fd);
+    return n;
+}
+
+int kv_put(const char *ns, const char *key, const void *buf, int len) {
+    char path[128];
+    if (kv_path(path, sizeof(path), ns, key) < 0) return -1;
+    if (len < 0 || len > 65536) return -1;
+    return sys_fs_write(path, buf, len);
+}
+
+int kv_del(const char *ns, const char *key) {
+    char path[128];
+    if (kv_path(path, sizeof(path), ns, key) < 0) return -1;
+    return sys_unlink(path);
+}
+
+int kv_list(const char *ns, const char *prefix, int *iter, char *out_key) {
+    char dir[128];
+    if (kv_ns_path(dir, sizeof(dir), ns) < 0) return -1;
+
+    /* Walk via sys_readdir.  *iter is mutated by the syscall — we
+     * just propagate it. Filters out entries not matching `prefix`
+     * (NULL prefix or "" = match all). Returns the entry index that
+     * matched, or -1 if no more matches. */
+    char name[16];
+    for (;;) {
+        int idx = sys_readdir(dir, iter, name);
+        if (idx < 0) return -1;
+        if (prefix && *prefix) {
+            int ok = 1;
+            for (int i = 0; prefix[i]; i++) {
+                if (name[i] != prefix[i]) { ok = 0; break; }
+            }
+            if (!ok) continue;
+        }
+        /* Copy out — caller buffer must be ≥ 16 bytes. */
+        for (int i = 0; i < 16; i++) {
+            out_key[i] = name[i];
+            if (name[i] == 0) break;
+        }
+        return idx;
+    }
+}
+
+int kv_stat(const char *ns, const char *key, int *out_size) {
+    char path[128];
+    if (kv_path(path, sizeof(path), ns, key) < 0) return -1;
+    int fd = sys_open(path);
+    if (fd < 0) {
+        if (out_size) *out_size = 0;
+        return -1;
+    }
+    /* Read until EOF and count.  Cheaper would be a SYS_STAT call;
+     * deferring that to a later session — for now this works and KV
+     * values are small. */
+    int total = 0;
+    char tmp[256];
+    int  n;
+    while ((n = sys_read(fd, tmp, sizeof(tmp))) > 0) total += n;
+    sys_close(fd);
+    if (out_size) *out_size = total;
+    return 0;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"
