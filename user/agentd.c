@@ -76,8 +76,14 @@
  * loader's scratch is stack-local at boot. */
 #define REQ_MAX         4096
 #define RESP_MAX        8192
-#define SCRATCH_MAX     6144
-#define MANIFEST_MAX    4096
+#define SCRATCH_MAX     8192    /* session 71 bump: parsing the bigger
+                                 * manifest needs room for both the raw
+                                 * bytes (~5 KiB now with the limits
+                                 * schema) and the libjson value tree. */
+#define MANIFEST_MAX    8192    /* was 4096; manifest grew past it when
+                                 * shell.exec_sandboxed + limits were
+                                 * added — sys_read truncated mid-JSON
+                                 * and the parser saw a truncated tail. */
 #define SHELL_CAP_MAX   2048
 
 struct conn {
@@ -95,8 +101,10 @@ static struct conn g_c;
  * response. Re-emitted (not raw file bytes) so the JSON is parser-
  * round-tripped — guaranteed well-formed, no embedded whitespace
  * surprises, no comments to handle. */
-/* The re-emitted tools array — typically ~1.6 KiB for our 8 tools. */
-static char g_tools_arr[4096];
+/* The re-emitted tools array — ~3.5 KiB now with 9 tools and the
+ * limits-object schema on shell.exec_sandboxed. Sized to comfortably
+ * hold the manifest plus the libjson re-emit envelope. */
+static char g_tools_arr[8192];
 static int  g_tools_arr_len;
 
 /* ============================================================
