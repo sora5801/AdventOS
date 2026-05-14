@@ -15,6 +15,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "tty.h"
+#include "serial.h"
 #include "dns.h"
 #include "mmap.h"
 #include "bcache.h"
@@ -428,6 +429,17 @@ void syscall_dispatch(struct registers *r) {
             if (on) t->fds[fd].flags |=  FD_FL_NONBLOCK;
             else    t->fds[fd].flags &= ~FD_FL_NONBLOCK;
             ret = 0;
+            break;
+        }
+        case SYS_SERIAL_INJECT: {
+            /* Session 67: drive the same translate+inject pipeline the
+             * COM1 IRQ uses, without an actual UART read. Lets [t49]
+             * confirm a "serial byte" reaches sys_read on fd 0. */
+            const char *bytes = (const char *)(uintptr_t)a;
+            int         n     = (int)b;
+            if (!bytes || n < 0 || n > 256)          { ret = -1; break; }
+            serial_inject_bytes(bytes, n);
+            ret = n;
             break;
         }
         case SYS_PIPE: {

@@ -1,7 +1,6 @@
 #include "keyboard.h"
 #include "isr.h"
 #include "pic.h"
-#include "serial.h"
 #include "../include/io.h"
 
 #define KBD_DATA_PORT 0x60
@@ -146,14 +145,12 @@ void keyboard_inject(const char *bytes, int n) {
 }
 
 char keyboard_wait_char(void) {
+    /* Session 67: the standalone serial poll branch that used to live
+     * here is gone. The COM1 IRQ now feeds the kbd ring directly via
+     * serial_inject_bytes -> keyboard_inject, so there's exactly one
+     * place to wait — the shared kbd ring. PS/2, USB-HID, COM1, and
+     * SYS_TTY_INJECT all funnel into the same queue. */
     for (;;) {
-        /* Serial input doubles as a console for headless QEMU usage. */
-        if (serial_buf_has_data()) {
-            char c = serial_buf_pop();
-            if (c == '\r') c = '\n';
-            if (c == 127) c = '\b';
-            return c;
-        }
         if (kbd_head != kbd_tail) {
             char c = kbd_buf[kbd_tail];
             kbd_tail = (kbd_tail + 1) % BUF_SIZE;

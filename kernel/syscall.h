@@ -165,6 +165,19 @@
                                 pump many client connections from a single
                                 60-fps event loop. */
 
+/* ---- Session 67: serial keyboard input ---- */
+
+#define SYS_SERIAL_INJECT 81 /* (eax=81, ebx=const char *bytes, ecx=int n)
+                              * -> n on success, -1 on bad pointer / n<0.
+                              * Pushes `n` bytes through the same
+                              * translate+keyboard_inject pipeline that
+                              * the COM1 RX IRQ uses, so the [t49] selftest
+                              * can exercise the serial-input path without
+                              * needing a host-side terminal feeding bytes
+                              * into the UART. Pure-side-channel — no real
+                              * UART activity. */
+
+
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {
     uint32_t block_size;

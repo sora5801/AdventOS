@@ -112,6 +112,8 @@ typedef unsigned int   size_t;
 #define SYS_DNS_CACHE_STATS    78
 #define SYS_DHCP_INFO     79
 #define SYS_FD_NB         80
+/* Session 67 — serial keyboard input testing hook. */
+#define SYS_SERIAL_INJECT 81
 
 /* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
  * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to
@@ -334,6 +336,13 @@ int      sys_dhcp_info   (struct sys_dhcp_info *out);
  * the userspace WM pump many client fds from a single 60-fps loop
  * without ever stalling on any one of them. */
 int      sys_fd_nb       (int fd, int on);
+
+/* Session 67: feed `n` bytes through the COM1 RX byte-translation +
+ * keyboard_inject pipeline as if they had arrived on the UART. Used
+ * by the [t49] selftest to prove the serial-input path; agents and
+ * normal programs use sys_read on fd 0 instead. Returns n on success
+ * or -1 on bad pointer / n out of range (cap is 256). */
+int      sys_serial_inject(const char *bytes, int n);
 
 /* Pipes + redirection plumbing.
  *   pipe(fds): fds[0] = read end, fds[1] = write end

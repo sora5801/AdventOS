@@ -420,6 +420,15 @@ int sys_fd_nb(int fd, int on) {
     return ret;
 }
 
+int sys_serial_inject(const char *bytes, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SERIAL_INJECT), "b"(bytes), "c"(n)
+                      : "memory");
+    return ret;
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

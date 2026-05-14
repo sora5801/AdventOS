@@ -3770,6 +3770,94 @@ static void selftest(void) {
         #undef EXPECT
     }
 
+    puts("[t49] serial input: COM1 IRQ pipeline → sys_read on fd 0\n");
+    {
+        #define EXPECT(cond, msg) do { \
+            if (cond) printf("  PASS  %s\n", msg); \
+            else      printf("  FAIL  %s\n", msg); \
+        } while (0)
+
+        /* Session 67 rewired the COM1 RX IRQ to push translated bytes
+         * straight into the kbd ring via keyboard_inject — the same
+         * entry point PS/2 and USB-HID use. Headless QEMU boots
+         * (the agent-target config since session 63) now get real
+         * keyboard input from -serial stdio.
+         *
+         * Direct UART writes can't be tested without an external
+         * terminal driving the host stdio. sys_serial_inject runs
+         * bytes through the IDENTICAL translate+inject pipeline the
+         * IRQ uses — so a green test here proves the receive path
+         * end-to-end, with the IRQ silicon as the only untested
+         * remaining strap (boot smoke-tests that part: typing into
+         * the QEMU stdio fires the IRQ, which calls the same code
+         * path).
+         *
+         * Translations checked:
+         *   '\r' (0x0D)  →  '\n'  — terminal Enter -> LF
+         *   0x7F  (DEL)  →  '\b'  — terminal backspace -> kbd backspace
+         *   0x03  (^C )  →  0x03  — passes through for future SIGINT
+         *   regular ASCII passes through untouched */
+
+        /* Drain any leftover bytes from earlier tests so the read
+         * window is clean. The kbd ring has a known cap; just spin a
+         * few yields to let things settle. */
+        sys_sleep_ms(10);
+
+        /* Switch fd 0 to raw mode so we get the bytes verbatim
+         * rather than the canonical line editor doing its own
+         * processing. */
+        uint32_t prev_mode = tty_set_mode(TTY_RAW);
+
+        const char in[] = { 'a', 'b', '\r', 'c', 0x7F, 0x03, 'd' };
+        /* Expected after driver-side translation:
+         *   'a','b','\n','c','\b',0x03,'d'                 */
+        int wrote = sys_serial_inject(in, (int)sizeof(in));
+        EXPECT(wrote == (int)sizeof(in),
+               "sys_serial_inject accepted all bytes");
+
+        char out[16] = {0};
+        int  rn = 0;
+        /* Read up to sizeof(in) bytes; sys_read blocks if not enough
+         * are queued but everything we just injected is already in
+         * the kbd ring, so a single sys_read returns them all. */
+        while (rn < (int)sizeof(in)) {
+            int n = sys_read(0, out + rn, (int)sizeof(in) - rn);
+            if (n <= 0) break;
+            rn += n;
+        }
+        tty_set_mode(prev_mode);
+
+        printf("  injected  : a b \\r c \\x7F \\x03 d  (%d bytes)\n",
+               (int)sizeof(in));
+        printf("  read back : ");
+        for (int i = 0; i < rn; i++) {
+            unsigned char ch = (unsigned char)out[i];
+            if (ch == '\n')      printf("\\n ");
+            else if (ch == '\b') printf("\\b ");
+            else if (ch == '\r') printf("\\r ");
+            else if (ch < 0x20)  printf("\\x%02x ", ch);
+            else                 printf("%c ", ch);
+        }
+        printf(" (%d bytes)\n", rn);
+
+        EXPECT(rn == (int)sizeof(in),
+               "read returned exactly the 7 injected bytes");
+        EXPECT(out[0] == 'a' && out[1] == 'b',
+               "ordinary ASCII bytes pass through unchanged");
+        EXPECT(out[2] == '\n',
+               "0x0D ('\\r') translated to 0x0A ('\\n') at driver boundary");
+        EXPECT(out[3] == 'c',
+               "byte stream after \\r→\\n stays aligned");
+        EXPECT(out[4] == '\b',
+               "0x7F (DEL) translated to 0x08 ('\\b') at driver boundary");
+        EXPECT(out[5] == 0x03,
+               "0x03 (Ctrl-C) passes through untouched (for fg_pgrp SIGINT)");
+        EXPECT(out[6] == 'd',
+               "no off-by-one — last byte still 'd' after translations");
+
+        #undef EXPECT
+    }
+
     puts("=== selftest done ===\n\n");
 }
 
