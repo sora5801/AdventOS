@@ -69,7 +69,7 @@ static void serial_irq(struct registers *r) {
      * FIFO is 14 bytes deep in the threshold we configured, but a
      * fast typist or a pasted line can deliver more than that
      * between IRQs — looping until LSR bit 0 clears handles both. */
-    while (inb(COM1_PORT + 5) & 1) {
+   while (inb(COM1_PORT + 5) & 1) {
         char raw = (char)inb(COM1_PORT);
         char c   = translate_for_kbd(raw);
         keyboard_inject(&c, 1);
@@ -82,7 +82,7 @@ void serial_init(void) {
     outb(COM1_PORT + 0, 0x03);   /* Divisor LSB: 38400 baud */
     outb(COM1_PORT + 1, 0x00);   /* Divisor MSB */
     outb(COM1_PORT + 3, 0x03);   /* 8N1, DLAB off */
-    outb(COM1_PORT + 2, 0xC7);   /* FIFO enable, clear, 14-byte threshold */
+    outb(COM1_PORT + 2, 0x07);   /* FIFO enable, clear, 14-byte threshold */
     outb(COM1_PORT + 4, 0x0B);   /* IRQs enabled at MCR (RTS/DSR/OUT2) */
 }
 
