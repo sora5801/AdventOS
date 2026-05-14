@@ -188,6 +188,23 @@ struct task {
     int           traced_stopped;     /* 1 = waiting for tracer */
     int           trap_signal;        /* SIGTRAP / SIGSEGV etc.   */
     void         *trap_frame;         /* struct registers *       */
+
+    /* Session 70: syscall sandbox.
+     *
+     * `sandbox_mask[i]` is the allow-bitmap covering syscalls
+     * (i*32 .. i*32+31). Bit set = permitted, bit clear = denied.
+     * `sandbox_active` is 0 when no policy has been installed
+     * (all syscalls permitted, the default); 1 once SYS_SANDBOX_INSTALL
+     * has been called even once. The mask is sticky and monotonic
+     * (each install AND-s into the current value) and inherited
+     * verbatim across fork+exec.
+     *
+     * `sandbox_denials` is a simple counter bumped on each blocked
+     * syscall — exposed via procfs and useful for catching unexpected
+     * policy mismatches in development. */
+    uint32_t      sandbox_mask[4];    /* SANDBOX_MASK_WORDS = 4 */
+    int           sandbox_active;
+    uint32_t      sandbox_denials;
 };
 
 #define USER_HEAP_START  0x40200000u

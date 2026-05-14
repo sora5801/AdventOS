@@ -805,6 +805,16 @@ struct task *task_fork(struct registers *parent_regs) {
     child->uid = parent->uid;
     child->gid = parent->gid;
 
+    /* 5f. Inherit sandbox policy (session 70). The mask is copied
+     *     verbatim and `sandbox_active` carries forward unchanged;
+     *     this matches Linux seccomp inheritance semantics. Children
+     *     can install a tighter policy on top (AND-only) but never
+     *     loosen. The denials counter resets to 0 — it's per-task
+     *     accounting, not cumulative-across-fork. */
+    for (int i = 0; i < 4; i++) child->sandbox_mask[i] = parent->sandbox_mask[i];
+    child->sandbox_active  = parent->sandbox_active;
+    child->sandbox_denials = 0;
+
     /* 6. Splice into the round-robin ring under the scheduler lock —
      * APs may be picking from the ring concurrently. Transition
      * state to READY in the same critical section so the moment

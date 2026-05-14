@@ -114,6 +114,35 @@ typedef unsigned int   size_t;
 #define SYS_FD_NB         80
 /* Session 67 — serial keyboard input testing hook. */
 #define SYS_SERIAL_INJECT 81
+#define SYS_SANDBOX_INSTALL 82
+
+/* Session 70: syscall sandbox.
+ *
+ * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
+ * 4-word array; bit `i` enables syscall number `i`. Once installed,
+ * subsequent calls AND-in their mask (tighten only).
+ *
+ * The convenience builders below populate a 4-word `mask` with
+ * progressively-larger sets of permitted syscalls. Pick the smallest
+ * one that fits your tool's needs.
+ *
+ *   POLICY_MINIMAL   — write/exit/getpid/sleep/time/brk + sandbox itself.
+ *                      A tool that only does arithmetic and prints.
+ *   POLICY_COMPUTE   — MINIMAL + mmap/munmap. Heap-using compute.
+ *   POLICY_READFS    — COMPUTE + open/read/close/readdir/getcwd.
+ *                      Read-only filesystem access.
+ *   POLICY_NETCLIENT — READFS + socket/connect/write_fd/dns_resolve.
+ *                      An outbound HTTP/TCP client.
+ *
+ * SYS_SANDBOX_INSTALL is allowed in every policy so the task can
+ * ratchet down further (e.g. relinquish writes once setup is done). */
+#define SANDBOX_MASK_WORDS 4
+
+int sys_sandbox_install(const uint32_t mask[4]);
+void sandbox_policy_minimal  (uint32_t mask[4]);
+void sandbox_policy_compute  (uint32_t mask[4]);
+void sandbox_policy_readfs   (uint32_t mask[4]);
+void sandbox_policy_netclient(uint32_t mask[4]);
 
 /* Session 60 — DHCP introspection (mirror of kernel/syscall.h).
  * Note: libuser.h doesn't pull in uint8_t (only uint16/32 + size_t to

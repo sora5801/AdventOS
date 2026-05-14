@@ -429,6 +429,92 @@ int sys_serial_inject(const char *bytes, int n) {
     return ret;
 }
 
+/* Session 70: syscall sandbox.
+ *
+ * The kernel keeps a 4-word allow-bitmap per task. `sys_sandbox_install`
+ * either installs it (first call) or AND-s it with the current mask
+ * (subsequent calls). Policies are sticky and monotonic — you can
+ * only tighten, never loosen. The mask is inherited across fork+exec.
+ *
+ * The policy builders below stage a 4-word mask in caller-supplied
+ * storage, then it's up to the caller to actually install with
+ * sys_sandbox_install. That gives the caller a chance to add or
+ * remove syscalls from the predefined templates before committing.
+ *
+ * Every policy keeps SYS_SANDBOX_INSTALL allowed so the task can
+ * ratchet down further (e.g. relinquish writes once setup is done).
+ * Clear the bit yourself if you want to freeze the policy. */
+
+int sys_sandbox_install(const uint32_t mask[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_SANDBOX_INSTALL), "b"(mask)
+                      : "memory");
+    return ret;
+}
+
+static void sb_allow(uint32_t mask[4], int sc) {
+    if (sc < 0 || sc >= 128) return;
+    mask[sc / 32] |= 1u << (sc % 32);
+}
+
+void sandbox_policy_minimal(uint32_t mask[4]) {
+    for (int i = 0; i < 4; i++) mask[i] = 0;
+    /* Compute + ctrl: just enough for a CPU-bound tool that prints and
+     * exits cleanly. */
+    sb_allow(mask, SYS_WRITE);
+    sb_allow(mask, SYS_WRITE_STR);
+    sb_allow(mask, SYS_GETPID);
+    sb_allow(mask, SYS_EXIT);
+    sb_allow(mask, SYS_YIELD);
+    sb_allow(mask, SYS_SLEEP_MS);
+    sb_allow(mask, SYS_TIME);
+    sb_allow(mask, SYS_BRK);
+    sb_allow(mask, SYS_GETUID);
+    sb_allow(mask, SYS_GETGID);
+    sb_allow(mask, SYS_GETCPU);
+    /* Process plumbing — needed by the `sandbox` wrapper itself
+     * (install policy, then exec target) and by any tool that wants
+     * to fork/wait on a child within the same sandbox. The child
+     * inherits the mask verbatim. */
+    sb_allow(mask, SYS_FORK);
+    sb_allow(mask, SYS_EXEC);
+    sb_allow(mask, SYS_WAIT);
+    sb_allow(mask, SYS_WAIT_NB);
+    /* Sandbox itself: callable so the policy can be tightened further
+     * after early-startup steps complete. Clear this bit yourself to
+     * freeze the policy permanently. */
+    sb_allow(mask, SYS_SANDBOX_INSTALL);
+}
+
+void sandbox_policy_compute(uint32_t mask[4]) {
+    sandbox_policy_minimal(mask);
+    sb_allow(mask, SYS_MMAP);
+    sb_allow(mask, SYS_MUNMAP);
+}
+
+void sandbox_policy_readfs(uint32_t mask[4]) {
+    sandbox_policy_compute(mask);
+    sb_allow(mask, SYS_OPEN);
+    sb_allow(mask, SYS_READ);
+    sb_allow(mask, SYS_CLOSE);
+    sb_allow(mask, SYS_READDIR);
+    sb_allow(mask, SYS_GETCWD);
+    sb_allow(mask, SYS_CHDIR);
+    sb_allow(mask, SYS_FS_OWNER);
+    sb_allow(mask, SYS_FS_MODE);
+}
+
+void sandbox_policy_netclient(uint32_t mask[4]) {
+    sandbox_policy_readfs(mask);
+    sb_allow(mask, SYS_SOCKET);
+    sb_allow(mask, SYS_CONNECT);
+    sb_allow(mask, SYS_WRITE_FD);
+    sb_allow(mask, SYS_DNS_RESOLVE);
+    sb_allow(mask, SYS_FD_NB);
+}
+
 int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile ("int $0x80"

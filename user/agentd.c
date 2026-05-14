@@ -396,7 +396,15 @@ static int drain_fd(int fd, char *buf, int cap) {
     return total;
 }
 
-static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
+/* Common shell.exec / shell.exec_sandboxed engine.  The sandboxed
+ * variant just rewrites argv to ["sandbox.elf", policy, "--", cmd,
+ * args...] and execs the wrapper instead of the bare command.  The
+ * wrapper installs the policy in-process and execs into the real
+ * target, which inherits the mask.  All the stdout/stderr capture
+ * machinery stays identical. */
+static int shell_exec_inner(struct json_w *w,
+                            const struct json_v *params,
+                            const char *policy /* NULL = no sandbox */) {
     const struct json_v *cmd_v = json_obj_get(params, "cmd");
     int cmd_len = 0;
     const char *cmd = json_to_str(cmd_v, &cmd_len);
@@ -406,10 +414,21 @@ static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
     if (args_v && args_v->type != JSON_ARR) return -32602;
     int n_args = json_arr_len(args_v);
     if (n_args < 0) n_args = 0;
-    if (n_args > 15) return -32602;
-    const char *argv[17];
-    argv[0] = cmd;
-    int ai = 1;
+    if (n_args > 12) return -32602;     /* leave headroom for the wrapper prefix */
+
+    /* Build argv. If sandboxed, prepend ["sandbox.elf", policy, "--"]. */
+    const char *argv[20];
+    const char *exec_path;
+    int ai = 0;
+    if (policy) {
+        exec_path = "sandbox.elf";
+        argv[ai++] = "sandbox.elf";
+        argv[ai++] = policy;
+        argv[ai++] = "--";
+    } else {
+        exec_path = cmd;
+    }
+    argv[ai++] = cmd;
     for (int i = 0; i < n_args; i++) {
         const struct json_v *a = json_arr_at(args_v, i);
         int al = 0;
@@ -437,7 +456,7 @@ static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
         sys_dup2(err_pp[1], 2);
         sys_close(out_pp[0]); sys_close(out_pp[1]);
         sys_close(err_pp[0]); sys_close(err_pp[1]);
-        sys_exec(cmd, argv);
+        sys_exec(exec_path, argv);
         sys_write(2, "agentd-exec: cannot exec\n", 25);
         sys_exit(127);
     }
@@ -454,12 +473,66 @@ static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
     int code = 0;
     sys_wait(&code);
 
+    int pol_len = 0;
+    if (policy) {
+        while (policy[pol_len]) pol_len++;
+    }
+
     json_obj_begin(w);
       json_key(w, "exit_code"); json_int(w, code);
       json_key(w, "stdout");    json_str_n(w, out_buf, out_n);
       json_key(w, "stderr");    json_str_n(w, err_buf, err_n);
+      if (policy) {
+          json_key(w, "policy"); json_str_n(w, policy, pol_len);
+      }
     json_obj_end(w);
     return 0;
+}
+
+static int emit_shell_exec(struct json_w *w, const struct json_v *params) {
+    return shell_exec_inner(w, params, /*policy=*/0);
+}
+
+/* Session 70: exec a command under a syscall sandbox policy. The
+ * `policy` field selects from the libuser policy templates that
+ * sandbox.elf knows: minimal | compute | readfs | netclient. The
+ * spawned process and any of its children all run with that mask.
+ * The wrapper itself burns 4 KiB of address space in the child;
+ * everything else is the same as shell.exec. */
+static int emit_shell_exec_sandboxed(struct json_w *w,
+                                     const struct json_v *params) {
+    const struct json_v *p_v = json_obj_get(params, "policy");
+    int p_len = 0;
+    const char *policy = json_to_str(p_v, &p_len);
+    if (!policy) return -32602;
+
+    /* Validate against the known set so a bad name fails fast inside
+     * the daemon rather than emitting "sandbox: unknown policy ..."
+     * to stderr from the child. */
+    if (!(p_len ==  7 && policy[0]=='m' && policy[1]=='i' && policy[2]=='n' &&
+                        policy[3]=='i' && policy[4]=='m' && policy[5]=='a' &&
+                        policy[6]=='l')
+     && !(p_len ==  7 && policy[0]=='c' && policy[1]=='o' && policy[2]=='m' &&
+                        policy[3]=='p' && policy[4]=='u' && policy[5]=='t' &&
+                        policy[6]=='e')
+     && !(p_len ==  6 && policy[0]=='r' && policy[1]=='e' && policy[2]=='a' &&
+                        policy[3]=='d' && policy[4]=='f' && policy[5]=='s')
+     && !(p_len ==  9 && policy[0]=='n' && policy[1]=='e' && policy[2]=='t' &&
+                        policy[3]=='c' && policy[4]=='l' && policy[5]=='i' &&
+                        policy[6]=='e' && policy[7]=='n' && policy[8]=='t')) {
+        return -32602;
+    }
+
+    /* Make a NUL-terminated copy on the stack so we can pass it as
+     * argv[1] to sandbox.elf without depending on json_to_str's
+     * length-prefixed buffer surviving. */
+    char policy_buf[16];
+    for (int i = 0; i < p_len && i < (int)sizeof(policy_buf) - 1; i++) {
+        policy_buf[i] = policy[i];
+    }
+    policy_buf[p_len] = 0;
+
+    return shell_exec_inner(w, params, policy_buf);
 }
 
 /* ============================================================
@@ -472,14 +545,15 @@ struct method {
 };
 
 static const struct method g_methods[] = {
-    { "time",             emit_time             },
-    { "getuid",           emit_getuid           },
-    { "dns_resolve",      emit_dns_resolve      },
-    { "dhcp_info",        emit_dhcp_info        },
-    { "dns_cache_stats",  emit_dns_cache_stats  },
-    { "fbinfo",           emit_fbinfo           },
-    { "smp_stats",        emit_smp_stats        },
-    { "shell.exec",       emit_shell_exec       },
+    { "time",                 emit_time                 },
+    { "getuid",               emit_getuid               },
+    { "dns_resolve",          emit_dns_resolve          },
+    { "dhcp_info",            emit_dhcp_info            },
+    { "dns_cache_stats",      emit_dns_cache_stats      },
+    { "fbinfo",               emit_fbinfo               },
+    { "smp_stats",            emit_smp_stats            },
+    { "shell.exec",           emit_shell_exec           },
+    { "shell.exec_sandboxed", emit_shell_exec_sandboxed },
     { 0, 0 }
 };
 

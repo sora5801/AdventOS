@@ -115,6 +115,8 @@ USER_PROGRAMS = [
     # the WM.
     # Session 64: JSON-RPC tool surface for external agents.
     ('agentd.elf',     'user/_obj/agentd.bin',     None),
+    # Session 70: syscall-sandbox wrapper.
+    ('sandbox.elf',    'user/_obj/sandbox.bin',    None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

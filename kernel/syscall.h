@@ -177,6 +177,35 @@
                               * into the UART. Pure-side-channel — no real
                               * UART activity. */
 
+/* ---- Session 70: syscall sandbox ----
+ *
+ * Per-task syscall allow-list. SYS_SANDBOX_INSTALL takes a 4-word
+ * bitmap; bit `i` controls syscall number `i`. A set bit means the
+ * syscall is permitted. Once a policy is installed, the new mask
+ * is AND-ed with the current one — policies are sticky and can
+ * only get tighter. The mask is inherited verbatim across fork
+ * and preserved across exec; there is no kernel-side mechanism to
+ * loosen a sandbox once installed.
+ *
+ * SYS_SANDBOX_INSTALL is itself gated by the current mask. A
+ * sensible policy should keep its bit set so the task can ratchet
+ * further; clearing it freezes the policy permanently. SYS_EXIT,
+ * SYS_WRITE, SYS_WRITE_STR, and SYS_GETPID should also stay set in
+ * most policies — the rest is application-dependent.
+ *
+ * Denied syscalls return -1 with no side effect, and bump the
+ * task's `sandbox_denials` counter (see procfs / SYS_SANDBOX_INFO
+ * — TODO). A future enhancement may add an audit ring buffer with
+ * pid + syscall_no + epoch entries for forensic analysis.
+ */
+#define SYS_SANDBOX_INSTALL 82  /* (eax=82, ebx=const uint32_t mask[4])
+                                 * -> 0 on success, -1 on bad pointer.
+                                 * Mask is AND-ed with current policy. */
+
+/* Bitmap layout: 4 32-bit words = 128 syscall slots. We have ~82 in
+ * use today (highest is SYS_SANDBOX_INSTALL = 82), leaves headroom. */
+#define SANDBOX_MASK_WORDS  4
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

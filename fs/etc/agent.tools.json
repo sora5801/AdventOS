@@ -64,6 +64,22 @@
         },
         "required": ["cmd"]
       }
+    },
+    {
+      "name": "shell.exec_sandboxed",
+      "description": "Like shell.exec, but the spawned process runs under a syscall sandbox. Any syscall not in the named policy returns -1 and bumps a per-process denial counter. Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit the same mask.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cmd":    {"type": "string", "description": "Command to exec under the sandbox."},
+          "args":   {"type": "array",  "items": {"type": "string"},
+                     "description": "Args after argv[0]=cmd. Up to 12 entries (3 are reserved for the sandbox wrapper prefix)."},
+          "policy": {"type": "string",
+                     "enum": ["minimal", "compute", "readfs", "netclient"],
+                     "description": "Syscall allow-list template. minimal = compute (no I/O); compute = + mmap/munmap; readfs = + read-only filesystem; netclient = + outbound TCP/UDP + DNS."}
+        },
+        "required": ["cmd", "policy"]
+      }
     }
   ]
 }

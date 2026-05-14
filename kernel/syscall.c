@@ -103,6 +103,42 @@ void syscall_dispatch(struct registers *r) {
     (void)b;
     (void)c;
 
+    /* Session 70: syscall sandbox enforcement.
+     *
+     * If a policy is active on this task, check the allow-bitmap
+     * before dispatching. Out-of-range syscall numbers (>= 128) are
+     * also denied — those are unknown to us, can't be allowed by any
+     * policy, and falling through to the default-case unknown-syscall
+     * log would let an attacker enumerate the policy by timing.
+     *
+     * Denied path: bump the per-task counter, log once per N denials
+     * for visibility (full firehose would be too noisy), set ret=-1,
+     * skip the switch. The user-mode caller sees -1 with no error
+     * propagation — same shape as any other "unsupported" syscall. */
+    struct task *t_sb = task_current();
+    if (t_sb && t_sb->sandbox_active) {
+        int allowed = 0;
+        if (num < (uint32_t)(SANDBOX_MASK_WORDS * 32)) {
+            uint32_t word = t_sb->sandbox_mask[num / 32];
+            allowed = (word >> (num % 32)) & 1u;
+        }
+        if (!allowed) {
+            t_sb->sandbox_denials++;
+            /* Log first denial + every 16th after, so a tight loop
+             * doesn't drown the serial line. */
+            if (t_sb->sandbox_denials == 1 ||
+                (t_sb->sandbox_denials & 0xF) == 0) {
+                kprintf("[sandbox] pid=%u denied syscall %u "
+                        "(total denied: %u)\n",
+                        (unsigned)t_sb->id, (unsigned)num,
+                        (unsigned)t_sb->sandbox_denials);
+            }
+            r->eax = (uint32_t)-1;
+            bkl_unlock();
+            return;
+        }
+    }
+
     switch (num) {
         case SYS_WRITE: {
             kputc((char)a);
@@ -440,6 +476,35 @@ void syscall_dispatch(struct registers *r) {
             if (!bytes || n < 0 || n > 256)          { ret = -1; break; }
             serial_inject_bytes(bytes, n);
             ret = n;
+            break;
+        }
+        case SYS_SANDBOX_INSTALL: {
+            /* Session 70: install a syscall allow-bitmap.
+             *
+             * On first call, the supplied mask becomes the active
+             * policy. On subsequent calls, the new mask is AND-ed
+             * with the current — policies are monotonic and can
+             * only get tighter. Always returns 0 if the pointer
+             * was readable; -1 if not.
+             *
+             * The enforcement check at the top of syscall_dispatch
+             * already gated entry here. If the current policy denies
+             * SYS_SANDBOX_INSTALL, we never reached this case; that
+             * is the "frozen policy" semantics. */
+            const uint32_t *user_mask = (const uint32_t *)(uintptr_t)a;
+            if (!user_mask)                          { ret = -1; break; }
+
+            struct task *t = task_current();
+            for (int i = 0; i < SANDBOX_MASK_WORDS; i++) {
+                uint32_t w = user_mask[i];
+                if (t->sandbox_active) {
+                    t->sandbox_mask[i] &= w;       /* tighten only */
+                } else {
+                    t->sandbox_mask[i] = w;        /* first install */
+                }
+            }
+            t->sandbox_active = 1;
+            ret = 0;
             break;
         }
         case SYS_PIPE: {
