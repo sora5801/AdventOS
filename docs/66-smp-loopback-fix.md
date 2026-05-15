@@ -154,3 +154,140 @@ Selftest: **144 PASS, 0 FAIL** under `-smp 1`. Under `-smp 2` the t20 hang repro
 - Per-TCB or per-sock locking. The single `g_net_lock` is coarse but the syscall frequency on AdventOS makes its overhead invisible; per-resource locking is a future optimisation, not a correctness need.
 - Lock-free TCP. Would require either RCU-grade primitives or a completely redesigned state machine.
 - Replacing the BKL outright. Linux-style fine-grained locking is a multi-session refactor; this session adds one more lock at a sensible boundary.
+
+---
+
+# Session 80 update — reproducer + regression
+
+The session-66 deferral got revisited as session 80. Result: not a
+fix, an updated diagnosis. The `-smp 2` symptom changed sometime
+between session 66 and session 80 — what used to be a *hang* after
+the 3-way handshake is now a *kernel crash* before any networking
+even reaches user code. Documenting so the next session has a clean
+starting point.
+
+## Reproducer
+
+`user/smp-hammer.c` — in-guest binary that hammers agentd's `time`
+JSON-RPC method over fresh TCP connections in a tight loop. Counts
+successful responses, monitors progress, emits
+`DEADLOCK-OBSERVED` + a per-CPU tick-count dump from `sys_smp_stats`
+on stall.
+
+```
+advent$ smp-hammer 1000          # fire 1000 back-to-back time calls
+[smp-hammer] firing 1000 `time` requests to 127.0.0.1:7000
+[smp-hammer] done: 1000/1000 ok, 0 fail, 41 s wall      # under -smp 1
+```
+
+Under `-smp 2` the binary never gets to run. The kernel crashes
+before the shell prompt is interactive, with:
+
+```
+[!] CPU EXCEPTION 14: Page fault (err=0x0) at 8:1f898  eflags=0x10016
+    fault addr (CR2) = 0x0000007d
+    cause = page not present, read, supervisor mode
+System halted.
+```
+
+This happens AFTER `[boot] launched init.elf as pid 3`, i.e., once
+ring-3 tasks start running. The crash is reproducible on every
+boot with `-smp 2` and the current kernel.
+
+## What `EIP=0x1f898 / CR2=0x7d` tells us
+
+`0x1f898` is +12 bytes into `signal_check_and_deliver()` (see
+`nm kernel/kernel.elf | sort | grep _signal_check`). The function
+runs on the IRQ-exit / syscall-exit path of every ring-3 task. Its
+first three statements:
+
+```c
+if ((r->cs & 0x3) != 3) return;        /* skip kernel-mode tasks */
+struct task *t = task_current();
+if (!t || !t->is_user) return;
+```
+
+`CR2 = 0x7d (125)` is too small to be a real address; it's a NULL-
+ish pointer plus a field offset. With session-79's
+`TASK_MAX_FDS = 24` (and the struct-task growth from sessions 70+71
+sandbox / limits), `t->fds[2].offset` lives near task-struct
+offset 124 (0x7c) — within one byte of the observed CR2. So the
+fault is consistent with `task_current()` returning a small invalid
+pointer (likely `1`, possibly a bit-shifted `g_smp_ready` or some
+similarly malformed value) and a subsequent field load missing
+the page.
+
+`task_current()` walks `cpu_local()->current`. The plausible
+sources of a tiny-but-non-NULL `current` are:
+
+* `cpu_local()` returning a `struct cpu_local` whose `current`
+  field was clobbered by a peer CPU mid-`schedule()` — `schedule()`
+  holds `g_sched_lock` across the write but the LOAD in
+  `task_current()` doesn't acquire any lock.
+* The AP being preempted by an IRQ between `cpu->current = next`
+  and the actual task switch in `task_switch.S`, leaving
+  `current` pointing at a stale TCB.
+* A pointer-truncation bug somewhere in the AP-side TSS / cpu_local
+  setup that's only exposed once the AP actually starts dispatching
+  user tasks (which requires `g_ap_runs_user = 1` — currently
+  hard-coded to 0, so this path SHOULDN'T be reachable… unless
+  something else has started running user code on the AP).
+
+The third bullet is suspicious because `g_ap_runs_user = 0` is
+supposed to keep user tasks pinned to the BSP. If the AP is
+actually picking up a user task anyway, that's where the chain
+breaks. The AP runs its idle task with `is_idle = 1`, which would
+make the schedule() write `cpu->current = next` (next being some
+user task) — but `pickable_by()` should be rejecting user tasks
+on the AP. Verify the pin check actually runs in the AP's
+schedule() path.
+
+## Hypotheses — status
+
+| # | Hypothesis (session-80 spec section C) | Result |
+|---|---|---|
+| 1 | Missing `g_net_lock` acquisition site | Out of scope — crash happens before networking |
+| 2 | BKL + g_net_lock cycle | Same — crash precedes |
+| 3 | `sched_lock` + `g_net_lock` cycle | Same — crash precedes |
+| 4 | Missed wakeup post-handshake | The original session-66 symptom. Now masked by (5). |
+| 5 | New: AP-side task_current() returns invalid pointer | **Likely**. CR2 / EIP / call site all consistent. |
+
+The session-66 hang and the session-80 crash may be related (both
+boil down to "the AP touches state it shouldn't") or independent
+(crash got introduced separately by struct-task layout growth in
+70-79 while the hang stayed dormant). The next session needs to
+fix (5) first; (4) becomes diagnosable again once -smp 2 boots.
+
+## Status of the original (session 66) hypothesis bets
+
+Session 66 bet on starvation in `pick_next_ready` (bullet 1) and
+busy-yield in `sock_accept` (bullet 4). Those bets stay open: the
+session-80 reproducer can't reach them because of the crash.
+
+## Recommended next-session scope
+
+1. **Reproduce (1 hour).** `bash build.sh && qemu ... -smp 2` →
+   page fault on boot. Save the boot log to disk.
+2. **Pin the offset (1 hour).** `objdump -d kernel/kernel.elf |
+   grep -A30 signal_check_and_deliver` — read the disassembly to
+   confirm which field at byte 0x7c-0x7d is being loaded. The
+   compiler may have inlined something from the function's prologue
+   that the source-level reading doesn't capture.
+3. **Verify the AP's `pick_next_ready` rejects user tasks.** Add a
+   one-line trace at the top of `pickable_by` that prints
+   `[pick] cpu=N pid=M state=S pin=P` when state==READY and the pin
+   admits this CPU. On `-smp 2`, look for an AP picking a user pid.
+4. **Audit the `cpu_local()` chain on AP.** `lapic_id()` →
+   `g_cpus[lapic_to_idx[lapic_id]]`. If the lapic-to-idx table
+   isn't atomic across `smp_init`, an AP that observes a partial
+   table sees an unexpected entry.
+5. **Once `-smp 2` boots clean**, run `smp-hammer 5000` and
+   re-evaluate the session-66 hang. With current understanding
+   it's probably *still there*, masked by (5).
+
+## Workaround
+
+`-smp 1` remains the recommended config (build.sh boot hints). The
+crash is total — there is no current way to run `-smp 2` to any
+useful endpoint, including testing the session-78 selftests.
+

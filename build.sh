@@ -124,7 +124,8 @@ USER_PROGS=(hello count sh echo httpd ed init
             head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest sandbox kvctl agentctl sleep
-            sandbox-selftest limits-selftest kv-selftest)
+            sandbox-selftest limits-selftest kv-selftest
+            smp-hammer)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \

@@ -139,6 +139,10 @@ USER_PROGRAMS = [
     # Session 78: sleep utility (needed by jobs/cron selftests for
     # bounded-but-not-instant child lifetimes).
     ('sleep.elf',        'user/_obj/sleep.bin',              None),
+    # Session 80: deterministic reproducer for the -smp 2 loopback
+    # hang. Fires N back-to-back `time` JSON-RPC requests; prints
+    # DEADLOCK-OBSERVED + per-CPU tick counts on stall.
+    ('smp-hammer.elf',   'user/_obj/smp-hammer.bin',         None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.
