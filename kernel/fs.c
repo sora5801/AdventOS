@@ -339,9 +339,25 @@ static int fs_idir_iter_inst(struct fs_instance *inst, int dir_idx, int *iter) {
 /* ---- Per-instance mkdir / write -------------------------------- */
 
 static int alloc_slot_inst(struct fs_instance *inst) {
-    if (inst->super.file_count >= FS_MAX_FILES) return -1;
-    int idx = (int)inst->super.file_count;
-    inst->super.file_count++;
+    /* Session 73 followup: prefer recycling a FREE slot from the live
+     * range BEFORE growing file_count. Without this, fs_unlink leaks
+     * slots on every deletion — file_count monotonically grew until
+     * it hit FS_MAX_FILES (64), at which point even a kvctl put-then-
+     * del-then-put loop would wedge after a handful of iterations.
+     * Boot fills ~57 slots, leaving ~7 headroom; KV churn used to
+     * burn through that headroom in a couple of put/del cycles. */
+    int idx = -1;
+    for (uint32_t i = 0; i < inst->super.file_count; i++) {
+        if (inst->super.files[i].type == FS_TYPE_FREE) {
+            idx = (int)i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (inst->super.file_count >= FS_MAX_FILES) return -1;
+        idx = (int)inst->super.file_count;
+        inst->super.file_count++;
+    }
     struct fs_entry *e = &inst->super.files[idx];
     for (int i = 0; i < FS_NAME_MAX; i++) e->name[i] = 0;
     e->start_sector = 0;
