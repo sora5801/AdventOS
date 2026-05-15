@@ -8,7 +8,11 @@
 #define KBD_DATA_PORT 0x60
 #define KBD_STATUS    0x64
 
-#define BUF_SIZE 128
+#define BUF_SIZE 512   /* session-73 followup: was 128. Bumped to
+                        * comfortably hold a clipboard paste of up
+                        * to a few hundred chars without buf_push
+                        * dropping bytes mid-burst. Each entry is one
+                        * char so 512 bytes total — negligible. */
 
 static volatile char     kbd_buf[BUF_SIZE];
 static volatile uint32_t kbd_head;

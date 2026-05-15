@@ -93,12 +93,22 @@ void serial_init(void) {
     outb(COM1_PORT + 0, 0x03);   /* Divisor LSB: 38400 baud */
     outb(COM1_PORT + 1, 0x00);   /* Divisor MSB */
     outb(COM1_PORT + 3, 0x03);   /* 8N1, DLAB off */
-    outb(COM1_PORT + 2, 0x00);   /* FIFO off — 16450-compat mode, one byte
-                                  * per LSR.DR transition. Sidesteps a
-                                  * QEMU quirk where the 16550 FIFO mode
-                                  * was eating RX bytes without ever
-                                  * raising LSR.DR for our polling
-                                  * loop. */
+    outb(COM1_PORT + 2, 0x07);   /* FIFO on (bit 0) + clear RX (bit 1)
+                                  * + clear TX (bit 2). Trigger level
+                                  * stays at 1 byte (bits 6-7 = 00) so
+                                  * LSR.DR latches per-byte and our
+                                  * polling loop sees every transition.
+                                  *
+                                  * Session 73 followup: was 0x00
+                                  * (FIFO off) since session 67 due to
+                                  * an old QEMU quirk that ate bytes
+                                  * with trigger=4. With trigger=1 the
+                                  * quirk doesn't bite, and the 16-byte
+                                  * FIFO is essential for paste — without
+                                  * it, bytes typed/pasted into the host
+                                  * terminal arrive faster than our
+                                  * PIT-tick polling can drain them and
+                                  * we'd lose ~13 of every 14 chars. */
     outb(COM1_PORT + 4, 0x0B);   /* IRQs enabled at MCR (RTS/DSR/OUT2) */
 }
 
