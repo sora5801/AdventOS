@@ -64,6 +64,17 @@ void pipe_close_write(int idx) {
 int pipe_read_refs (int idx) { return valid(idx) ? g_pipes[idx].read_refs  : 0; }
 int pipe_write_refs(int idx) { return valid(idx) ? g_pipes[idx].write_refs : 0; }
 
+/* Session 74 — fast peek used by the FD_FL_NONBLOCK path of SYS_READ.
+ * Mirrors pipe_read's first-line gate exactly: data or EOF -> ok to
+ * call pipe_read; empty + writer open -> tell caller to skip. */
+int pipe_read_avail(int idx) {
+    if (!valid(idx)) return -1;
+    struct pipe *p = &g_pipes[idx];
+    if (p->head != p->tail) return 1;       /* bytes queued */
+    if (p->write_refs == 0)  return 1;      /* drained EOF */
+    return 0;                               /* would block */
+}
+
 int pipe_read(int idx, void *buf, int n) {
     if (!valid(idx)) return -1;
     struct pipe *p = &g_pipes[idx];

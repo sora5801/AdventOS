@@ -151,6 +151,114 @@
         },
         "required": ["cmd", "policy"]
       }
+    },
+    {
+      "name": "shell.exec_background",
+      "description": "Spawn a child the same way shell.exec does, but return immediately with {job_id, pid}. The child's stdout/stderr stream into per-job 4 KiB ring buffers; agents pull via shell.job.read OR get pushed bytes via shell.job.subscribe + notifications/job.output. Optional `policy` + `limits` work identically to shell.exec_sandboxed. Up to 8 jobs may be RUNNING at once; older EXIT slots are recycled when the table fills.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cmd":    {"type": "string"},
+          "args":   {"type": "array", "items": {"type": "string"}},
+          "policy": {"type": "string", "enum": ["minimal", "compute", "readfs", "netclient"]},
+          "limits": {
+            "type": "object",
+            "properties": {
+              "max_rss_kb":  {"type": "integer"},
+              "max_cpu_ms":  {"type": "integer"},
+              "max_fds":     {"type": "integer"},
+              "max_wall_ms": {"type": "integer"}
+            }
+          }
+        },
+        "required": ["cmd"]
+      }
+    },
+    {
+      "name": "shell.job.list",
+      "description": "Enumerate every non-FREE job slot. Returns {jobs:[{job_id,pid,cmd,state,done,exit_code?,stdout_total,stderr_total,policy?},...]}.",
+      "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+      "name": "shell.job.status",
+      "description": "Detailed status of one job (same shape as one entry in shell.job.list).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "integer", "minimum": 0, "maximum": 7}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.read",
+      "description": "Pull bytes from a job's stdout/stderr ring buffers. Pass the previous read's `stdout_next` / `stderr_next` as the new offsets to consume incrementally. `stdout_skipped` / `stderr_skipped` count bytes the ring has overwritten (lost) since the requested offset; in that case `stdout` / `stderr` start at the oldest still-retained byte. `done` flips true once the child has been reaped AND both pipes have hit EOF.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id":        {"type": "integer"},
+          "stdout_offset": {"type": "integer", "description": "Default 0; pass last call's stdout_next to consume new bytes."},
+          "stderr_offset": {"type": "integer"},
+          "max":           {"type": "integer", "description": "Max bytes per stream this call. Default and ceiling: 2048."}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.wait",
+      "description": "Block until the job exits OR timeout_ms milliseconds pass. Returns {job_id, done, exit_code?, timed_out}. The wait is queued inside agentd; other connections and jobs continue running. Default timeout 5 s, hard cap 300 s.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id":     {"type": "integer"},
+          "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 300000}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.cancel",
+      "description": "Send SIGKILL to a RUNNING job. Returns {job_id, killed}. Does not block — the next event-loop reap promotes the slot to EXIT.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "integer"}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.delete",
+      "description": "Free an EXIT-state job slot so it can be recycled. Refuses to remove a still-running job (caller must cancel + wait first). Returns {job_id, removed, reason?}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "integer"}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.subscribe",
+      "description": "Register the calling connection to receive notifications/job.output (per-chunk stdout/stderr) and notifications/job.exit. Returns the current stdout_total / stderr_total so the agent can pair the push stream with a baseline shell.job.read offset. Subscriptions are per-connection — closing the connection unsubscribes automatically.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "integer"}
+        },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "shell.job.unsubscribe",
+      "description": "Drop a prior shell.job.subscribe registration on the calling connection.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "integer"}
+        },
+        "required": ["job_id"]
+      }
     }
   ]
 }

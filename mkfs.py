@@ -119,6 +119,8 @@ USER_PROGRAMS = [
     ('sandbox.elf',    'user/_obj/sandbox.bin',    None),
     # Session 73: KV-store CLI (paste-free testing path).
     ('kvctl.elf',      'user/_obj/kvctl.bin',      None),
+    # Session 74: in-guest JSON-RPC client for agentd's job tools.
+    ('agentctl.elf',   'user/_obj/agentctl.bin',   None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

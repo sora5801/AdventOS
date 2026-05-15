@@ -442,6 +442,15 @@ void syscall_dispatch(struct registers *r) {
                     ret = sock_read(e->obj_idx, buf, n);
                     break;
                 case FD_PIPE_R:
+                    /* Session 74 — pipe non-blocking, same shape as
+                     * the FD_SOCK branch above. agentd's event loop
+                     * polls dozens of job stdout/stderr pipes per
+                     * tick; a blocking read here would freeze the
+                     * whole daemon waiting on one quiet child. */
+                    if (e->flags & FD_FL_NONBLOCK) {
+                        int av = pipe_read_avail(e->obj_idx);
+                        if (av != 1) { ret = -1; break; }
+                    }
                     ret = pipe_read(e->obj_idx, buf, n);
                     break;
                 case FD_PTY_M:

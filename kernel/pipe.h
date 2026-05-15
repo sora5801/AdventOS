@@ -22,8 +22,22 @@
  * sock_read/accept; same trade-off (no proper wait queues yet).
  */
 
-#define PIPE_MAX     8
-#define PIPE_BUF_SZ  4096
+/* Session 74 bump from 8 -> 24: agentd's background-job machinery
+ * holds 2 pipes (stdout + stderr) per running job, and JOB_MAX is 8
+ * — that alone burns 16 pipes. The remaining 8 stay reserved for
+ * normal shell pipelines + selftest harnesses. Cost is ~25 KiB of
+ * kernel BSS (24 * sizeof(struct pipe), each ~1048 bytes after the
+ * PIPE_BUF_SZ trim below).
+ *
+ * NOTE: PIPE_BUF_SZ stayed at 4096 in earlier sessions, but bumping
+ * PIPE_MAX to 24 with the 4 KiB ring would push kernel .bss past
+ * 0x9FC00 — the BIOS's Extended BIOS Data Area. The kernel's
+ * `rep stosb` zero-bss in entry.S would then clobber the EBDA mid-
+ * boot, causing the kernel to hang during VBE / fbcon_init. The
+ * trim to 1 KiB keeps .bss in the safe 0x300b0..0x9DB18 window.
+ * If PIPE_MAX ever drops back to <= 12 the ring can grow again. */
+#define PIPE_MAX     24
+#define PIPE_BUF_SZ  1024
 
 void pipe_init(void);
 
@@ -43,6 +57,15 @@ void pipe_close_write(int idx);
 /* Blocking read. Returns bytes copied, 0 on EOF (write end closed
  * AND ring drained), -1 on bad idx. */
 int  pipe_read (int idx, void *buf, int n);
+
+/* Session 74 — peek for the non-blocking syscall path. Returns:
+ *    1  bytes are available OR the writer has closed (so a follow-up
+ *       pipe_read returns >0 or 0=EOF without blocking)
+ *    0  ring empty and writer still open — pipe_read would yield-loop
+ *   -1  bad idx
+ * The syscall layer uses this to honor FD_FL_NONBLOCK without
+ * peeking into struct pipe internals. */
+int  pipe_read_avail(int idx);
 
 /* Best-effort write. Returns bytes written. Spins yielding while the
  * ring is full as long as the read end is still open. Returns -1 if

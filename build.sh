@@ -117,7 +117,7 @@ echo "[5/7] build user programs"
 USER_PROGS=(hello count sh echo httpd ed init
             head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
-            dbg dbgtest sandbox kvctl)
+            dbg dbgtest sandbox kvctl agentctl)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -183,7 +183,7 @@ fs_lba=384   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS (bumped from 256 i
 # pointer. Update the constants below in lockstep with the files they
 # mirror.
 BOOTLOADER_LOAD_SECTORS=384   # 3 DAP reads of 128 sectors in boot/boot.S
-AGENTD_MANIFEST_MAX=8192      # MANIFEST_MAX in user/agentd.c
+AGENTD_MANIFEST_MAX=16384     # MANIFEST_MAX in user/agentd.c (session 74 bump)
 
 kernel_size=$(stat -c%s kernel/kernel.bin)
 on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS
