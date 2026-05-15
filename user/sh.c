@@ -91,10 +91,33 @@ static int tokenize(char *line, char **tokens, int cap) {
             continue;
         }
 
-        tokens[n++] = p;
+        /* Start a word. Quoted segments (single or double) are copied
+         * verbatim with the surrounding quote chars stripped. Because
+         * we strip in place, `out` lags `p` whenever quotes appear;
+         * we NUL-terminate at `out` at the end of the word rather
+         * than at the separator (the separator might be inside the
+         * untouched tail).
+         *
+         * Single and double quotes both pass content through unmodified.
+         * Variable expansion has already happened upstream (session 49
+         * runs $FOO expansion BEFORE tokenize), so we don't need to
+         * re-distinguish single-vs-double here — just strip the quote
+         * chars so JSON like '{"a":"b"}' becomes the literal
+         * {"a":"b"} that downstream tools see. */
+        char *out = p;
+        tokens[n++] = out;
         while (*p && *p != ' ' && *p != '\t' &&
-               *p != '|' && *p != '>' && *p != '&') p++;
-        if (*p == ' ' || *p == '\t') { *p = 0; p++; }
+               *p != '|' && *p != '>' && *p != '&') {
+            if (*p == '\'' || *p == '"') {
+                char q = *p++;
+                while (*p && *p != q) *out++ = *p++;
+                if (*p == q) p++;       /* skip closing quote */
+            } else {
+                *out++ = *p++;
+            }
+        }
+        if (*p == ' ' || *p == '\t') p++;
+        *out = 0;
         /* If we hit an operator, leave it for the next iteration. */
     }
     tokens[n] = 0;
