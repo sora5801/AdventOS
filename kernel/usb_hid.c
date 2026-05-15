@@ -104,6 +104,24 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
     int shift = (mods & (HID_MOD_LSHIFT | HID_MOD_RSHIFT)) ? 1 : 0;
     int ctrl  = (mods & (HID_MOD_LCTRL  | HID_MOD_RCTRL )) ? 1 : 0;
 
+    /* Arrow keys — emit the 3-byte ANSI CSI sequence (ESC '[' final),
+     * same shape the PS/2 driver pushes via push_csi(). The shell
+     * reads these in raw mode for history navigation; without this,
+     * USB-HID users see arrow keys silently swallowed.
+     *
+     * HID usages:
+     *   0x4F right -> CSI C
+     *   0x50 left  -> CSI D
+     *   0x51 down  -> CSI B
+     *   0x52 up    -> CSI A    */
+    if (usage >= 0x4F && usage <= 0x52) {
+        static const char finals[4] = { 'C', 'D', 'B', 'A' };
+        char esc[3] = { 27, '[', finals[usage - 0x4F] };
+        keyboard_inject(esc, 3);
+        kprintf("[usb-hid] arrow (usage=%x final=%c)\n", usage, esc[2]);
+        return;
+    }
+
     char c = shift ? hid_to_ascii_shifted[usage] : hid_to_ascii_unshifted[usage];
     if (!c) return;
 
