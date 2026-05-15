@@ -2,9 +2,17 @@
 
 One place to look up everything an external agent (or in-guest tool)
 can do with AdventOS through `agentd`, `kvctl`, the new syscalls,
-and procfs. Consolidates the surfaces added across sessions 70–74;
+and procfs. Consolidates the surfaces added across sessions 70–77;
 session-by-session deep dives remain in `docs/64-agent-rpc.md`,
 `docs/65-mcp-server.md`, and the inline comments in `user/agentd.c`.
+
+> **Contributor note.** Every code change that touches an
+> agent-facing surface (a tool, a notification, a capability flag,
+> a syscall, a procfs file) must update this document in the same
+> commit. If the doc lags reality, agents reading it write broken
+> code; if it leads reality, they write code that doesn't run yet.
+> Both are worse than no doc. Companion: `docs/agent-cookbook.md`
+> for paste-able recipes.
 
 ## Overview
 
@@ -67,12 +75,47 @@ Every tool here is reachable two ways:
 | `shell.job.delete` | `{job_id}` | `{job_id, removed, reason?}` | session 74 |
 | `shell.job.subscribe` | `{job_id}` | `{job_id, subscribed, stdout_total, stderr_total}` | session 74 |
 | `shell.job.unsubscribe` | `{job_id}` | `{job_id, subscribed}` | session 74 |
+| `cron.create` | `{kind, fire_at? \| delay_sec?, interval_sec?, max_runs?, concurrent?, cmd, args?, policy?, limits?}` | `{entry_id, fire_at}` | session 77 |
+| `cron.list` | `{filter?: {state?}}` | `{entries:[...]}` | session 77 |
+| `cron.get` | `{entry_id}` | `{entry:{...}}` | session 77 |
+| `cron.cancel` | `{entry_id}` | `{ok, was_scheduled}` | session 77 |
+| `cron.delete` | `{entry_id}` | `{ok, removed}` | session 77 |
+| `cron.subscribe` | `{entry_id}` | `{ok}` | session 77 |
+| `cron.unsubscribe` | `{entry_id}` | `{ok}` | session 77 |
 
 Sandbox policy names (used in `shell.exec_sandboxed` /
-`shell.exec_background`): `minimal | compute | readfs | netclient`,
-each strictly broader than the prior. `limits` is an optional object
-with non-negative integer fields `max_rss_kb`, `max_cpu_ms`,
-`max_fds`, `max_wall_ms`; zero or absent = no cap.
+`shell.exec_background` / `cron.create`): `minimal | compute | readfs
+| netclient`, each strictly broader than the prior. `limits` is an
+optional object with non-negative integer fields `max_rss_kb`,
+`max_cpu_ms`, `max_fds`, `max_wall_ms`; zero or absent = no cap.
+
+### Two dispatch shapes for the same tools
+
+For testing tools where you want to parse the response with a plain
+substring search (the in-guest selftests do this via libagent's
+`agent_method_call`), use the direct shape:
+
+```jsonc
+{"jsonrpc":"2.0","id":1,"method":"shell.exec_background",
+ "params":{"cmd":"/ls.elf"}}
+// -> {"jsonrpc":"2.0","id":1,"result":{"job_id":0,"pid":42}}
+```
+
+For MCP-aware clients (Claude Desktop, Cline, etc.), the same tool
+goes through `tools/call`:
+
+```jsonc
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"shell.exec_background","arguments":{"cmd":"/ls.elf"}}}
+// -> {"jsonrpc":"2.0","id":1,"result":{
+//        "content":[{"type":"text","text":"{\"job_id\":0,\"pid\":42}"}],
+//        "isError":false}}
+```
+
+The MCP envelope JSON-string-encodes the inner result, so the
+quotes around `"job_id"` become `\"job_id\"` on the wire. Programs
+that parse the response need to either un-escape the inner string
+or use the direct shape.
 
 ## MCP resources (session 73)
 
@@ -102,7 +145,7 @@ kv://{namespace}/{key}          (mirror of kv.get)
 `resources/read {uri}` returns `{contents:[{uri, mimeType, text,
 truncated?}]}`. 4 KiB read cap per call.
 
-## Notifications (sessions 74 + 76)
+## Notifications (sessions 74 + 76 + 77)
 
 Server-initiated JSON-RPC messages (no `id` field). Each fits in a
 single TCP segment (≤ 1280 bytes); writes that would block or fail
@@ -114,6 +157,7 @@ are dropped on the floor.
 | `notifications/job.exit` | Job's pid reaped + pipes drained | `shell.job.subscribe` (session 74) |
 | `notifications/resources/updated` | Subscribed URI's content hash changed (200 ms tick, FNV-1a) | `resources/subscribe` (session 76) |
 | `notifications/kv/changed` | `kv.put`/`kv.del` on a matching (namespace, prefix) | `kv.watch` (session 76) |
+| `notifications/cron.fired` | A scheduled cron entry just spawned its job | `cron.subscribe` (session 77) |
 
 Wire shapes:
 
@@ -131,9 +175,13 @@ Wire shapes:
 // session 76 — AdventOS extension, op = "put" | "del"
 {"jsonrpc":"2.0","method":"notifications/kv/changed",
  "params":{"namespace":"smoke","key":"counter","op":"put"}}
+
+// session 77 — AdventOS extension
+{"jsonrpc":"2.0","method":"notifications/cron.fired",
+ "params":{"entry_id":5,"job_id":42,"fire_at":1715692800,"run_count":3}}
 ```
 
-The `initialize` handshake advertises both feature groups:
+The `initialize` handshake advertises all three feature groups:
 
 ```jsonc
 "capabilities": {
@@ -143,7 +191,11 @@ The `initialize` handshake advertises both feature groups:
                            "notifications":["notifications/job.output",
                                             "notifications/job.exit"]},
     "adventos.kv_watch":  {"version":1, "max_concurrent_watches":16,
-                           "notifications":["notifications/kv/changed"]}
+                           "notifications":["notifications/kv/changed"]},
+    "adventos.cron":      {"version":1, "max_entries":32,
+                           "min_interval_sec":1,
+                           "kinds":["oneshot","recurring"],
+                           "notifications":["notifications/cron.fired"]}
   }
 }
 ```
@@ -189,6 +241,46 @@ Validation lives in `user/libuser.c` (`kv_validate_ns`,
 before any FS call. Namespace directories are created on first
 `kv.put` (no explicit `kv.mkns` call). On the host, use `kvctl get /
 put / del / list / stat` for paste-free testing.
+
+## Cron layout (session 77)
+
+Durable scheduler. Each entry persisted as one JSON file:
+
+```
+/var/cron/<entry_id>.json
+```
+
+Two kinds:
+
+- **oneshot** — fires once at `fire_at` (or `now + delay_sec`), then
+  transitions to `expired`.
+- **recurring** — fires every `interval_sec` until cancelled or
+  `max_runs` is hit. `max_runs: 0` means unlimited.
+
+The event loop runs a 1 Hz cron tick. Each due entry spawns a
+session-74 background job; the entry's `last_job_id` points at the
+slot, so an agent can immediately `shell.job.read` / `shell.job.wait`
+on the spawned run.
+
+`concurrent: false` (the default) skips a fire when the previous
+run is still RUNNING; `fire_at` advances anyway so the schedule
+doesn't drift. `concurrent: true` overlaps fires.
+
+Boot recovery scans `/var/cron` and rebuilds `g_cron[]`. Past-due
+entries fire on the next tick (single fire, no missed-interval
+replay). The `cron_next_id` counter advances past the highest
+loaded id so future entries stay monotonic.
+
+States:
+
+| State | Meaning |
+|---|---|
+| `scheduled` | due to fire (or recurring with `run_count < max_runs`) |
+| `cancelled` | user called `cron.cancel`; no further fires; record stays for inspection |
+| `expired` | oneshot fired OR recurring hit `max_runs` |
+
+Agents are expected to `cron.delete` entries they no longer care
+about; there's no auto-GC of `expired` records.
 
 ## Syscalls added since session 70
 
@@ -303,22 +395,31 @@ For a long-running command, use background jobs:
 // -> {"result":{"stdout":"...","stdout_next":128,"done":false,...}}
 ```
 
-## Selftests (session 75)
+## Selftests (sessions 75 + 78)
 
-Three standalone binaries verify the sessions 70–73 surfaces
-end-to-end without an external client. Run from the in-guest shell:
+Six standalone binaries verify the sessions 70–77 surfaces end-to-end
+without an external client. Run from the in-guest shell:
 
 ```
-advent$ sbx-selftest
-advent$ lim-selftest
-advent$ kv-selftest
+advent$ sbx-selftest        # session 70 — sandbox
+advent$ lim-selftest        # session 71 — resource limits
+advent$ kv-selftest         # session 73 — KV store
+advent$ job-selftest        # session 74 — background jobs
+advent$ sub-selftest        # session 76 — resources/subscribe + kv.watch
+advent$ crn-selftest        # session 77 — cron scheduler
+advent$ selftest            # meta-runner: forks each in turn, prints summary
 ```
 
 The short prefixes are because `FS_NAME_MAX` is 16 chars and the
-shell auto-appends `.elf`; `sbx-selftest.elf` and `lim-selftest.elf`
-each fit in 16 bytes exactly. Source files keep the descriptive
-`sandbox-selftest.c` / `limits-selftest.c` / `kv-selftest.c` names.
+shell auto-appends `.elf`; `sbx-selftest.elf` fits exactly. Source
+files keep the descriptive `sandbox-selftest.c` etc names.
+
+The agentd-talking tests (jobs / sub / crn) link against
+`user/libagent.{c,h}` — a thin TCP+JSON-RPC client (`agent_call`,
+`agent_method_call`, `agent_tool_call`, `agent_open_persistent`).
 Each prints one PASS/FAIL per check and exits 0 only on full pass.
+The meta-runner fork+execs each test (so sandbox/limits selftests'
+self-installed policies don't leak forward) and reports a summary.
 
 ## Known limits
 
@@ -327,6 +428,40 @@ Counted with how-tight-is-the-ceiling for honest planning:
 - 4 simultaneous TCP connections to agentd (`MAX_CONN`)
 - 8 simultaneous background jobs (`JOB_MAX`)
 - 4 KiB per stream per job ring buffer (`JOB_RING_SZ`)
+- 16 unique subscribed resource URIs (`MAX_RES_URIS`)
+- 32 total `(conn, uri)` subscription pairs (`MAX_RES_SUBS`)
+- 16 simultaneous `kv.watch` registrations (`MAX_KV_WATCHES`)
+- 32 cron entries (`MAX_CRON_ENTRIES`)
+- 4 subscribers per cron entry (`CRON_MAX_SUBSCRIBERS`)
 - 65 536 bytes per KV value
 - 128 file slots on the boot fs (`FS_MAX_FILES`)
 - 8 192 sectors visible to the FS bitmap (~4 MiB usable)
+- 200 ms polling latency for `resources/subscribe`
+- 1 Hz tick granularity for cron
+
+## Quirks worth knowing
+
+- Subscribing to a volatile resource (e.g. `file:///proc/uptime`,
+  which changes every PIT tick) means the daemon emits a
+  `notifications/resources/updated` for it every 200 ms forever.
+  Document not a limit — there's no per-URI rate-limit.
+- Job stdout/stderr rings cap at 4 KiB; older bytes drop. The
+  `stdout_skipped` / `stderr_skipped` fields on `shell.job.read`
+  tell the caller how many bytes were lost since their last
+  `*_offset`.
+- `kv.put` writing the same value as before still triggers
+  `notifications/kv/changed`. The op happened — let the watcher
+  decide whether to care; cheaper than diffing on every write.
+- `kv.del` of a nonexistent key also triggers a notification with
+  `op: "del"`. The response's `{existed:false}` field distinguishes
+  no-op from real-delete.
+- `shell.job.wait` may defer its response across event-loop ticks;
+  it parks the conn and the response arrives when the job exits or
+  the timeout elapses. The dispatch is transparent to the client —
+  recv on the same socket returns the response whenever it lands.
+- Cron entries with `concurrent: false` (the default) skip a fire
+  when the previous run's job is still RUNNING. `fire_at` advances
+  regardless; `run_count` does NOT — the skipped slot is dropped.
+- Boot-recovered cron entries fire on the very next tick if their
+  `fire_at` is already past. No multi-fire catch-up for missed
+  intervals.

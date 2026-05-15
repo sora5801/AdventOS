@@ -113,12 +113,19 @@ echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
 
+# Session 78: libagent — TCP+JSON-RPC client for the in-guest selftests.
+# Static archive of one object; linked into the *-selftest programs
+# that talk to agentd. Same pattern as libjson above.
+"$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libagent.o user/libagent.c
+
 # Basic programs — no libjson, no libcrypto. The smallest binaries.
+# Session 78 additions: sleep (for cancel tests), selftest (meta runner).
 USER_PROGS=(hello count sh echo httpd ed init
             head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
-            dbg dbgtest sandbox kvctl agentctl
-            sandbox-selftest limits-selftest kv-selftest)
+            dbg dbgtest sandbox kvctl agentctl sleep
+            sandbox-selftest limits-selftest kv-selftest
+            selftest)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -150,6 +157,21 @@ for name in "${JSON_PROGS[@]}"; do
     nm "user/_obj/${name}.elf" \
         | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
         > "user/_obj/${name}.syms"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+# Session 78: in-guest selftests that talk to agentd via TCP. Link
+# libagent on top of libuser. Each is a small standalone binary;
+# the meta-runner `selftest.elf` (in USER_PROGS above) fork+execs
+# them in turn.
+AGENT_PROGS=(jobs-selftest subscribe-selftest cron-selftest)
+for name in "${AGENT_PROGS[@]}"; do
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" \
+        user/_obj/libuser.o user/_obj/libagent.o
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
 done
 
