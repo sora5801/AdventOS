@@ -8,6 +8,7 @@
 #include "vga.h"
 #include "serial.h"
 #include "kprintf.h"
+#include "smp_trace.h"
 #include "string.h"
 #include "gdt.h"
 #include "tss.h"
@@ -341,6 +342,7 @@ void kmain(uint32_t boot_drive) {
 
     kputs("\n");
     banner();
+    SMP_LOG("kmain post-banner");
 
     /* Helper: load + setup args + spawn a single user task. argv is a
      * brace-enclosed initializer list — pass any number of strings.

@@ -272,6 +272,55 @@ if [ "$agentd_size" -gt "$AGENTD_BIN_MAX" ]; then
     exit 1
 fi
 
+# Session 80: kernel .bss must end below VGA framebuffer at 0xA0000.
+#
+# The kernel's BSS section grows DOWN from the end of the kernel image
+# in memory — kernel_end = bss VMA + bss size. The stack_top symbol is
+# placed at the very end of .bss (entry.S `mov $stack_top, %esp`), so
+# the stack PHYSICALLY lives at the highest .bss address and grows
+# downward from there.
+#
+# Two physical-memory landmines:
+#   0x9FC00  BIOS EBDA — typically holds ACPI RSDP/MADT pointers we
+#            read later. Stack pushes corrupt those tables.
+#   0xA0000  VGA framebuffer MMIO. Writes here go through the VGA
+#            controller (chained-4 latching, write-masking, etc.) and
+#            get MANGLED. A stack push that lands in this range stores
+#            a different value than written; a later pop reads garbage
+#            into EIP and the kernel hangs at the next `ret`.
+#
+# Session 80 hit this exact bug when SMP_TRACE bloat shifted .bss up
+# by 4 KiB into 0xA0000+. Symptom: silent hang at fbcon_init (first
+# deep-stack call after boot) — no fault dump, no crash, just frozen.
+# Diagnosed by inspecting objdump -h kernel.elf and noticing
+# .bss end > 0xA0000.
+#
+# Hard limit is 0xA0000 (VGA). Softer warning at 0x9FC00 (EBDA).
+BSS_HARD_LIMIT=$((0xA0000))    # VGA RAM begins — stack pushes mangle
+BSS_SOFT_LIMIT=$((0x9FC00))    # EBDA begins — ACPI tables at risk
+bss_end_hex=$(objdump -h kernel/kernel.elf | awk '/\.bss/ {printf "0x%x\n", strtonum("0x"$4) + strtonum("0x"$3); exit}')
+bss_end=$((bss_end_hex))
+if [ "$bss_end" -ge "$BSS_HARD_LIMIT" ]; then
+    printf 'ERROR: kernel .bss ends at 0x%x — overlaps VGA RAM (0xA0000+)\n' \
+        "$bss_end" >&2
+    echo "  hit limit: stack lives at top of .bss; writes to 0xA0000+ go" >&2
+    echo "             through the VGA controller and get mangled." >&2
+    echo "             Symptom is a silent hang at the first deep-stack" >&2
+    echo "             function call (typically fbcon_init/fbcon_clear)." >&2
+    echo "  fix:       trim a BSS-heavy global, OR shrink .text/.rdata" >&2
+    echo "             enough to drop .bss start by 4 KiB, OR move the" >&2
+    echo "             stack to a hardcoded address in entry.S below" >&2
+    echo "             0x9FC00." >&2
+    exit 1
+fi
+if [ "$bss_end" -ge "$BSS_SOFT_LIMIT" ]; then
+    printf 'WARNING: kernel .bss ends at 0x%x — extends into BIOS EBDA (0x9FC00+)\n' \
+        "$bss_end" >&2
+    echo "  ACPI RSDP/MADT may live here. smp_init / acpi parsing may" >&2
+    echo "  read corrupted bytes once the kernel stack grows past this" >&2
+    echo "  region. Trim BSS or move the stack before bss creeps to 0xA0000." >&2
+fi
+
 # Session 75: at-a-glance sizes / headroom so we notice a budget
 # creeping toward its cap weeks before it actually breaks. Printed
 # AFTER the assertions pass so a build failure prints the precise

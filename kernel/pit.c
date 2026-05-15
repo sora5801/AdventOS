@@ -4,6 +4,7 @@
 #include "task.h"
 #include "serial.h"
 #include "signal.h"
+#include "lapic.h"
 #include "../include/io.h"
 
 #define PIT_FREQ      1193182u
@@ -59,7 +60,18 @@ static void pit_irq(struct registers *r) {
      * faster path for free. */
     serial_poll_once();
     /* Round-robin preemption. schedule() is a no-op until task_init
-     * runs, so it's safe to invoke from boot onward. */
+     * runs, so it's safe to invoke from boot onward.
+     *
+     * Session 80: skip preemption when THIS CPU owns the BKL. Without
+     * this guard a syscall mid-critical-section can be preempted with
+     * BKL still held; the incoming task on this CPU will spin forever
+     * on `spin_lock(&g_bkl)` because the inner spinlock is held by a
+     * no-longer-running context. The bkl-aware yields inside specific
+     * syscalls (SYS_YIELD, SYS_SLEEP_MS, blocking accept/read) drop +
+     * retake BKL explicitly, so the only "stuck holding BKL" case we
+     * need to suppress is the involuntary timer preemption. */
+    extern int bkl_held(void);
+    if (bkl_held()) return;
     schedule();
 }
 

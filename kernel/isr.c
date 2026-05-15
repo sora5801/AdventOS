@@ -218,8 +218,16 @@ void lapic_irq_handler(struct registers *r) {
 
     /* Round-robin preemption on every CPU. The schedule() call
      * itself takes the global scheduler lock so concurrent ticks
-     * on different CPUs serialize cleanly. */
-    schedule();
+     * on different CPUs serialize cleanly.
+     *
+     * Session 80: skip preemption when THIS CPU owns the BKL. Same
+     * reasoning as in pit_irq — preempting a BKL-holding task leaves
+     * the spinlock owned by a not-currently-running context, and the
+     * next task to call bkl_lock on this CPU spins forever. */
+    extern int bkl_held(void);
+    if (!bkl_held()) {
+        schedule();
+    }
 
     /* Same signal-delivery hook as the PIT path — fires only when
      * we're returning to ring 3 (signal_check_and_deliver gates on

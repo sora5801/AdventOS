@@ -62,9 +62,20 @@ void post_switch_finalize(void) {
      * path the new context lands in (this trampoline for new tasks,
      * fork_child_return for fork children, the spin_unlock after
      * task_switch for resumed tasks) is responsible for dropping it.
-     * If it's already 0, spin_unlock is a no-op other than restoring
-     * IF — harmless. */
+     *
+     * Session 80: explicit STI after the unlock. schedule() is
+     * typically called from an IRQ handler (LAPIC/PIT timer tick) with
+     * IF=0, so g_sched_lock's saved_eflags captures IF=0, and
+     * spin_unlock alone wouldn't re-enable interrupts. The task we're
+     * launching expects IF=1 (or it'd hang on the first `hlt` /
+     * blocking syscall). The synthesized EFLAGS at task_create
+     * (and synth_fork_child_stack) is now 0x002 (IF=0) so the popfl
+     * in task_switch.S doesn't pre-emptively enable IF in the
+     * lock-still-held window. We STI exactly here, after the lock is
+     * released — closing the previously-racy gap entirely. */
+    SMP_LOG("post_switch_finalize");
     spin_unlock(&g_sched_lock);
+    __asm__ volatile ("sti");
 }
 static inline struct task *cpu_current(void) {
     if (!g_smp_ready) return &g_tasks[0];
@@ -241,7 +252,18 @@ struct task *task_create(task_fn entry, const char *name) {
     *--sp = 0;                                          /* if entry returns -> #PF on 0 */
     *--sp = (uint32_t)(uintptr_t)entry;                 /* trampoline's ret target      */
     *--sp = (uint32_t)(uintptr_t)&task_entry_trampoline;/* task_switch ret target       */
-    *--sp = 0x202;                                      /* EFLAGS: reserved bit + IF=1  */
+    /* Session 80: EFLAGS must have IF=0 here. task_switch.S's `popfl`
+     * runs BEFORE post_switch_finalize gets to release g_sched_lock.
+     * If popfl sets IF=1, a LAPIC timer tick can fire in the ~30-cycle
+     * window between popfl and the cli inside post_switch_finalize ->
+     * SMP_LOG -> kprintf -> spin_lock. That IRQ's handler calls
+     * schedule() -> spin_lock(g_sched_lock) which the same CPU still
+     * holds -> self-deadlock. Adding SMP_LOG to post_switch_finalize
+     * widened this window from ~30 cycles to ~hundreds of microseconds
+     * by introducing a kprintf, which surfaced the bug as a hard hang
+     * on -smp 2. Keep IF=0 through the trampoline; post_switch_finalize
+     * STIs explicitly after releasing the lock. */
+    *--sp = 0x002;                                      /* EFLAGS: reserved bit, IF=0   */
     *--sp = 0;                                          /* EBP                           */
     *--sp = 0;                                          /* EBX                           */
     *--sp = 0;                                          /* ESI                           */
@@ -453,17 +475,52 @@ void schedule(void) {
     }
 
     if (next == prev) {
-        /* Nothing to do — drop lock and return. The popfl in
-         * spin_unlock restores IF if prev had it set at acquire. */
-        SMP_LOG("schedule keep pid=%u (no other runnable)",
-                  (unsigned)prev->id);
+        /* Nothing to do — but FIRST restore prev->state to RUNNING.
+         *
+         * Session 80 SMP correctness bug:
+         *
+         * The demotion `prev->state = READY` above happens before
+         * pick_next_ready scans the runqueue. When pick_next_ready
+         * returns prev (no other ready task and prev is still
+         * pickable_by us), the state has been left at READY. If we
+         * just drop the lock and return, prev is now visible to
+         * EVERY OTHER CPU as a runnable, dispatchable task — even
+         * though we're about to resume executing on its kernel
+         * stack. A peer CPU running schedule() at this moment will
+         * pickup prev, set its state=RUNNING and its cpu=peer, then
+         * task_switch onto prev's kernel stack while we're still on
+         * it. Two CPUs on the same kernel stack -> instant stack
+         * corruption -> crash within microseconds.
+         *
+         * Observed symptom under -smp 2 in session 80: cpu1 dispatches
+         * reaper, cpu1 LAPIC ticks, cpu1 keeps reaper (this branch),
+         * cpu0 LAPIC ticks, cpu0 picks reaper, both CPUs run reaper's
+         * body simultaneously. Hangs / faults shortly after.
+         *
+         * The fix: restore RUNNING + cpu before releasing the lock,
+         * mirroring the pick branch below. The whole transition is
+         * under g_sched_lock so it's atomic from the peer-CPU POV. */
+        prev->state = TASK_STATE_RUNNING;
+        prev->cpu   = (int)cpu->cpu_id;
+        /* No SMP_LOG here — `schedule keep` fires ~100 Hz per CPU and
+         * floods the UART, dominating wall-clock boot time when
+         * SMP_TRACE=1. The pick branch below stays loud since each
+         * actual context switch is interesting. */
         spin_unlock(&g_sched_lock);
         return;
     }
 
-    SMP_LOG("schedule pick pid=%u prev=%u%s",
-              (unsigned)next->id, (unsigned)prev->id,
-              next->is_idle ? " (idle)" : "");
+    /* Print the task NAME alongside the id. Both BSP-kmain (g_tasks[0])
+     * and every AP-idle (task_init_ap_idle, slot >=1) carry id==0, so
+     * the id alone can't tell them apart. The name field disambiguates
+     * cleanly: "kmain" vs "idle0" / "idle1" / ..., plus the user-task
+     * name when a real workload dispatches. */
+    SMP_LOG("schedule pick %s pid=%u %s (prev %s pid=%u)",
+              next->name[0] ? next->name : "?",
+              (unsigned)next->id,
+              next->is_user ? "USER" : "kern",
+              prev->name[0] ? prev->name : "?",
+              (unsigned)prev->id);
     next->state       = TASK_STATE_RUNNING;
     next->cpu         = (int)cpu->cpu_id;
     next->switches_in++;
@@ -568,8 +625,11 @@ const char *task_state_name(int s) {
 static void task_reaper(void) {
     extern void bkl_lock(void);
     extern void bkl_unlock(void);
+    SMP_LOG("reaper entry");
     for (;;) {
+        SMP_LOG("reaper loop top");
         pit_sleep(200);
+        SMP_LOG("reaper post-sleep");
 
         /* Reaper touches paging_destroy_user_pd (alloc/free pages),
          * the FS-resident exit-code field, and the g_tasks ring.
@@ -696,8 +756,12 @@ static uint32_t synth_fork_child_stack(void *stack_base,
     top -= 4; *(uint32_t *)top = (uint32_t)(uintptr_t)&fork_child_return;
 
     /* task_switch's pop sequence: EFLAGS (popfl), then EBP/EBX/ESI/EDI.
-     * EFLAGS = 0x202 → reserved bit set + IF=1, like task_create. */
-    top -= 4; *(uint32_t *)top = 0x202;
+     * Session 80: IF=0 here (NOT 0x202), same reasoning as task_create:
+     * a LAPIC timer firing between popfl and post_switch_finalize's
+     * lock release would self-deadlock schedule()'s g_sched_lock. The
+     * child gets IF=1 from the iret frame's eflags (parent's eflags
+     * with IF=1) AFTER the trampoline STIs and releases the lock. */
+    top -= 4; *(uint32_t *)top = 0x002;
     top -= 4; *(uint32_t *)top = 0;                     /* EBP */
     top -= 4; *(uint32_t *)top = 0;                     /* EBX */
     top -= 4; *(uint32_t *)top = 0;                     /* ESI */

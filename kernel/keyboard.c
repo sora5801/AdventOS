@@ -277,6 +277,20 @@ char keyboard_wait_char(void) {
      * A `pause` instruction tells the CPU we're in a spin loop so it
      * can deprioritize this hyperthread (no-op on single-threaded
      * cores but cheap insurance). */
+    /* Session 80: yield each iteration so we don't pin the BKL while
+     * the shell is idle waiting for input. The original session-68
+     * design (pure spin) was fine under -smp 1 because no other CPU
+     * needed the BKL; under -smp 2 a kernel task on the peer CPU
+     * (reaper, bcache_syncer, an IRQ-driven socket consumer) will
+     * eventually call bkl_lock() and deadlock waiting for us, since
+     * syscall_dispatch holds the BKL across the entire SYS_READ.
+     *
+     * task_yield is bkl-aware: drops BKL across the schedule(), then
+     * reacquires. The schedule() typically returns to us immediately
+     * via the keep-prev branch (no other runnable on this CPU), but
+     * the BKL drop in between is the whole point — it lets the peer
+     * CPU's kernel task acquire it, do its work, release. */
+    extern void task_yield(void);
     for (;;) {
         keyboard_poll_once();
         serial_poll_once();
@@ -286,6 +300,6 @@ char keyboard_wait_char(void) {
             kbd_tail = (kbd_tail + 1) % BUF_SIZE;
             return c;
         }
-        __asm__ volatile ("pause");
+        task_yield();
     }
 }
