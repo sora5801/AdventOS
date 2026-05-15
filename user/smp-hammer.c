@@ -63,16 +63,30 @@ static int one_time_request(void) {
     return got;
 }
 
-/* Print per-CPU tick counts. A frozen CPU's count won't advance
- * between two consecutive reads — that's the deadlocked core. */
+/* Print per-CPU tick + dispatch counts. A frozen CPU's dispatch
+ * count won't advance between two consecutive reads — that's the
+ * deadlocked core.
+ *
+ * Kernel SYS_SMP_STATS layout (see kernel/syscall.c):
+ *   out[0..3] = LAPIC-timer tick count per CPU
+ *   out[4..7] = non-idle dispatch count per CPU
+ *   return value = nr_cpus
+ *
+ * Note: the BSP (cpu 0) is PIT-driven, so out[0] stays 0 even on a
+ * healthy system. Dispatch counts (out[4..7]) are the meaningful
+ * "is this CPU still scheduling work" signal across the board. */
 static void dump_smp_stats(const char *label) {
     unsigned int out[8] = {0};
-    sys_smp_stats(out);
-    int n = (int)out[0];
-    if (n > 7) n = 7;
-    printf("[smp-stats %s] nr_cpus=%d ticks=", label, n);
+    int n = sys_smp_stats(out);
+    if (n < 0) n = 0;
+    if (n > 4) n = 4;
+    printf("[smp-stats %s] nr_cpus=%d lapic_ticks=", label, n);
     for (int i = 0; i < n; i++) {
-        printf("%u%s", out[1 + i], i + 1 < n ? "," : "");
+        printf("%u%s", out[i], i + 1 < n ? "," : "");
+    }
+    printf(" dispatch=");
+    for (int i = 0; i < n; i++) {
+        printf("%u%s", out[i + 4], i + 1 < n ? "," : "");
     }
     printf("\n");
 }
