@@ -42,9 +42,20 @@
  * so the full 192 KiB pre-FS region gets loaded into RAM. Keep this
  * value in lockstep with build.sh::fs_lba. */
 #define FS_DISK_OFFSET_SECTORS  384u
-#define FS_SUPER_SECTORS        5u    /* superblock = 1 header + 4 entry sectors */
+/* Session 73 followup: bumped FS_MAX_FILES from 64 to 128.  KV usage
+ * + sshd's runtime host key + the two boot-time /var, /var/kv mkdirs
+ * pushed the post-boot file_count to ~61 on a fresh image, leaving
+ * only ~3 slots for KV churn — kvctl put failed after one or two
+ * pairs of (mkdir ns + write key) operations.
+ *
+ * 128 entries × 32 bytes = 4096 bytes of entry table. Plus the
+ * 512-byte header sector, total 4608 bytes — needs 9 sectors, so
+ * FS_SUPER_SECTORS also bumped 5 → 9 (with one byte of slack).
+ * On-disk layout shifts; old fs.img files are incompatible. Keep
+ * this in lockstep with mkfs.py's FS_MAX_FILES / FS_SUPER_SECTORS. */
+#define FS_SUPER_SECTORS        9u
 #define FS_NAME_MAX             16
-#define FS_MAX_FILES            64    /* bumped from 32 in session 29 (network apps) */
+#define FS_MAX_FILES            128
 #define FS_ENTRY_SIZE           32
 #define FS_MAGIC                "ADVENTFS"
 

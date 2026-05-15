@@ -15,6 +15,9 @@ CFLAGS=(
     -fno-builtin -fno-common -fno-omit-frame-pointer
     -mno-mmx -mno-sse -mno-sse2 -mno-sse3 -mno-3dnow -mno-avx
     -mgeneral-regs-only
+    -mno-stack-arg-probe          # don't emit __chkstk_ms for big stack frames
+                                  # (e.g. the 4.5 KiB superblock buffer in
+                                  # fs_write_super_inst after FS_MAX_FILES=128)
     -nostdlib -nostartfiles
     -O2 -std=gnu11
     -Wall -Wextra -Wno-unused-parameter
