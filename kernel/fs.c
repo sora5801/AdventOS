@@ -46,7 +46,15 @@
  * Session 51 bump 2048 → 4096: the SSH-2 server is 238 KB and the
  * client is 197 KB on top of the existing TLS programs; together they
  * pushed mkfs's allocator past sector 2225. 4 KB-page-sized bitmap. */
-#define FS_BITMAP_BYTES_MAX  ((4096 + 7) / 8)   /* room for 4096-sector disks */
+/* Session 74 followup: bumped 4096 -> 8192. mkfs.py's file placement
+ * had crept past sector 4146 (agent.tools.json's 24-sector blob plus
+ * the kvctl/agentctl additions saturated the old cap), so every slot
+ * in 9..4095 was marked in-use by mkfs files placed past the bitmap's
+ * tracked range. bitmap_alloc_run then returned -1 for every new write,
+ * including sshd's first-boot /etc/ssh_host_key creation. 8192 sectors
+ * = 1 KiB bitmap per instance (4 instances → 4 KiB BSS), and gives
+ * ~4 KiB sectors of headroom over the current FS footprint. */
+#define FS_BITMAP_BYTES_MAX  ((8192 + 7) / 8)   /* room for 8192-sector disks */
 
 struct fs_instance {
     int             in_use;
@@ -161,7 +169,7 @@ struct fs_instance *fs_create_instance(struct blkdev *bdev,
 {
     struct fs_instance *inst = alloc_instance();
     if (!inst) return 0;
-    if (n_sectors > 4096) n_sectors = 4096;     /* bitmap cap (session 51) */
+    if (n_sectors > 8192) n_sectors = 8192;     /* bitmap cap (session 74) */
 
     inst->in_use      = 1;
     inst->initialized = 0;
@@ -188,10 +196,16 @@ struct fs_instance *fs_root_instance(void) { return g_root_inst; }
 void fs_init(void) {
     /* Boot fs: backed by bcache+ata. base_lba = FS_DISK_OFFSET_SECTORS.
      * Session 46 bump 1024 → 2048 sectors — added vi.elf to mkfs.py.
-     * Session 51 bump 2048 → 4096 — sshd.elf + ssh.elf pushed past it. */
+     * Session 51 bump 2048 → 4096 — sshd.elf + ssh.elf pushed past it.
+     * Session 74 bump 4096 → 8192 — agentd.elf grew to ~220 KiB after
+     *   the background-jobs work, agent.tools.json doubled to 12 KiB
+     *   covering the 9 new tools, and agentctl.elf was added. The
+     *   tail of mkfs.py's contiguous file placement reached sector
+     *   4162; with the old 4096 cap, every bitmap-tracked sector was
+     *   marked in-use and new file writes (sshd's host key) failed. */
     g_root_inst = fs_create_instance(/*bdev=*/0,
                                      FS_DISK_OFFSET_SECTORS,
-                                     /*n_sectors=*/4096);
+                                     /*n_sectors=*/8192);
 }
 
 static int fs_write_super_inst(struct fs_instance *inst) {
