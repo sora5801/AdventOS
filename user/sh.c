@@ -66,9 +66,14 @@ static int  g_hist_count;
 
 /* ---- helpers ------------------------------------------------------- */
 
-/* Tokenize on whitespace AND on `|`/`>`/`&` — the operator characters
+/* Tokenize on whitespace AND on `|`/`|>`/`>`/`&` — the operators
  * become standalone tokens. Writes NULs over separators in `line` and
  * fills tokens[]. Returns token count. Stops at `cap-1` tokens.
+ *
+ * `|>` (session 81): the structured-pipeline operator. Same wiring
+ * as `|` but tells parse_pipeline to flag the pipeline as JSONL
+ * mode, which run_pipeline then materialises by injecting an
+ * `--advjson` argv element into every stage before exec.
  *
  * Example: "echo hi | cat > foo &" →
  *          ["echo","hi","|","cat",">","foo","&"]. */
@@ -79,6 +84,13 @@ static int tokenize(char *line, char **tokens, int cap) {
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
 
+        /* Two-char `|>` must be detected BEFORE single-char `|`. */
+        if (*p == '|' && *(p+1) == '>') {
+            *p = 0; *(p+1) = 0; p += 2;
+            static char pipe_gt_tok[3] = {'|', '>', 0};
+            tokens[n++] = pipe_gt_tok;
+            continue;
+        }
         if (*p == '|' || *p == '>' || *p == '&') {
             char saved = *p;
             *p++ = 0;
@@ -286,6 +298,10 @@ struct pipeline {
     int          nstages;
     const char  *outfile;       /* > target, or NULL  */
     int          bg;            /* `&` suffix — don't wait */
+    int          advjson;       /* session 81: any `|>` token in the
+                                 * pipeline flips this — run_pipeline
+                                 * then injects --advjson into every
+                                 * stage's argv before exec. */
 };
 
 /* Walk tokens[] and split into stages by `|`. A trailing `>` <name>
@@ -297,6 +313,7 @@ static int parse_pipeline(char **tokens, int ntok, struct pipeline *pl) {
     pl->nstages = 0;
     pl->outfile = 0;
     pl->bg      = 0;
+    pl->advjson = 0;
 
     /* Strip a trailing `&` — it must be the very last token. */
     if (ntok > 0 && tokens[ntok - 1][0] == '&' && tokens[ntok - 1][1] == 0) {
@@ -307,9 +324,16 @@ static int parse_pipeline(char **tokens, int ntok, struct pipeline *pl) {
     int start = 0;
     for (int j = 0; j < ntok; j++) {
         char *t = tokens[j];
-        if (t[0] == '|' && t[1] == 0) {
+        /* Session 81: `|>` is the structured-pipeline operator. Acts
+         * like `|` for splitting stages but flags the pipeline. ANY
+         * `|>` in the pipeline upgrades the entire chain to JSONL
+         * mode — mixing | and |> in one command line still produces
+         * a JSONL pipeline. (The simpler-to-reason-about model.) */
+        if ((t[0] == '|' && t[1] == 0) ||
+            (t[0] == '|' && t[1] == '>' && t[2] == 0)) {
             if (pl->nstages >= PIPELINE_MAX) return -1;
             if (j == start)                  return -1;   /* empty LHS */
+            if (t[1] == '>') pl->advjson = 1;
             pl->stages[pl->nstages].argv = &tokens[start];
             pl->stages[pl->nstages].argc = j - start;
             tokens[j] = 0;                                 /* terminate slice */
@@ -416,7 +440,30 @@ static int run_pipeline(struct pipeline *pl) {
             if (outfd >= 0) sys_close(outfd);
 
             const char *path = resolve_program(pl->stages[i].argv[0]);
-            sys_exec(path, (const char *const *)pl->stages[i].argv);
+            /* Session 81: inject --advjson as an extra trailing
+             * argv element for every stage of a structured pipeline.
+             * Tools that recognise it switch to JSONL mode on stdout
+             * (always emit records) and stdin (always parse records).
+             * Tools that don't recognise it ignore the flag silently
+             * — most utilities pass unknown args through as filenames,
+             * which is harmless mid-pipeline where stdin is the data
+             * source. tr is the one tool that hard-errors on JSONL
+             * input because it would corrupt the records; see docs/69. */
+            if (pl->advjson) {
+                int argc = pl->stages[i].argc;
+                static const char *adv_argv[64];
+                if (argc + 2 > 64) {
+                    sys_write(2, "sh: stage argv too long for |> injection\n", 41);
+                    sys_exit(127);
+                }
+                for (int k = 0; k < argc; k++)
+                    adv_argv[k] = pl->stages[i].argv[k];
+                adv_argv[argc]     = "--advjson";
+                adv_argv[argc + 1] = 0;
+                sys_exec(path, (const char *const *)adv_argv);
+            } else {
+                sys_exec(path, (const char *const *)pl->stages[i].argv);
+            }
             sys_write(2, "sh: exec failed: ", 17);
             sys_write(2, path, (int)strlen(path));
             sys_write(2, "\n", 1);
@@ -909,7 +956,12 @@ static void execute_line(char *line_in) {
 
     int has_pipe_op = 0;
     for (int i = 0; i < ntok; i++) {
-        if ((toks[i][0] == '|' || toks[i][0] == '>') && toks[i][1] == 0) {
+        /* Match single-char `|` / `>` AND the session-81 two-char `|>`
+         * token. Without the `|>` case, builtins like `ls` would
+         * inline-handle the command and silently swallow the JSONL
+         * pipeline mode. */
+        if (((toks[i][0] == '|' || toks[i][0] == '>') && toks[i][1] == 0) ||
+            ( toks[i][0] == '|' && toks[i][1] == '>' && toks[i][2] == 0)) {
             has_pipe_op = 1; break;
         }
     }

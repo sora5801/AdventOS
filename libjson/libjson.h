@@ -169,4 +169,56 @@ long        json_to_int_or (const struct json_v *v, long fallback);
 int         json_to_bool   (const struct json_v *v);
 const char *json_to_str    (const struct json_v *v, int *out_len);
 
+
+/* ============================================================
+ * JSONL streaming helpers (session 81)
+ * ============================================================
+ *
+ * Newline-delimited JSON. One self-contained JSON object per line,
+ * no array wrapper, no batching. Producer flushes each line as a
+ * single write so consumers can process records as they arrive.
+ *
+ * Usage on the producer side:
+ *
+ *     char buf[1024];
+ *     struct json_w w;
+ *     json_w_init(&w, buf, sizeof(buf));
+ *     json_obj_begin(&w);
+ *       json_key(&w, "name"); json_str(&w, "passwd");
+ *       json_key(&w, "size"); json_int(&w, 191);
+ *     json_obj_end(&w);
+ *     json_emit_line(&w, 1);   // writes "{...}\n" to fd 1
+ *     // can immediately reuse buf for the next record
+ *
+ * Usage on the consumer side:
+ *
+ *     char line[1024];
+ *     char scratch[2048];
+ *     int n;
+ *     while ((n = jsonl_read_line(0, line, sizeof(line))) > 0) {
+ *         struct json_v *r = json_parse(line, n, scratch, sizeof(scratch));
+ *         if (!r) continue;             // skip malformed
+ *         const struct json_v *name = json_obj_get(r, "name");
+ *         ...
+ *     }
+ */
+
+/* Flush the encoder's accumulated bytes plus a single '\n' to `fd`,
+ * then reset the encoder so the next record can reuse the same buf.
+ * Returns total bytes written including the newline, or -1 on error
+ * (write failure or encoder truncation). */
+int json_emit_line(struct json_w *w, int fd);
+
+/* Read up to one full line ('\n'-terminated) into buf. The newline
+ * is NOT included in the returned length, and buf is NUL-terminated
+ * at the returned length. Returns:
+ *   >0  bytes read (line length without newline)
+ *    0  EOF before any byte
+ *   -1  buffer too small (line longer than cap-1) or read error
+ *
+ * Uses a tiny one-byte sys_read loop — fine for the line cadence
+ * agent pipelines actually hit (hundreds per second tops), and
+ * avoids the need for a userspace pushback buffer. */
+int jsonl_read_line(int fd, char *buf, int cap);
+
 #endif /* ADVENT_LIBJSON_H */

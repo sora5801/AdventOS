@@ -192,10 +192,29 @@ static void print_json(const struct proc_row *rows, int n) {
     }
 }
 
+/* Session 81: JSONL emitter — one record per process, streamed line
+ * by line. Distinct from --json (which wraps in {processes:[...]}). */
+static void print_jsonl(const struct proc_row *rows, int n) {
+    char buf[256];
+    struct json_w w;
+    for (int i = 0; i < n; i++) {
+        json_w_init(&w, buf, sizeof(buf));
+        json_obj_begin(&w);
+          json_key(&w, "pid");   json_int(&w, rows[i].pid);
+          json_key(&w, "name");  json_str(&w, rows[i].name);
+          json_key(&w, "state"); json_str(&w, rows[i].state);
+        json_obj_end(&w);
+        if (!json_w_ok(&w)) continue;
+        json_emit_line(&w, 1);
+    }
+}
+
 int main(int argc, char **argv) {
     int json_mode = 0;
+    int advjson   = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--json") == 0) json_mode = 1;
+        if      (strcmp(argv[i], "--json")    == 0) json_mode = 1;
+        else if (strcmp(argv[i], "--advjson") == 0) advjson = 1;
         else {
             sys_write(2, "ps: unknown flag\n", 17);
             return 2;
@@ -204,7 +223,8 @@ int main(int argc, char **argv) {
 
     static struct proc_row rows[MAX_ROWS];
     int n = gather(rows, MAX_ROWS);
-    if (json_mode) print_json(rows, n);
-    else           print_human(rows, n);
+    if      (advjson)   print_jsonl(rows, n);
+    else if (json_mode) print_json (rows, n);
+    else                print_human(rows, n);
     return 0;
 }

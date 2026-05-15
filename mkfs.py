@@ -135,6 +135,9 @@ USER_PROGRAMS = [
     ('job-selftest.elf', 'user/_obj/jobs-selftest.bin',      None),
     ('sub-selftest.elf', 'user/_obj/subscribe-selftest.bin', None),
     ('crn-selftest.elf', 'user/_obj/cron-selftest.bin',      None),
+    # Session 81: structured-pipeline selftest. Verifies |>, --advjson,
+    # pluck/where/count, shell.run, AND bare-| backwards compat.
+    ('pip-selftest.elf', 'user/_obj/pipeline-selftest.bin',  None),
     ('selftest.elf',     'user/_obj/selftest.bin',           None),
     # Session 78: sleep utility (needed by jobs/cron selftests for
     # bounded-but-not-instant child lifetimes).
@@ -143,6 +146,11 @@ USER_PROGRAMS = [
     # hang. Fires N back-to-back `time` JSON-RPC requests; prints
     # DEADLOCK-OBSERVED + per-CPU tick counts on stall.
     ('smp-hammer.elf',   'user/_obj/smp-hammer.bin',         None),
+    # Session 81: structured-pipeline tools. pluck projects named
+    # fields from each JSONL record; where filters by predicate;
+    # count emits a single {count: N} record. See docs/69.
+    ('pluck.elf',        'user/_obj/pluck.bin',              None),
+    ('where.elf',        'user/_obj/where.bin',              None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

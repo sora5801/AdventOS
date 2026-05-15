@@ -176,6 +176,17 @@
       }
     },
     {
+      "name": "shell.run",
+      "description": "Run a shell pipeline with structured-output mode forced on, capture its stdout as JSONL, and return the records as a JSON array. The intended caller is an agent that wants `give me a list of files / processes / etc. as records` without dealing with shell quoting or output parsing. The cmd is passed verbatim to /sh.elf -c, so the caller can use the |> structured-pipeline operator (see docs/69-structured-pipelines.md) anywhere in the pipeline. Lines on stdout that fail to parse as JSON objects are dropped silently; the result is a clean array. Output is capped at 64 KiB and ~256 records — pipelines that would exceed those caps are truncated mid-stream.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cmd": {"type": "string", "description": "Shell command line. Typically a |> pipeline. Example: \"ls /etc |> where name=passwd\"."}
+        },
+        "required": ["cmd"]
+      }
+    },
+    {
       "name": "shell.exec_background",
       "description": "Spawn a child the same way shell.exec does, but return immediately with {job_id, pid}. The child's stdout/stderr stream into per-job 4 KiB ring buffers; agents pull via shell.job.read OR get pushed bytes via shell.job.subscribe + notifications/job.output. Optional `policy` + `limits` work identically to shell.exec_sandboxed. Up to 8 jobs may be RUNNING at once; older EXIT slots are recycled when the table fills.",
       "inputSchema": {

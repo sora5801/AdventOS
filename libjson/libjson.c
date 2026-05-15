@@ -599,3 +599,66 @@ const char *json_to_str(const struct json_v *v, int *out_len) {
     if (out_len) *out_len = v->str_len;
     return v->str;
 }
+
+
+/* ============================================================
+ * JSONL streaming helpers (session 81)
+ * ============================================================ */
+
+/* libuser provides these; libjson is statically linked into user
+ * programs so the symbols resolve at link time. Declared here rather
+ * than via libuser.h so libjson keeps zero header dependencies. */
+extern int sys_read (int fd, void *buf, int n);
+extern int sys_write(int fd, const void *buf, int n);
+
+int json_emit_line(struct json_w *w, int fd) {
+    if (!w || !w->ok)        return -1;
+    int n = w->len;
+    /* Flush the buffered object. */
+    int written = 0;
+    while (written < n) {
+        int r = sys_write(fd, w->buf + written, n - written);
+        if (r <= 0) return -1;
+        written += r;
+    }
+    /* Append the newline as its own (tiny) write — we never trust
+     * a single sys_write to definitely take the whole payload, but
+     * for one byte it's a fair assumption. */
+    char nl = '\n';
+    if (sys_write(fd, &nl, 1) != 1) return -1;
+    /* Reset the encoder so the next record reuses the same buf. */
+    w->len          = 0;
+    w->ok           = 1;
+    w->depth        = 0;
+    w->expect_value = 0;
+    for (int i = 0; i < JSON_W_MAX_DEPTH; i++) w->first[i] = 0;
+    return n + 1;
+}
+
+int jsonl_read_line(int fd, char *buf, int cap) {
+    if (cap <= 1) return -1;
+    int len = 0;
+    for (;;) {
+        char c;
+        int r = sys_read(fd, &c, 1);
+        if (r < 0)         return -1;
+        if (r == 0) {
+            /* EOF. If we got partial bytes, treat them as a final
+             * (unterminated) record. If nothing at all, return 0. */
+            if (len == 0) return 0;
+            buf[len] = 0;
+            return len;
+        }
+        if (c == '\n') {
+            buf[len] = 0;
+            return len;
+        }
+        if (len + 1 >= cap) {
+            /* Line too long. Drain rest of the line so the next call
+             * starts on a fresh record, then return -1. */
+            while (sys_read(fd, &c, 1) == 1 && c != '\n') { }
+            return -1;
+        }
+        buf[len++] = c;
+    }
+}

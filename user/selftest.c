@@ -40,6 +40,10 @@ static const struct test g_tests[] = {
     { "jobs-selftest",      "/job-selftest.elf", 0     },
     { "subscribe-selftest", "/sub-selftest.elf", 0     },
     { "cron-selftest",      "/crn-selftest.elf", 0     },
+    /* Session 81: structured-pipeline selftest. Exercises |>,
+     * --advjson, pluck/where/count, sort-by-field, shell.run, AND
+     * backwards-compat with bare |. See docs/69. */
+    { "pipeline-selftest",  "/pip-selftest.elf", 0     },
     /* Session 80: smp-hammer fires 200 back-to-back TCP loopback
      * requests at agentd, hammering the scheduler/BKL/net_lock
      * discipline. Under -smp 1 it's a low-stress sanity run that

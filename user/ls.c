@@ -120,13 +120,63 @@ static int emit_json(const char *path) {
     return 0;
 }
 
+/* Session 81: JSONL emitter — one record per entry, each a self-
+ * contained `{"name":..., "type":..., "size":..., "perm":..., ...}`
+ * line. Used by `|>` pipelines. Distinct from --json (the legacy
+ * mode that wraps everything in a single {path, entries[...]}
+ * object) because line-oriented JSONL streams through tools like
+ * pluck/where/count without buffering. */
+static int emit_jsonl(const char *path) {
+    int  iter = 0;
+    char name[17];
+    for (;;) {
+        for (int i = 0; i < 17; i++) name[i] = 0;
+        int idx = sys_readdir(path, &iter, name);
+        if (idx < 0) break;
+
+        char full[80];
+        int  mode = -1, owner = -1, size = -1;
+        if (join_path(path, name, full, sizeof(full)) == 0) {
+            mode  = sys_fs_mode(full);
+            owner = sys_fs_owner(full);
+            size  = sys_fs_size(full);
+        }
+
+        char buf[256];
+        struct json_w w;
+        json_w_init(&w, buf, sizeof(buf));
+        json_obj_begin(&w);
+          json_key(&w, "name"); json_str(&w, name);
+          /* `type`: FILE / DIR. sys_fs_size returns -1 for dirs;
+           * we treat that as the directory marker. (mode's high
+           * bits could carry the type if the FS exposed it, but
+           * AdventFS's mode is permission bits only today.) */
+          json_key(&w, "type"); json_str(&w, size < 0 ? "DIR" : "FILE");
+          json_key(&w, "size"); json_int(&w, size < 0 ? 0 : size);
+          if (mode >= 0)  { json_key(&w, "perm"); json_int(&w, mode & 0777); }
+          if (owner >= 0) {
+              json_key(&w, "uid"); json_int(&w, (owner >> 16) & 0xFFFF);
+              json_key(&w, "gid"); json_int(&w, owner & 0xFFFF);
+          }
+        json_obj_end(&w);
+        if (!json_w_ok(&w)) {
+            sys_write(2, "ls: JSONL record overflow\n", 26);
+            return 1;
+        }
+        if (json_emit_line(&w, 1) < 0) return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    int json_mode = 0;
+    int json_mode = 0;      /* legacy single-object --json */
+    int advjson   = 0;      /* session 81: JSONL stream */
     const char *path = ".";
     char  cwd_buf[128];
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--json") == 0) json_mode = 1;
+        if (strcmp(argv[i], "--json")    == 0) json_mode = 1;
+        else if (strcmp(argv[i], "--advjson") == 0) advjson = 1;
         else path = argv[i];
     }
 
@@ -138,5 +188,7 @@ int main(int argc, char **argv) {
         path = cwd_buf;
     }
 
-    return json_mode ? emit_json(path) : emit_human(path);
+    if (advjson)   return emit_jsonl(path);
+    if (json_mode) return emit_json(path);
+    return emit_human(path);
 }

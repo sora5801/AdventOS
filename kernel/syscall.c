@@ -160,6 +160,7 @@ const char *syscall_name(unsigned num) {
         case SYS_SETGID:          return "SYS_SETGID";
         case SYS_FS_OWNER:        return "SYS_FS_OWNER";
         case SYS_FS_MODE:         return "SYS_FS_MODE";
+        case SYS_FS_SIZE:         return "SYS_FS_SIZE";
         case SYS_CHMOD:           return "SYS_CHMOD";
         case SYS_CHOWN:           return "SYS_CHOWN";
         case SYS_OPENPTY:         return "SYS_OPENPTY";
@@ -1128,6 +1129,18 @@ void syscall_dispatch(struct registers *r) {
             int idx = fs_open(path);
             if (idx < 0) { ret = -1; break; }
             ret = fs_entry_mode(idx);
+            break;
+        }
+        case SYS_FS_SIZE: {
+            /* Session 81: byte count of a regular file. Used by ls's
+             * JSONL mode to populate the `size` field. Returns -1 for
+             * directories and non-existent paths. fs_size already
+             * exists in fs.c — we just expose it via syscall. */
+            const char *path = (const char *)(uintptr_t)a;
+            if (!path) { ret = -1; break; }
+            int idx = fs_open(path);
+            if (idx < 0) { ret = -1; break; }
+            ret = (int)fs_size(idx);
             break;
         }
         case SYS_CHMOD: {

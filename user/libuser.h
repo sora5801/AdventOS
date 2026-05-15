@@ -117,6 +117,7 @@ typedef unsigned int   size_t;
 #define SYS_SANDBOX_INSTALL 82
 #define SYS_SETLIMIT       83
 #define SYS_UNLINK         84
+#define SYS_FS_SIZE        85    /* session 81: file size in bytes */
 
 /* Session 70: syscall sandbox.
  *
@@ -371,6 +372,9 @@ int      sys_fs_owner(const char *path);
 
 /* Permission bits — low 9 bits = rwxrwxrwx. -1 if missing. */
 int      sys_fs_mode (const char *path);
+/* Session 81: byte count of a regular file (for ls's JSONL mode).
+ * Returns -1 for directories and missing paths. */
+int      sys_fs_size (const char *path);
 
 /* Change mode / owner of a disk file (session 48). chmod requires
  * the caller be the file's owner or root; chown requires root.

@@ -132,12 +132,15 @@ echo "[5/7] build user programs"
 
 # Basic programs — no libjson, no libcrypto. The smallest binaries.
 # Session 78 additions: sleep (for cancel tests), selftest (meta runner).
-USER_PROGS=(hello count sh echo httpd ed init
-            head tail grep sort uniq tee tr seq kill pwd
+USER_PROGS=(hello sh echo httpd ed init
+            head tail grep uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
             smp-hammer)
+# Session 81 note: `count`, `pluck`, `where`, `sort` moved to
+# JSON_PROGS below because they're JSONL-aware producers/consumers
+# and need libjson linked.
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -158,7 +161,8 @@ done
 
 # Session 64: programs with a --json mode or built directly on libjson
 # (the agent RPC daemon). Link libjson.o in addition to libuser.
-JSON_PROGS=(ls cat wc date ps agentd)
+# Session 81: pluck, where, count, sort are JSONL-aware too.
+JSON_PROGS=(ls cat wc date ps agentd pluck where count sort)
 for name in "${JSON_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -178,12 +182,17 @@ done
 # them in turn.
 # Session 79: meta-runner moved here too because it now links libagent
 # (for the inter-test state-summary print + future drain helpers).
-AGENT_PROGS=(jobs-selftest subscribe-selftest cron-selftest selftest)
+AGENT_PROGS=(jobs-selftest subscribe-selftest cron-selftest selftest pipeline-selftest)
 for name in "${AGENT_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
+    # Session 81: pipeline-selftest uses libjson for parsing the
+    # JSONL output of its sub-shell calls. Link libjson alongside
+    # libagent — harmless for the other agent selftests (linker
+    # discards unreferenced symbols).
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" \
-        user/_obj/libuser.o user/_obj/libagent.o
+        user/_obj/libuser.o user/_obj/libagent.o \
+        "${LIBJSON_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
@@ -230,12 +239,15 @@ AGENTD_MANIFEST_MAX=24576     # MANIFEST_MAX in user/agentd.c (session 77 bump f
 # Cap at 320 KiB for ~16% headroom. A runaway here is usually a
 # JOB_MAX / MAX_CONN / MAX_CRON_ENTRIES bump or a giant new global
 # — fix the constant before bumping this.
-AGENTD_BIN_MAX=393216        # 384 KiB cap on user/_obj/agentd.bin
+AGENTD_BIN_MAX=491520        # 480 KiB cap on user/_obj/agentd.bin
                              # (session 79 bump 320 -> 384 — moved
                              #  load_tools_manifest's raw[24K] +
                              #  scratch[32K] from stack to .bss to
                              #  avoid a 57 KiB stack frame that was
                              #  intermittently overflowing.)
+                             # (session 81 bump 384 -> 480 — shell.run
+                             #  added a 64 KiB stdout-capture buffer
+                             #  for JSONL pipelines per docs/69's spec.)
 
 kernel_size=$(stat -c%s kernel/kernel.bin)
 on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS

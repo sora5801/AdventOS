@@ -247,6 +247,12 @@ struct sys_limits {
                                 * Refuses to unlink a file that any
                                 * task currently has open. */
 
+/* ---- Session 81: filesystem entry size for structured-pipeline ls ---- */
+#define SYS_FS_SIZE       85   /* (eax=85, ebx=const char *path) -> size in
+                                * bytes, or -1 if the file doesn't exist /
+                                * isn't a regular file. Used by ls's JSONL
+                                * mode to emit a `size` field per entry. */
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

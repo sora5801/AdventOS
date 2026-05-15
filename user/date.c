@@ -89,14 +89,46 @@ static int format_civil(const struct civil *c, char sep, const char *tail,
     return o;
 }
 
+/* Session 81: JSONL emitter. date emits a single record per
+ * invocation — there's only one current time. The pipeline-spec
+ * schema is {iso, unix, year, month, day, hour, min, sec, tz}. */
+static int emit_jsonl(uint32_t t, const struct civil *c) {
+    char iso[24];
+    int  iso_n = format_civil(c, 'T', "Z", iso, sizeof(iso));
+    char buf[256];
+    struct json_w w;
+    json_w_init(&w, buf, sizeof(buf));
+    json_obj_begin(&w);
+      json_key(&w, "iso");   json_str_n(&w, iso, iso_n);
+      json_key(&w, "unix");  json_uint(&w, t);
+      json_key(&w, "year");  json_int(&w, c->year);
+      json_key(&w, "month"); json_int(&w, c->mon + 1);
+      json_key(&w, "day");   json_int(&w, c->dom);
+      json_key(&w, "hour");  json_int(&w, c->hh);
+      json_key(&w, "min");   json_int(&w, c->mm);
+      json_key(&w, "sec");   json_int(&w, c->ss);
+      json_key(&w, "tz");    json_str(&w, "UTC");
+    json_obj_end(&w);
+    if (!json_w_ok(&w)) {
+        sys_write(2, "date: JSONL overflow\n", 21);
+        return 1;
+    }
+    json_emit_line(&w, 1);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int json_mode = 0;
+    int advjson   = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--json") == 0) json_mode = 1;
+        if      (strcmp(argv[i], "--json")    == 0) json_mode = 1;
+        else if (strcmp(argv[i], "--advjson") == 0) advjson = 1;
     }
 
     uint32_t t = sys_time();
     struct civil c = break_down(t);
+
+    if (advjson) return emit_jsonl(t, &c);
 
     if (json_mode) {
         char iso[24], utc[32];

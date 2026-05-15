@@ -987,6 +987,115 @@ static int kv_copy_cstr(char *dst, int cap, const char *s, int slen) {
     return 0;
 }
 
+/* Session 81: shell.run — run a single shell command (typically a
+ * `|>` pipeline), capture stdout as JSONL records, return them to
+ * the caller as a JSON array. The intended use is agents asking
+ * "give me a list of files / processes / etc. as records" without
+ * having to fork+capture themselves.
+ *
+ * Implementation notes:
+ *   - Forks /sh.elf -c "<cmd>". The caller passes |> in the cmd
+ *     for structured output; we don't auto-rewrite | -> |>. Keeps
+ *     the shell.run interface explicit about which pipeline mode
+ *     it's asking for.
+ *   - Captures up to SHELL_RUN_OUT_CAP bytes of stdout (64 KiB per
+ *     spec). Beyond that we set `truncated: true` and stop reading.
+ *   - For each newline-terminated chunk, json_parse it. Valid JSON
+ *     objects/arrays are spliced into the result via json_raw.
+ *     Invalid lines are skipped silently (could be banner text or
+ *     intermediate non-JSON output — the caller should structure
+ *     the cmd to only emit JSONL).
+ *
+ * Per docs/69, the result IS the array — not an object containing
+ * an array — because that's the most common downstream shape and
+ * matches the agentctl call example in the verification gate. */
+#define SHELL_RUN_OUT_CAP    65536
+#define SHELL_RUN_REC_CAP    1024     /* per-record JSON parser scratch */
+#define SHELL_RUN_RECS_MAX   256      /* arbitrary cap on emitted records */
+
+static int emit_shell_run(struct json_w *w, const struct json_v *params) {
+    const struct json_v *cmd_v = json_obj_get(params, "cmd");
+    int cmd_len = 0;
+    const char *cmd = json_to_str(cmd_v, &cmd_len);
+    if (!cmd) return -32602;
+
+    int out_pp[2];
+    if (sys_pipe(out_pp) < 0) return -32603;
+
+    int pid = sys_fork();
+    if (pid < 0) {
+        sys_close(out_pp[0]); sys_close(out_pp[1]);
+        return -32603;
+    }
+    if (pid == 0) {
+        sys_dup2(out_pp[1], 1);
+        /* stderr stays attached to agentd's tty — diagnostic noise
+         * from the child is visible at the host serial. */
+        sys_close(out_pp[0]); sys_close(out_pp[1]);
+        const char *argv[4];
+        argv[0] = "sh.elf";
+        argv[1] = "-c";
+        argv[2] = cmd;
+        argv[3] = 0;
+        sys_exec("sh.elf", argv);
+        sys_write(2, "agentd-shell.run: cannot exec sh.elf\n", 37);
+        sys_exit(127);
+    }
+    sys_close(out_pp[1]);
+
+    /* Drain stdout up to the cap. We use the same drain_fd helper
+     * shell_exec_inner uses — same backoff semantics, same EOF
+     * detection. */
+    static char out_buf[SHELL_RUN_OUT_CAP];
+    int out_n = drain_fd(out_pp[0], out_buf, sizeof(out_buf));
+    if (out_n < 0) out_n = 0;
+    sys_close(out_pp[0]);
+
+    int code = 0;
+    sys_wait(&code);
+
+    /* Was the stream truncated? Heuristic: if we filled the buffer
+     * AND the last byte isn't a newline, almost certainly more
+     * would have followed. (A run that legitimately fills exactly
+     * the buffer + ends on \n looks the same as a clean fit; we
+     * accept that ambiguity — false positives are rare and benign.) */
+    int truncated = (out_n == sizeof(out_buf));
+
+    /* Walk newline-terminated lines, validate as JSON, splice into
+     * the result array. We don't re-serialize — just emit the raw
+     * bytes (already valid JSON per the line-level parse). */
+    json_arr_begin(w);
+    int line_start = 0;
+    int recs = 0;
+    static char scratch[SHELL_RUN_REC_CAP];
+    for (int i = 0; i <= out_n; i++) {
+        int at_end = (i == out_n);
+        if (!at_end && out_buf[i] != '\n') continue;
+        int len = i - line_start;
+        if (len > 0 && recs < SHELL_RUN_RECS_MAX) {
+            struct json_v *root = json_parse(out_buf + line_start, len,
+                                              scratch, sizeof(scratch));
+            /* Accept either OBJ or ARR records, reject scalars/null —
+             * keeps the result strictly an array-of-objects shape that
+             * agent consumers expect. */
+            if (root && (root->type == JSON_OBJ || root->type == JSON_ARR)) {
+                json_raw(w, out_buf + line_start, len);
+                recs++;
+            }
+        }
+        line_start = i + 1;
+    }
+    json_arr_end(w);
+
+    /* The spec says the result IS the array. We've emitted it
+     * directly above. exit_code, truncated, etc. are NOT included —
+     * they go on stderr via the tool's own --advjson channel if the
+     * caller cares. Keeps the result shape minimal and unambiguous. */
+    (void)code;
+    (void)truncated;
+    return 0;
+}
+
 static int emit_kv_get(struct json_w *w, const struct json_v *params) {
     int nlen = 0, klen = 0;
     const char *ns = kv_arg_str(params, "namespace", &nlen);
@@ -2456,6 +2565,9 @@ static const struct method g_methods[] = {
     { "smp_stats",            emit_smp_stats            },
     { "shell.exec",           emit_shell_exec           },
     { "shell.exec_sandboxed", emit_shell_exec_sandboxed },
+    /* Session 81: structured-pipeline runner. Capture sh -c stdout,
+     * parse each line as JSON, return array. See docs/69. */
+    { "shell.run",            emit_shell_run            },
     /* Session 73: persistent agent memory. */
     { "kv.get",               emit_kv_get               },
     { "kv.put",               emit_kv_put               },

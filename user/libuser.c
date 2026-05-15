@@ -317,6 +317,12 @@ int sys_fs_mode(const char *path) {
     __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_FS_MODE), "b"(path) : "memory");
     return ret;
 }
+/* Session 81: structured-pipeline ls reads this to populate `size`. */
+int sys_fs_size(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_FS_SIZE), "b"(path) : "memory");
+    return ret;
+}
 int sys_chmod(const char *path, int mode) {
     int ret;
     __asm__ volatile ("int $0x80"
