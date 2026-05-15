@@ -117,6 +117,8 @@ USER_PROGRAMS = [
     ('agentd.elf',     'user/_obj/agentd.bin',     None),
     # Session 70: syscall-sandbox wrapper.
     ('sandbox.elf',    'user/_obj/sandbox.bin',    None),
+    # Session 73: KV-store CLI (paste-free testing path).
+    ('kvctl.elf',      'user/_obj/kvctl.bin',      None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

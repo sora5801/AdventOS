@@ -633,6 +633,16 @@ int kv_put(const char *ns, const char *key, const void *buf, int len) {
     char path[128];
     if (kv_path(path, sizeof(path), ns, key) < 0) return -1;
     if (len < 0 || len > 65536) return -1;
+
+    /* Session 73: auto-create the namespace directory on first put.
+     * /var/kv exists by boot-time bootstrap, but per-namespace dirs
+     * are user-created. sys_mkdir is idempotent enough — it returns
+     * -1 when the dir already exists, which we just ignore. */
+    char nsdir[128];
+    if (kv_ns_path(nsdir, sizeof(nsdir), ns) == 0) {
+        (void)sys_mkdir(nsdir);
+    }
+
     return sys_fs_write(path, buf, len);
 }
 
