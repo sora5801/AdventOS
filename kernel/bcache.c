@@ -252,10 +252,14 @@ static void syncer_task(void) {
         bkl_lock();
         uint32_t flushed = bcache_sync();
         bkl_unlock();
-        if (flushed > 0) {
-            kprintf("[bcache] syncer flushed %u dirty block(s)\n",
-                    (unsigned)flushed);
-        }
+        /* Used to log "syncer flushed N dirty block(s)" here, but at
+         * 5-second cadence it scrolled past during interactive use
+         * and interleaved into the user's typed input on the shared
+         * serial console. Writebacks are normal background activity;
+         * a silent syncer is the right default. The flushed count
+         * stays accessible via bcache_dirty() / procfs /proc/bcache
+         * for anyone who wants visibility. */
+        (void)flushed;
     }
 }
 
