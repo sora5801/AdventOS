@@ -121,6 +121,17 @@ USER_PROGRAMS = [
     ('kvctl.elf',      'user/_obj/kvctl.bin',      None),
     # Session 74: in-guest JSON-RPC client for agentd's job tools.
     ('agentctl.elf',   'user/_obj/agentctl.bin',   None),
+    # Session 75: standalone selftest binaries (one per session-7N
+    # surface). Each exits 0 on PASS, nonzero on FAIL; run from the
+    # in-guest shell as `sbx-selftest`, `lim-selftest`, `kv-selftest`
+    # (the shell auto-adds `.elf`). The FS entry name is capped at
+    # FS_NAME_MAX = 16 chars, so the source-file names
+    # (`sandbox-selftest.c` etc, kept descriptive) get a shorter
+    # 3-letter prefix here — fits "<3-letter>-selftest.elf" in 16
+    # bytes exactly.
+    ('sbx-selftest.elf', 'user/_obj/sandbox-selftest.bin', None),
+    ('lim-selftest.elf', 'user/_obj/limits-selftest.bin',  None),
+    ('kv-selftest.elf',  'user/_obj/kv-selftest.bin',      None),
 ]
 
 # Raw blobs that aren't ELFs — the kernel reads them as flat data.

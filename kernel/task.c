@@ -709,8 +709,13 @@ struct task *task_fork(struct registers *parent_regs) {
     void *kstack = kmalloc(TASK_STACK_SZ);
     if (!kstack) return NULL;
 
-    /* 2. Deep-copy parent's user PD. */
-    uint32_t *child_pd = paging_clone_user_pd((uint32_t *)(uintptr_t)parent->cr3);
+    /* 2. Deep-copy parent's user PD. The data-page count the clone
+     *    actually allocated is captured for the cur_rss_pages setup
+     *    below (session 75 audit — was blindly inheriting the
+     *    parent's counter; see comment further down). */
+    uint32_t cloned_data_pages = 0;
+    uint32_t *child_pd = paging_clone_user_pd((uint32_t *)(uintptr_t)parent->cr3,
+                                              &cloned_data_pages);
     if (!child_pd) {
         kfree(kstack);
         return NULL;
@@ -817,18 +822,34 @@ struct task *task_fork(struct registers *parent_regs) {
 
     /* 5g. Inherit resource limits (session 71). Caps copy verbatim;
      *     CPU/wall counters reset to 0 since the child is a fresh
-     *     scheduling subject. cur_rss_pages, however, is set to the
-     *     parent's value: paging_clone_user_pd allocated a new page
-     *     for every parent page, so the child's RSS is structurally
-     *     identical at this instant. (If max_rss_pages was 0 / no
-     *     cap, cur_rss_pages tracking still matters for procfs but
-     *     never triggers a kill.) */
+     *     scheduling subject.
+     *
+     *     Session 75: cur_rss_pages is set to what paging_clone_user_pd
+     *     actually allocated, not the parent's counter. The two values
+     *     diverge in practice: the parent's counter only counts
+     *     mmap-fault and sys_brk pages (session 71 alloc sites that
+     *     bump cur_rss_pages++), not the initial code/stack pages laid
+     *     down by elf_load + task_create_user. The clone deep-copies
+     *     ALL present user PTEs, so its count is "all user pages",
+     *     which is closer to the Linux-RSS semantic. If they diverge
+     *     by an unreasonable amount that's diagnostic of a leak in
+     *     either path — log it. */
     child->max_rss_pages       = parent->max_rss_pages;
     child->max_cpu_ticks       = parent->max_cpu_ticks;
     child->max_fds             = parent->max_fds;
     child->wall_deadline_ticks = parent->wall_deadline_ticks;
-    child->cur_rss_pages       = parent->cur_rss_pages;
+    child->cur_rss_pages       = cloned_data_pages;
     child->cur_cpu_ticks       = 0;
+    if (cloned_data_pages > 0 && parent->cur_rss_pages > cloned_data_pages + 16) {
+        /* Parent claims many more pages than the clone allocated —
+         * usually means the parent's counter is stale (a munmap or
+         * exit path missed a decrement). +16 fudge keeps the routine
+         * fork (small parent RSS, large code surface) quiet. */
+        kprintf("[fork] pid %u: parent rss=%u clone-allocated=%u (parent counter looks stale)\n",
+                (unsigned)parent->id,
+                (unsigned)parent->cur_rss_pages,
+                (unsigned)cloned_data_pages);
+    }
 
     /* 6. Splice into the round-robin ring under the scheduler lock —
      * APs may be picking from the ring concurrently. Transition

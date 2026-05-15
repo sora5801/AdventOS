@@ -404,7 +404,13 @@ int procfs_read_by_id(int id, uint32_t offset, void *buf, uint32_t n) {
     int kind = (int)PROC_KIND(id);
     int pid  = (int)PROC_PID(id);
 
-    char tmp[1024];
+    /* Session 75 bump 1024 -> 2048. gen_sandbox's worst case (16-entry
+     * Recent ring with the longest SYS_* names) is ~900 bytes today;
+     * one more SANDBOX_RECENT_N bump would have walked off the buffer
+     * silently because the sb_* helpers cap-clamp without signalling
+     * truncation. 2048 doubles the headroom for the same negligible
+     * stack cost. */
+    char tmp[2048];
     int  len = 0;
 
     switch (kind) {
@@ -418,6 +424,21 @@ int procfs_read_by_id(int id, uint32_t offset, void *buf, uint32_t n) {
         case PNODE_PID_SANDBOX: len = gen_sandbox(pid, tmp, sizeof(tmp));  break;
         case PNODE_PID_LIMITS:  len = gen_limits (pid, tmp, sizeof(tmp));  break;
         default: return 0;
+    }
+
+    /* Tripwire: any generator that comes within 10% of the buffer is
+     * one tweak away from silently truncating its tail. Log once per
+     * boot per (kind) pair so the test signal isn't drowned in a
+     * busy procfs read loop. */
+    if (len > 0 && len >= (int)(sizeof(tmp) * 9 / 10)) {
+        static int g_warned[16];
+        int k = kind & 0xF;
+        if (!g_warned[k]) {
+            g_warned[k] = 1;
+            kprintf("[procfs] WARNING: kind=%d filled %d/%d bytes — "
+                    "consider bumping the procfs_read_by_id tmp buffer\n",
+                    kind, len, (int)sizeof(tmp));
+        }
     }
 
     if (offset >= (uint32_t)len) return 0;

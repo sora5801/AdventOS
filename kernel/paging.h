@@ -53,7 +53,13 @@ void      paging_destroy_user_pd(uint32_t *pd);
  * and the parent page's contents are memcpy'd into it.
  *
  * Returns the child PD's virtual address (== physical, identity-mapped),
- * or NULL on out-of-memory. On failure all partial allocations are freed. */
-uint32_t *paging_clone_user_pd(uint32_t *parent);
+ * or NULL on out-of-memory. On failure all partial allocations are freed.
+ *
+ * Session 75: if `data_pages_out` is non-NULL, the function fills it with
+ * the count of user DATA pages allocated (excluding the child PD itself
+ * and PT pages). The fork path uses this to set the child's cur_rss_pages
+ * to a number that reflects what was actually allocated, rather than
+ * blindly copying the parent's counter and assuming they match. */
+uint32_t *paging_clone_user_pd(uint32_t *parent, uint32_t *data_pages_out);
 
 #endif

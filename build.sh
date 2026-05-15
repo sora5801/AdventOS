@@ -117,7 +117,8 @@ echo "[5/7] build user programs"
 USER_PROGS=(hello count sh echo httpd ed init
             head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
-            dbg dbgtest sandbox kvctl agentctl)
+            dbg dbgtest sandbox kvctl agentctl
+            sandbox-selftest limits-selftest kv-selftest)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -184,6 +185,13 @@ fs_lba=384   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS (bumped from 256 i
 # mirror.
 BOOTLOADER_LOAD_SECTORS=384   # 3 DAP reads of 128 sectors in boot/boot.S
 AGENTD_MANIFEST_MAX=16384     # MANIFEST_MAX in user/agentd.c (session 74 bump)
+# Session 75: agentd.bin cap. user.ld folds .bss into .data so the
+# raw bin includes every zero-initialized buffer (conns x REQ_MAX +
+# RESP_MAX + SCRATCH_MAX, jobs x JOB_RING_SZ x 2, g_tools_arr, etc).
+# Post-session-74 footprint is ~221 KiB; cap at 256 KiB for ~14%
+# headroom. A runaway here is usually a JOB_MAX / MAX_CONN bump or a
+# giant new global — fix the constant before bumping this.
+AGENTD_BIN_MAX=262144        # 256 KiB cap on user/_obj/agentd.bin
 
 kernel_size=$(stat -c%s kernel/kernel.bin)
 on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS
@@ -212,6 +220,24 @@ if [ "$manifest_size" -gt "$AGENTD_MANIFEST_MAX" ]; then
     exit 1
 fi
 
+agentd_size=$(stat -c%s user/_obj/agentd.bin)
+if [ "$agentd_size" -gt "$AGENTD_BIN_MAX" ]; then
+    echo "ERROR: agentd.bin is $agentd_size bytes, AGENTD_BIN_MAX is $AGENTD_BIN_MAX" >&2
+    echo "  fix: trim user/agentd.c's per-conn / per-job BSS — likely" >&2
+    echo "       suspects are JOB_MAX, JOB_RING_SZ, REQ_MAX, MAX_CONN." >&2
+    echo "       Or bump AGENTD_BIN_MAX here (and watch the post-FS pad)." >&2
+    exit 1
+fi
+
+# Session 75: at-a-glance sizes / headroom so we notice a budget
+# creeping toward its cap weeks before it actually breaks. Printed
+# AFTER the assertions pass so a build failure prints the precise
+# diagnostic, not this generic line.
+pct() { echo $(( $1 * 100 / $2 )); }
+echo "sizes: kernel.bin $kernel_size/$kernel_budget ($(pct $kernel_size $kernel_budget)%)" \
+     " agent.tools.json $manifest_size/$AGENTD_MANIFEST_MAX ($(pct $manifest_size $AGENTD_MANIFEST_MAX)%)" \
+     " agentd.bin $agentd_size/$AGENTD_BIN_MAX ($(pct $agentd_size $AGENTD_BIN_MAX)%)"
+
 echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
 
@@ -225,15 +251,15 @@ if [ "$sz" -lt "$fs_offset" ]; then
 fi
 cat fs.img >> os.img
 
-# Pad up to (fs_lba + 4096) sectors so SYS_FS_WRITE can grow files
+# Pad up to (fs_lba + 8192) sectors so SYS_FS_WRITE can grow files
 # past the initial mkfs payload. Session 46 bumped 1024 → 2048;
-# session 54 bumps 2048 → 4096 to match the kernel-side FS bitmap
-# cap (kernel/fs.c::FS_BITMAP_BYTES_MAX). Crucial for files like
-# /etc/ssh_host_key that sshd creates AT RUNTIME — without enough
-# padding here QEMU silently drops writes past EOF, and the file's
-# data block reads -1 on the next boot even though the metadata
-# entry persists.
-final_size=$(( (fs_lba + 4096) * 512 ))
+# session 54 bumps 2048 → 4096; session 75 bumps 4096 → 8192 to
+# match the kernel-side FS bitmap cap (kernel/fs.c::
+# FS_BITMAP_BYTES_MAX). Crucial for files like /etc/ssh_host_key
+# that sshd creates AT RUNTIME — without enough padding here QEMU
+# silently drops writes past EOF, and the file's data block reads
+# -1 on the next boot even though the metadata entry persists.
+final_size=$(( (fs_lba + 8192) * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$final_size" ]; then
     truncate -s "$final_size" os.img

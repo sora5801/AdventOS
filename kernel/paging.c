@@ -170,7 +170,8 @@ int paging_map_in(uint32_t *pd, uintptr_t virt, uintptr_t phys, uint32_t flags) 
     return r;
 }
 
-uint32_t *paging_clone_user_pd(uint32_t *parent) {
+uint32_t *paging_clone_user_pd(uint32_t *parent, uint32_t *data_pages_out) {
+    if (data_pages_out) *data_pages_out = 0;
     if (!parent) return NULL;
 
     uint32_t *child = (uint32_t *)pmm_alloc_page();
@@ -184,6 +185,7 @@ uint32_t *paging_clone_user_pd(uint32_t *parent) {
         child[i] = parent[i];
     }
 
+    uint32_t data_pages = 0;
     for (uint32_t i = 8; i < 1024; i++) {
         if (!(parent[i] & PTE_PRESENT)) continue;
 
@@ -217,6 +219,7 @@ uint32_t *paging_clone_user_pd(uint32_t *parent) {
 
             child_pt[j] = ((uint32_t)(uintptr_t)dst_page & (uint32_t)PAGE_MASK)
                           | (pte & 0xFFFu);
+            data_pages++;
         }
 
         /* Install the child PT into the child PDE with the parent's
@@ -225,6 +228,7 @@ uint32_t *paging_clone_user_pd(uint32_t *parent) {
                    | (parent[i] & 0xFFFu);
     }
 
+    if (data_pages_out) *data_pages_out = data_pages;
     return child;
 }
 

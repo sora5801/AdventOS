@@ -47,12 +47,19 @@ int mmap_unregister(uint32_t va_start, uint32_t length) {
         found = 1;
 
         /* Walk pages, free physical for any that got faulted in.
-         * paging_translate returns 0 for unmapped pages. */
+         * paging_translate returns 0 for unmapped pages. Each freed
+         * page also decrements cur_rss_pages — session 71 left this
+         * out (the counter was a high-water mark), session 75
+         * paired the decrement with the alloc-side increment in
+         * mmap_handle_fault. SYS_MUNMAP is the only caller so the
+         * BKL on the syscall path serializes us against fork /
+         * concurrent grow-via-mmap-fault on other CPUs. */
         for (uint32_t va = m->va_start; va < m->va_end; va += PAGE_4K) {
             uintptr_t phys = paging_translate(va);
             if (phys != 0) {
                 paging_unmap(va);
                 pmm_free_page((void *)phys);
+                if (t->cur_rss_pages > 0) t->cur_rss_pages--;
             }
         }
         m->in_use = 0;
@@ -100,10 +107,18 @@ int mmap_handle_fault(struct registers *r, uint32_t cr2) {
     }
 
     /* Allocate + zero a fresh page. Page is identity-mapped under the
-     * kernel master PD so we can fill it via its physical address. */
+     * kernel master PD so we can fill it via its physical address.
+     *
+     * Session 75: defer the cur_rss_pages++ until AFTER both fs_read
+     * and paging_map_in succeed. The original session 71 code bumped
+     * it right after pmm_alloc_page, so each failed install left the
+     * counter inflated by one. Failure here means we return -1; the
+     * fault handler routes us through the panic path so the task is
+     * already dying, but the per-task counter is still consulted by
+     * /proc and a future kernel that turned this into SIGBUS would
+     * carry the leak forward. */
     void *page = pmm_alloc_page();
     if (!page) return -1;
-    t->cur_rss_pages++;     /* session 71 RSS count */
     for (int i = 0; i < (int)PAGE_4K / 4; i++) ((uint32_t *)page)[i] = 0;
 
     /* Fill the file-backed portion. The mapping covers
@@ -134,5 +149,6 @@ int mmap_handle_fault(struct registers *r, uint32_t cr2) {
         return -1;
     }
     __asm__ volatile ("invlpg (%0)" :: "r"(va_page) : "memory");
+    t->cur_rss_pages++;     /* RSS bump only after both steps succeed */
     return 0;
 }
