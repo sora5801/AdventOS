@@ -18,7 +18,12 @@
 static int g_fail;
 static void expect(int cond, const char *what) {
     if (cond) printf("  PASS  %s\n", what);
-    else      { printf("  FAIL  %s\n", what); g_fail++; }
+    else {
+        printf("  FAIL  %s\n", what);
+        const char *lr = agent_last_resp();
+        if (lr && lr[0]) printf("        resp: %s\n", lr);
+        g_fail++;
+    }
 }
 
 /* Drain ALL lines currently buffered on `fd` (non-blocking). Caller
@@ -51,6 +56,13 @@ static int drain_all(int fd, char *out, int cap, int *out_n, int budget_ms) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[subscribe] selftest \xE2\x80\x94 session 76 + 78\n");
+
+    /* Session 79 — clear any jobs/crons/kv state left by prior test
+     * runs. Also clears the "subtest" KV namespace this test uses. */
+    int reset_n = agent_test_reset("subtest");
+    if (reset_n > 0) {
+        printf("  (pre-flight cleared %d stale agentd artifact(s))\n", reset_n);
+    }
 
     static char resp[R_CAP];
     int psk = agent_open_persistent();

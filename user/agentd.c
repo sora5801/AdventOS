@@ -440,14 +440,18 @@ static void emit_value(struct json_w *w, const struct json_v *v) {
  * ============================================================ */
 
 static void load_tools_manifest(void) {
-    /* These buffers are only live during this one boot-time call, so
-     * stack-allocate them rather than burning BSS that would stay
-     * resident forever. Scratch is sized for libjson's DOM: one
-     * json_v per value (~28B) plus decoded string bodies. 32 KiB
-     * covers the 23-tool manifest with plenty of headroom. Stack
-     * budget is 64 KiB (USER_STACK_PAGES=16), so 16+32 KiB fits. */
-    char raw[MANIFEST_MAX];
-    char scratch[32768];
+    /* Session 79: these moved from stack to static. The
+     * MANIFEST_MAX bump to 24576 in session 77 plus the libjson
+     * scratch at 32768 was a 57 KiB stack frame in this one
+     * function — uncomfortably close to the 64 KiB user stack
+     * (USER_STACK_PAGES=16). Also bumping scratch to 65536 —
+     * the 17 KiB manifest with 24 tools + 5 fields each + their
+     * nested inputSchema property objects was tipping over the
+     * 32 KiB arena and the parser was returning NULL.
+     * Moving to .bss costs ~90 KiB of static memory that's read
+     * once at boot and abandoned. Worth it for a reliable parse. */
+    static char raw[MANIFEST_MAX];
+    static char scratch[65536];
 
     int fd = sys_open("/etc/agent.tools.json");
     if (fd < 0) {
@@ -3236,6 +3240,17 @@ static int dispatch(int req_len) {
     struct json_v *root = json_parse(g_cur->req, req_len,
                                      g_cur->scratch, sizeof(g_cur->scratch));
     if (!root || root->type != JSON_OBJ) {
+        /* Session 79: dump the failing request bytes to serial so
+         * intermittent client-side parse-error returns can be
+         * diagnosed without an extra debug pass. Capped at 200
+         * printable bytes; non-printable become '?'. */
+        printf("[agentd] parse fail (%d bytes): ", req_len);
+        for (int x = 0; x < req_len && x < 200; x++) {
+            char c = g_cur->req[x];
+            if (c >= 32 && c < 127) putchar(c);
+            else putchar('?');
+        }
+        printf("\n");
         int n = 0;
         resp_error(0, -32700, "Parse error",
                    g_cur->resp, sizeof(g_cur->resp), &n);
@@ -3503,18 +3518,28 @@ static void kv_notify_change(const char *ns, const char *key, const char *op) {
  * payload at MTU per call). resp[] is set up by prepare_send() with
  * the trailing newline already appended. Once resp_sent == resp_n
  * the conn returns to CST_IDLE. */
+static void close_conn(struct conn *c);   /* forward decl — session 79
+                                             made try_send_more dispatch
+                                             to close_conn on send error
+                                             for full table cleanup */
+
 static void try_send_more(struct conn *c) {
     if (c->state != CST_SEND) return;
     int want = c->resp_n - c->resp_sent;
     if (want > SEND_CHUNK) want = SEND_CHUNK;
     int wn = sys_write(c->fd, c->resp + c->resp_sent, want);
     if (wn <= 0) {
-        /* Peer dropped or kernel pushback. Clean teardown so the
-         * conn slot can be recycled. */
-        sys_close(c->fd);
-        c->fd    = -1;
-        c->state = CST_FREE;
-        c->sub_mask = 0;
+        /* Peer dropped or kernel pushback. Run the FULL conn-close
+         * cleanup — session-79 audit found the prior manual cleanup
+         * here cleared `c->sub_mask` (this conn's view of subscribed
+         * jobs) but NOT the inverse `g_jobs[*].sub_mask` bits, the
+         * `g_res_subs[]` / `g_kv_watches[]` rows that key on the
+         * dying fd, or the `g_cron[*].subscribers[]` slots. Left
+         * uncleared, those entries would target a recycled conn
+         * slot for an unrelated client when the next event-loop
+         * iteration fires a notification. close_conn handles all
+         * five tables atomically. */
+        close_conn(c);
         return;
     }
     c->resp_sent += wn;

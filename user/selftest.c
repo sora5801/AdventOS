@@ -12,6 +12,12 @@
  * space. Within an individual test, see that test's source for the
  * per-assertion order.
  *
+ * Session 79: between tests, the meta-runner prints a one-line
+ * agentd state summary (job count + cron count) so flake diagnosis
+ * doesn't need a separate manual pass. Each agentd-talking test
+ * also runs its own agent_test_reset() pre-flight, so this summary
+ * should normally report 0/0 — anything else is a leak signal.
+ *
  * Run from the in-guest shell:
  *   advent$ selftest
  *
@@ -19,7 +25,7 @@
  * come from the child's stdout; the meta-runner adds one summary
  * line per test) so a host-side script can shell in and parse it.
  */
-#include "libuser.h"
+#include "libagent.h"
 
 struct test {
     const char *label;       /* short name for the summary line  */
@@ -36,6 +42,39 @@ static const struct test g_tests[] = {
 };
 #define N_TESTS  (int)(sizeof(g_tests) / sizeof(g_tests[0]))
 
+/* Count the occurrences of a `"<key>":` field in `resp`. Used to
+ * tally entries in shell.job.list / cron.list responses — both
+ * arrays of objects each containing a known field. Cheap and good
+ * enough for a diagnostic counter. */
+static int count_fields(const char *resp, const char *key) {
+    if (!resp || !key) return 0;
+    int kl = 0; while (key[kl]) kl++;
+    int n = 0;
+    for (int i = 0; resp[i]; i++) {
+        if (resp[i] != '"') continue;
+        int j;
+        for (j = 0; j < kl; j++) if (resp[i + 1 + j] != key[j]) break;
+        if (j != kl) continue;
+        if (resp[i + 1 + kl] != '"') continue;
+        if (resp[i + 2 + kl] != ':') continue;
+        n++;
+    }
+    return n;
+}
+
+/* Emit a one-line agentd state summary. Should be all-zeros at the
+ * start of each test if hermetic pre-flight is working. A non-zero
+ * count is a leak signal — either the prior test missed cleanup,
+ * agentd has a stale entry, or both. */
+static void print_state_summary(const char *label) {
+    static char resp[4096];
+    agent_method_call("shell.job.list", "{}", resp, sizeof(resp));
+    int jobs = count_fields(resp, "job_id");
+    agent_method_call("cron.list", "{}", resp, sizeof(resp));
+    int crons = count_fields(resp, "id");
+    printf("  [state @ %s] jobs=%d crons=%d\n", label, jobs, crons);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -44,14 +83,18 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < N_TESTS; i++) {
         printf("\n=== %s ===\n", g_tests[i].label);
-        /* Inter-test settle. The job table + per-conn subscriber
-         * sets in agentd take a beat to drain after the previous
-         * child closes its conn; without this pause, cron tests
-         * see stale "still running" sleeps from the jobs test
-         * and the slot allocator gives them no room. 1500 ms is
-         * roughly the SIGKILL latency on a chunked /sleep.elf
-         * plus a generous reap cushion. */
-        if (i > 0) sys_sleep_ms(1500);
+        /* Inter-test settle. With session-79's per-test agent_test_reset
+         * pre-flight, the cleanup happens INSIDE the next child rather
+         * than waiting between forks — 800 ms is enough for the prior
+         * child's close_conn EOFs to propagate to agentd, even with
+         * MAX_CONN=4 worth of in-flight conn slots. */
+        if (i > 0) sys_sleep_ms(800);
+        /* State summary BEFORE the test runs. The agentd-talking tests
+         * call agent_test_reset() themselves so this should report
+         * 0/0 most of the time; non-zero is a leak signal. (Skipped
+         * for sandbox/limits/kv since they don't connect to agentd
+         * and the summary's own connect would be a no-op at best.) */
+        if (i >= 3) print_state_summary(g_tests[i].label);
         int pid = sys_fork();
         if (pid < 0) {
             printf("[selftest] %s: fork failed\n", g_tests[i].label);

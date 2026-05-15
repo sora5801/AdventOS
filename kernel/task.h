@@ -14,8 +14,21 @@
 #define TASK_STACK_SZ  0x4000     /* 16 KiB per kernel task */
 /* Bumped from 8 in session 26 — a 4-stage pipeline opens 3 pipes (6 fds)
  * in the parent before forking; with stdin/stdout/stderr already at 0/1/2
- * that needed 9 slots. 16 lets longer pipelines through cleanly. */
-#define TASK_MAX_FDS   16
+ * that needed 9 slots. 16 lets longer pipelines through cleanly.
+ *
+ * Session 79: bumped 16 -> 24. agentd holds 2 pipe-read fds per
+ * background job (JOB_MAX = 8 → 16 fds for jobs alone). Plus stdin/
+ * stdout/stderr (3), the listen socket (1), and per-request conn fds
+ * (up to MAX_CONN=4), agentd needs ~24 fds at peak. The 9-jobs-cap
+ * selftest [8] used to hit fd exhaustion inside agentd's spawn path
+ * before any of the 8 sleepers had finished registering, leaving
+ * `ok` short of 8 and the test reporting a false negative.
+ *
+ * Kept at 24 (not 32) because every task pays the BSS cost — going
+ * higher pushes .bss past the BIOS EBDA at 0x9FC00 and the kernel's
+ * rep stosb zero-bss in entry.S would clobber EBDA mid-boot (the
+ * same hang mode that session-74's PIPE_BUF_SZ trim fenced off). */
+#define TASK_MAX_FDS   24
 
 /* Per-process file descriptor entry. fd 0/1/2 are wired up to console
  * stdin/stdout/stderr at task_create time; fd 3+ hold handles obtained

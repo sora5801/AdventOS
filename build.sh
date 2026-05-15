@@ -124,8 +124,7 @@ USER_PROGS=(hello count sh echo httpd ed init
             head tail grep sort uniq tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest sandbox kvctl agentctl sleep
-            sandbox-selftest limits-selftest kv-selftest
-            selftest)
+            sandbox-selftest limits-selftest kv-selftest)
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -164,7 +163,9 @@ done
 # libagent on top of libuser. Each is a small standalone binary;
 # the meta-runner `selftest.elf` (in USER_PROGS above) fork+execs
 # them in turn.
-AGENT_PROGS=(jobs-selftest subscribe-selftest cron-selftest)
+# Session 79: meta-runner moved here too because it now links libagent
+# (for the inter-test state-summary print + future drain helpers).
+AGENT_PROGS=(jobs-selftest subscribe-selftest cron-selftest selftest)
 for name in "${AGENT_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -216,7 +217,12 @@ AGENTD_MANIFEST_MAX=24576     # MANIFEST_MAX in user/agentd.c (session 77 bump f
 # Cap at 320 KiB for ~16% headroom. A runaway here is usually a
 # JOB_MAX / MAX_CONN / MAX_CRON_ENTRIES bump or a giant new global
 # — fix the constant before bumping this.
-AGENTD_BIN_MAX=327680        # 320 KiB cap on user/_obj/agentd.bin
+AGENTD_BIN_MAX=393216        # 384 KiB cap on user/_obj/agentd.bin
+                             # (session 79 bump 320 -> 384 — moved
+                             #  load_tools_manifest's raw[24K] +
+                             #  scratch[32K] from stack to .bss to
+                             #  avoid a 57 KiB stack frame that was
+                             #  intermittently overflowing.)
 
 kernel_size=$(stat -c%s kernel/kernel.bin)
 on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS

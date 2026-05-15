@@ -101,4 +101,29 @@ int agent_get_bool(const char *resp, const char *key, int fallback);
 /* Does `resp` contain the literal substring `needle`? */
 int agent_contains(const char *resp, const char *needle);
 
+/* Session 79 — last-response capture for FAIL-path diagnostics.
+ * agent_call / agent_method_call / agent_tool_call all stash their
+ * most-recent response into a small global buffer; the selftests'
+ * `expect` helper prints it on assertion failure so the meta-runner
+ * output identifies WHY a test failed without a separate debug pass. */
+const char *agent_last_resp(void);
+
+/* Session 79 — pre-flight cleanup for agentd-talking selftests.
+ *
+ * Reset agentd state that THIS test or a prior test owns:
+ *   - Walk shell.job.list, cancel + delete every job slot (up to
+ *     ~3 s of poll-and-retry; tolerate `removed:false` for still-
+ *     RUNNING slots and loop).
+ *   - Walk cron.list, cron.delete every entry whose `cmd` starts
+ *     with `cmd_prefix` OR contains the test-namespace sentinel
+ *     in `args` (passed verbatim — pick a per-test sentinel).
+ *   - Delete every kv key under `ns_prefix` (best-effort; ignores
+ *     errors).
+ *
+ * Caller passes their per-test namespace prefix (e.g. "selftest",
+ * "subtest"). Each *-selftest's main() runs this as the first
+ * line. Returns the number of artifacts removed; the caller can
+ * print it for diagnostics but it's not asserted on. */
+int agent_test_reset(const char *ns_prefix);
+
 #endif

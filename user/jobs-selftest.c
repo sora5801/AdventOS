@@ -16,7 +16,12 @@
 static int g_fail;
 static void expect(int cond, const char *what) {
     if (cond) printf("  PASS  %s\n", what);
-    else      { printf("  FAIL  %s\n", what); g_fail++; }
+    else {
+        printf("  FAIL  %s\n", what);
+        const char *lr = agent_last_resp();
+        if (lr && lr[0]) printf("        resp: %s\n", lr);
+        g_fail++;
+    }
 }
 
 #define R_CAP 4096
@@ -24,6 +29,17 @@ static void expect(int cond, const char *what) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[jobs] selftest \xE2\x80\x94 session 74 + 78\n");
+
+    /* Session 79 hermetic pre-flight. Cancels + deletes any job slot
+     * left over from a prior test in this QEMU boot (or this same
+     * test's prior run, if invoked back-to-back). Without this the
+     * 9-spawn cap test downstream depends on the previous test's
+     * cleanup landing in time; with it, every run starts from an
+     * empty g_jobs[]. */
+    int reset_n = agent_test_reset("");
+    if (reset_n > 0) {
+        printf("  (pre-flight cleared %d stale agentd artifact(s))\n", reset_n);
+    }
 
     static char resp[R_CAP];
 
@@ -255,20 +271,34 @@ int main(int argc, char **argv) {
             d[o++] = '}'; d[o] = 0;
             agent_method_call("shell.job.cancel", d, resp, sizeof(resp));
         }
-        sys_sleep_ms(2000);
-        for (int i = 0; i < 8; i++) {
-            if (spawned[i] < 0) continue;
-            char d[64];
-            int o = 0;
-            const char *fmt = "{\"job_id\":";
-            while (*fmt) d[o++] = *fmt++;
-            int v = spawned[i];
-            char tmp[12]; int ti = 0;
-            if (v == 0) tmp[ti++] = '0';
-            else while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
-            while (ti) d[o++] = tmp[--ti];
-            d[o++] = '}'; d[o] = 0;
-            agent_method_call("shell.job.delete", d, resp, sizeof(resp));
+        /* Poll-and-retry delete: SIGKILL on a chunked /sleep.elf
+         * lands within 100 ms, but the reaper + drain transition
+         * to JS_EXIT can lag a tick or two. Retry deletes until
+         * shell.job.list reports an empty table, or budget exhausts. */
+        for (int round = 0; round < 30; round++) {
+            sys_sleep_ms(100);
+            int any_left = 0;
+            for (int i = 0; i < 8; i++) {
+                if (spawned[i] < 0) continue;
+                char d[64];
+                int o = 0;
+                const char *fmt = "{\"job_id\":";
+                while (*fmt) d[o++] = *fmt++;
+                int v = spawned[i];
+                char tmp[12]; int ti = 0;
+                if (v == 0) tmp[ti++] = '0';
+                else while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+                while (ti) d[o++] = tmp[--ti];
+                d[o++] = '}'; d[o] = 0;
+                agent_method_call("shell.job.delete", d, resp, sizeof(resp));
+                if (agent_contains(resp, "\"removed\":true") ||
+                    agent_get_int(resp, "removed", 0) > 0) {
+                    spawned[i] = -1;
+                } else {
+                    any_left = 1;
+                }
+            }
+            if (!any_left) break;
         }
     }
 
