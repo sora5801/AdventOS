@@ -30,7 +30,8 @@ ASFLAGS=(-m32 -nostdlib -nostartfiles)
 # / sock / tcp hot paths emit `[smp] cpuN <event>` lines to serial.
 # Default build is unaffected — the macro in kernel/smp_trace.h
 # expands to `((void)0)` without -DSMP_TRACE. Used to root-cause the
-# `-smp 2` page fault tracked in docs/66-smp-loopback-fix.md.
+# four `-smp 2` scheduler/locking bugs documented in
+# docs/68-smp2-deadlock-fixes.md.
 if [ "${SMP_TRACE:-0}" = "1" ]; then
     echo "[note] SMP_TRACE=1 — kernel will emit [smp] trace lines"
     CFLAGS+=(-DSMP_TRACE)
@@ -372,7 +373,7 @@ echo "  tees to the host terminal because of -serial stdio."
 echo ""
 echo "Full run with networking + USB storage (skip if any device errors):"
 echo "    qemu-system-i386 -drive format=raw,file=os.img -serial stdio -m 32 \\"
-echo "        -smp 1 \\"
+echo "        -smp 2 \\"
 echo "        -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::7000-:7000,hostfwd=tcp::2222-:2222 \\"
 echo "        -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \\"
 echo "        -device piix3-usb-uhci,id=usb0 \\"
@@ -381,8 +382,8 @@ echo "        -drive id=usbfs,file=usbfs.img,format=raw,if=none \\"
 echo "        -device usb-storage,drive=usbfs,bus=usb0.0"
 echo ""
 echo "  Hostfwd maps: 8080 → in-guest httpd, 7000 → agentd JSON-RPC,"
-echo "  2222 → in-guest sshd. -smp 1 stays recommended; -smp 2 + agentd"
-echo "  hits a TCP-loopback hang. See docs/66-smp-loopback-fix.md."
+echo "  2222 → in-guest sshd. -smp 2 works as of session 80 (four"
+echo "  scheduler/locking bugs fixed; see docs/68-smp2-deadlock-fixes.md)."
 echo ""
 echo "  AC97 audio was dropped from this hint — newer QEMU requires"
 echo "  -device AC97,audiodev=snd0 + -audiodev <backend>,id=snd0 with a"

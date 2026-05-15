@@ -4,6 +4,8 @@
 
 Status: **partial.** A real race was identified and closed (rtl8139 RX IRQ vs syscall-side `g_tcbs` / `g_socks` mutations). Selftest under `-smp 1` stays green at **144 PASS, 0 FAIL** (up from 134 in `d6aa962`). The original `-smp 2` t20 hang still reproduces with agentd in inittab, which means the deadlock has a second source the lock added here doesn't reach. `-smp 1` remains the recommended config in `build.sh`. The next session takes it the rest of the way.
 
+> **Update — session 80: resolved.** The "second source" turned out to be *four* independent SMP correctness bugs in the scheduler/locking layer, not anything in the TCP stack at all. See [docs/68-smp2-deadlock-fixes.md](68-smp2-deadlock-fixes.md) for the full root-cause analysis with trace evidence per bug. With the four fixes in place, `-smp 2` boots to an interactive shell prompt and stays there; `-smp 1` is no longer required. The `Workaround` section at the bottom of this doc is now obsolete — kept as historical context.
+
 ---
 
 ## What I expected to find
