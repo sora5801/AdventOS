@@ -2,6 +2,7 @@
 #include "spinlock.h"
 #include "smp.h"
 #include "lapic.h"
+#include "smp_trace.h"
 
 /* Inner non-recursive spinlock. spin_lock CLIs on this CPU and
  * busy-spins waiting for the lock byte to become 0; spin_unlock
@@ -35,11 +36,14 @@ void net_lock(void) {
      * The volatile read keeps the compiler from caching it. */
     if (g_owner_cpu == me) {
         g_depth++;
+        SMP_LOG("net_lock recurse depth=%d", g_depth);
         return;
     }
+    SMP_LOG("net_lock try");
     spin_lock(&g_inner);
     g_owner_cpu = me;
     g_depth     = 1;
+    SMP_LOG("net_lock acq");
 }
 
 void net_unlock(void) {
@@ -47,11 +51,16 @@ void net_unlock(void) {
         /* Defensive: somebody called net_unlock without a matching
          * net_lock. Leave the lock alone — fixing the misuse is the
          * caller's job. A future kprintf-on-misuse would be nice. */
+        SMP_LOG("net_unlock UNDERFLOW (g_depth==0)");
         return;
     }
-    if (--g_depth > 0) return;          /* still nested */
+    if (--g_depth > 0) {
+        SMP_LOG("net_unlock pop depth=%d", g_depth);
+        return;
+    }
     g_owner_cpu = -1;
     spin_unlock(&g_inner);
+    SMP_LOG("net_unlock rel");
 }
 
 int net_lock_owned_by_me(void) {

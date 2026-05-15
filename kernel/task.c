@@ -13,6 +13,7 @@
 #include "pty.h"
 #include "tmpfs.h"
 #include "signal.h"
+#include "smp_trace.h"
 #include "smp.h"
 #include "spinlock.h"
 #include "../include/io.h"
@@ -454,10 +455,15 @@ void schedule(void) {
     if (next == prev) {
         /* Nothing to do — drop lock and return. The popfl in
          * spin_unlock restores IF if prev had it set at acquire. */
+        SMP_LOG("schedule keep pid=%u (no other runnable)",
+                  (unsigned)prev->id);
         spin_unlock(&g_sched_lock);
         return;
     }
 
+    SMP_LOG("schedule pick pid=%u prev=%u%s",
+              (unsigned)next->id, (unsigned)prev->id,
+              next->is_idle ? " (idle)" : "");
     next->state       = TASK_STATE_RUNNING;
     next->cpu         = (int)cpu->cpu_id;
     next->switches_in++;
@@ -512,6 +518,7 @@ void task_yield(void) {
     extern int  bkl_held(void);
     extern void bkl_lock(void);
     extern void bkl_unlock(void);
+    SMP_LOG("yield enter");
     if (bkl_held()) {
         bkl_unlock();
         schedule();
@@ -519,6 +526,7 @@ void task_yield(void) {
     } else {
         schedule();
     }
+    SMP_LOG("yield exit");
 }
 
 struct task *task_current(void) {

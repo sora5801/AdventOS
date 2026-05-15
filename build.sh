@@ -25,6 +25,17 @@ CFLAGS=(
 )
 ASFLAGS=(-m32 -nostdlib -nostartfiles)
 
+# Session 80 — opt-in SMP tracing. Set SMP_TRACE=1 in the environment
+# (e.g. `SMP_TRACE=1 bash build.sh`) and the kernel's lock / scheduler
+# / sock / tcp hot paths emit `[smp] cpuN <event>` lines to serial.
+# Default build is unaffected — the macro in kernel/smp_trace.h
+# expands to `((void)0)` without -DSMP_TRACE. Used to root-cause the
+# `-smp 2` page fault tracked in docs/66-smp-loopback-fix.md.
+if [ "${SMP_TRACE:-0}" = "1" ]; then
+    echo "[note] SMP_TRACE=1 — kernel will emit [smp] trace lines"
+    CFLAGS+=(-DSMP_TRACE)
+fi
+
 # User programs share the kernel's freestanding constraints, plus
 # -fno-zero-initialized-in-bss so uninitialized globals end up in .data
 # rather than .bss. That keeps filesz == memsz, so the kernel's ELF

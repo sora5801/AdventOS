@@ -4,6 +4,7 @@
 #include "netlock.h"
 #include "string.h"
 #include "kprintf.h"
+#include "smp_trace.h"
 
 static struct sock g_socks[SOCK_MAX];
 
@@ -189,6 +190,7 @@ int sock_listen(int idx, int backlog) {
 
 int sock_accept(int idx) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    SMP_LOG("sock_accept enter idx=%d", idx);
     net_lock();
     if (g_socks[idx].state != SOCK_LISTEN) { net_unlock(); return -1; }
 
@@ -208,6 +210,7 @@ int sock_accept(int idx) {
     }
     int conn = q_pop(&g_socks[idx]);
     net_unlock();
+    SMP_LOG("sock_accept exit idx=%d -> conn=%d", idx, conn);
     return conn;
 }
 
@@ -291,10 +294,12 @@ int sock_connect(int idx, const uint8_t dst[4], uint16_t port) {
 
 int sock_read(int idx, void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    SMP_LOG("sock_read enter idx=%d n=%d", idx, n);
     net_lock();
     struct sock *s = &g_socks[idx];
     if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) {
         net_unlock();
+        SMP_LOG("sock_read exit idx=%d bad-state", idx);
         return -1;
     }
 
@@ -309,6 +314,7 @@ int sock_read(int idx, void *buf, int n) {
         /* Re-check state in case the sock was closed under us. */
         if (s->state != SOCK_CONNECTED && s->state != SOCK_CLOSED) {
             net_unlock();
+            SMP_LOG("sock_read exit idx=%d closed-during-wait", idx);
             return -1;
         }
     }
@@ -320,17 +326,28 @@ int sock_read(int idx, void *buf, int n) {
         s->rx_tail = (s->rx_tail + 1) % SOCK_RX_BUF;
     }
     net_unlock();
+    SMP_LOG("sock_read exit idx=%d copied=%d", idx, copied);
     return copied;     /* 0 = EOF (peer closed and ring drained) */
 }
 
 int sock_write(int idx, const void *buf, int n) {
     if (idx < 0 || idx >= SOCK_MAX) return -1;
+    SMP_LOG("sock_write enter idx=%d n=%d", idx, n);
     net_lock();
     struct sock *s = &g_socks[idx];
-    if (s->state != SOCK_CONNECTED) { net_unlock(); return -1; }
-    if (!s->tcb)                    { net_unlock(); return -1; }
+    if (s->state != SOCK_CONNECTED) {
+        net_unlock();
+        SMP_LOG("sock_write exit idx=%d not-connected", idx);
+        return -1;
+    }
+    if (!s->tcb) {
+        net_unlock();
+        SMP_LOG("sock_write exit idx=%d no-tcb", idx);
+        return -1;
+    }
     int r = tcp_send(s->tcb, buf, n);
     net_unlock();
+    SMP_LOG("sock_write exit idx=%d r=%d", idx, r);
     return r;
 }
 

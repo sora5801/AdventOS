@@ -3,6 +3,7 @@
 #include "string.h"
 #include "kprintf.h"
 #include "pit.h"
+#include "smp_trace.h"
 
 /*
  * Multi-TCB TCP. Each TCB is a self-contained connection state
@@ -334,6 +335,10 @@ void tcp_rx(const struct ip_hdr *iph, const void *seg, int len) {
     uint8_t  flags    = th->flags;
     uint32_t seq      = ntohl(th->seq);
     uint32_t ack      = ntohl(th->ack);
+
+    SMP_LOG("tcp_rx dport=%u sport=%u flags=0x%x len=%d",
+              (unsigned)dst_port, (unsigned)src_port,
+              (unsigned)flags, len);
     int      hdr_len  = (th->data_off >> 4) * 4;
     if (hdr_len < (int)sizeof(*th) || hdr_len > len) return;
 
