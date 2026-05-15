@@ -184,14 +184,17 @@ fs_lba=384   # MUST match kernel/fs.h::FS_DISK_OFFSET_SECTORS (bumped from 256 i
 # pointer. Update the constants below in lockstep with the files they
 # mirror.
 BOOTLOADER_LOAD_SECTORS=384   # 3 DAP reads of 128 sectors in boot/boot.S
-AGENTD_MANIFEST_MAX=16384     # MANIFEST_MAX in user/agentd.c (session 74 bump)
+AGENTD_MANIFEST_MAX=24576     # MANIFEST_MAX in user/agentd.c (session 77 bump for cron tools)
 # Session 75: agentd.bin cap. user.ld folds .bss into .data so the
 # raw bin includes every zero-initialized buffer (conns x REQ_MAX +
 # RESP_MAX + SCRATCH_MAX, jobs x JOB_RING_SZ x 2, g_tools_arr, etc).
-# Post-session-74 footprint is ~221 KiB; cap at 256 KiB for ~14%
-# headroom. A runaway here is usually a JOB_MAX / MAX_CONN bump or a
-# giant new global — fix the constant before bumping this.
-AGENTD_BIN_MAX=262144        # 256 KiB cap on user/_obj/agentd.bin
+# Post-session-74 footprint is ~221 KiB; session 76 nudged it to
+# ~237 KiB; session 77 takes it to ~270 KiB after the g_tools_arr
+# bump (16->24 KiB for cron schemas) plus the 32-entry cron table.
+# Cap at 320 KiB for ~16% headroom. A runaway here is usually a
+# JOB_MAX / MAX_CONN / MAX_CRON_ENTRIES bump or a giant new global
+# — fix the constant before bumping this.
+AGENTD_BIN_MAX=327680        # 320 KiB cap on user/_obj/agentd.bin
 
 kernel_size=$(stat -c%s kernel/kernel.bin)
 on_disk_budget=$(( (fs_lba - 1) * 512 ))               # kernel ends before FS

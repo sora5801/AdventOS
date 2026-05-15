@@ -210,9 +210,14 @@ void kmain(uint32_t boot_drive) {
      * idempotent (vfs_mkdir returns -1 when the directory already
      * exists, which we ignore).  Failure is non-fatal: if the FS is
      * read-only or the slot pool is full, KV operations just fail
-     * cleanly later instead of crashing the boot. */
+     * cleanly later instead of crashing the boot.
+     *
+     * Session 77: same pattern for /var/cron — agentd persists each
+     * scheduled task as /var/cron/<id>.json and scans the directory
+     * at boot to repopulate the in-memory table. */
     vfs_mkdir("/var");
     vfs_mkdir("/var/kv");
+    vfs_mkdir("/var/cron");
     kputs("ok\n");
 
     {

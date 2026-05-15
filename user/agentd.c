@@ -74,10 +74,15 @@
 #define REQ_MAX         4096
 #define RESP_MAX        8192
 #define SCRATCH_MAX     8192
-#define MANIFEST_MAX    16384   /* session 74 bump from 8192 — adding the
-                                 * 9 shell.exec_background / shell.job.*
-                                 * schemas pushes the on-disk manifest to
-                                 * ~12 KiB. g_tools_arr also grew in step. */
+#define MANIFEST_MAX    24576   /* session 77 bump 16384 -> 24576. Adding
+                                 * the 7 cron.* tool schemas pushed the
+                                 * on-disk manifest past 17 KiB; 24 KiB
+                                 * gives headroom for the next batch of
+                                 * tools without another bump.
+                                 * Session 74 bump 8192 -> 16384 for the
+                                 * shell.exec_background / shell.job.*
+                                 * schemas; session 76 added kv.watch +
+                                 * kv.unwatch on top of that. */
 #define SHELL_CAP_MAX   2048
 
 /* Session 74 — multi-conn event-loop state.
@@ -293,10 +298,85 @@ static uint32_t fnv1a32(const void *buf, int len) {
  * first 4 KiB only. */
 #define RES_POLL_BUF 4096
 
-/* Session 76 forward decls — emit_kv_{put,del} fire kv_notify_change
- * after the write succeeds, but that function lives further down in
- * the file alongside the other notification machinery. */
+/* Session 74 — notification frame budget. Each fits in a single
+ * MTU-sized sys_write (tcp_send caps at 1480; we stay under). The
+ * #define moved up to session 76's preamble so cron-tick code in
+ * session 77 can build notification frames before its definition
+ * site. */
+#define NOTIF_BUF        1280
+
+/* Session 76 + 77 forward decls — kv_notify_change and the cron
+ * notification machinery both live in the notification block much
+ * further down. Forward-declared here so the kv_put/del and cron
+ * fire paths (defined ABOVE the notification block) can call them. */
 static void kv_notify_change(const char *ns, const char *key, const char *op);
+static struct conn *conn_by_fd(int fd);
+static void send_notif_to(struct conn *c, const char *buf, int n);
+
+/* ============================================================
+ * Session 77 — scheduled tasks ("cron"-style)
+ * ============================================================
+ *
+ * Two kinds: oneshot (fire once at fire_at) and recurring (fire
+ * every interval_sec until cancelled or max_runs hit). Persisted
+ * as one JSON file per entry under /var/cron/<id>.json.
+ *
+ * The event loop's 1 Hz cron_tick() walks g_cron[], spawns a
+ * session-74 background job for each due entry, updates the
+ * entry's bookkeeping (run_count, fire_at, state), re-writes the
+ * persisted file, and pushes notifications/cron.fired to any
+ * subscribers.
+ *
+ * Boot recovery scans /var/cron at agentd startup, deserializes
+ * each file, and seeds g_cron[]. Past-due entries fire on the
+ * very next tick (single fire — no catch-up across missed
+ * intervals; matches anacron semantics).
+ */
+#define MAX_CRON_ENTRIES   32
+#define CRON_KIND_ONESHOT   1
+#define CRON_KIND_RECURRING 2
+#define CRON_STATE_SCHED     1   /* due to fire (or oneshot waiting to fire) */
+#define CRON_STATE_CANCELLED 2   /* user-cancelled before next fire           */
+#define CRON_STATE_EXPIRED   3   /* recurring max_runs hit; or oneshot fired  */
+
+#define CRON_CMD_MAX       64
+#define CRON_ARGS_RAW_MAX  256   /* JSON-array bytes, e.g. "[\"a\",\"b\"]"   */
+#define CRON_POL_MAX       16
+#define CRON_MAX_SUBSCRIBERS 4
+
+struct cron_entry {
+    int      in_use;
+    int      id;                  /* monotonic, never reused after boot      */
+    int      kind;                /* CRON_KIND_*                              */
+    int      state;               /* CRON_STATE_*                             */
+    uint32_t fire_at;             /* absolute epoch; recurring = next-fire   */
+    uint32_t interval_sec;        /* 0 for oneshot                            */
+    uint32_t max_runs;            /* 0 = unlimited (recurring only)           */
+    uint32_t run_count;
+    uint32_t last_run_at;
+    int      last_exit_code;      /* only set if/when we observe the reap    */
+    int      last_job_id;         /* -1 if no fire yet                        */
+    int      concurrent;          /* if 0, skip fire when last_job is RUN    */
+
+    /* Spawn config — validated at cron.create time, parsed at fire time. */
+    char     cmd[CRON_CMD_MAX];
+    int      cmd_n;
+    char     args_raw[CRON_ARGS_RAW_MAX];   /* "[\"a\",\"b\"]" or ""        */
+    int      args_raw_n;
+    char     policy[CRON_POL_MAX];          /* "" = no sandbox              */
+    int      policy_n;
+    struct sys_limits limits;
+    int      has_limits;
+
+    /* Subscribers — same shape as session-74 jobs but per-fd list (not
+     * a bitmask, because cron persists across reboots while fd-to-conn
+     * mapping doesn't). conn_fd == -1 marks an empty slot.            */
+    int      subscribers[CRON_MAX_SUBSCRIBERS];
+};
+
+static struct cron_entry g_cron[MAX_CRON_ENTRIES];
+static int               g_cron_next_id = 1;   /* monotonic; bumped past   */
+                                               /* the max id read at boot  */
 
 /* ============================================================ */
 
@@ -305,10 +385,10 @@ static void kv_notify_change(const char *ns, const char *key, const char *op);
  * response. Re-emitted (not raw file bytes) so the JSON is parser-
  * round-tripped — guaranteed well-formed, no embedded whitespace
  * surprises, no comments to handle. */
-/* The re-emitted tools array — ~12 KiB now after the session 74
- * shell.exec_background / shell.job.* additions. Sized to comfortably
- * hold the manifest plus the libjson re-emit envelope. */
-static char g_tools_arr[16384];
+/* The re-emitted tools array — ~17 KiB now after session 77's
+ * cron tools. Sized to comfortably hold the manifest plus the
+ * libjson re-emit envelope; lockstep with MANIFEST_MAX above. */
+static char g_tools_arr[24576];
 static int  g_tools_arr_len;
 
 /* ============================================================
@@ -1243,6 +1323,87 @@ static int spawn_child(const char *exec_path, const char *const *argv,
     return 0;
 }
 
+/* Session 77 — pre-validated spawn-and-record helper.
+ *
+ * Same shape as the back half of emit_shell_exec_background, but
+ * takes already-parsed cmd / args / policy / limits instead of a
+ * JSON params blob. Used by the JSON-RPC path (above) AND by the
+ * cron tick (below) so both routes hit identical job-table state.
+ *
+ * `args[]` is a NULL-terminated array of c-string pointers; their
+ * storage must remain valid until the child has exec'd (i.e. until
+ * spawn_child returns). For the JSON-RPC caller that's the libjson
+ * arena, which lives for the duration of the dispatch. For the
+ * cron caller it's a stack-local scratch buffer.
+ *
+ * `policy` and `policy_len`: NULL/0 = no sandbox. Otherwise the
+ * canonical policy string ("minimal" / "compute" / "readfs" /
+ * "netclient"). Validation is the caller's responsibility — we
+ * just splice it into argv[1].
+ *
+ * Returns the new job slot index (= job_id) on success, -1 on
+ * any failure (table full, fork failed). */
+static int spawn_recorded_job(const char *cmd, int cmd_len,
+                              const char *policy, int policy_len,
+                              const struct sb_limits_in *L,
+                              const char *const *args, int n_args,
+                              int *out_pid) {
+    /* Build argv. Same layout as shell_exec_inner: optional
+     * ["sandbox.elf", policy, "--"] prefix iff policy != NULL. */
+    const char *argv[20];
+    const char *exec_path;
+    int ai = 0;
+    char policy_buf[JOB_POL_MAX];
+    if (policy && policy_len > 0) {
+        if (policy_len >= (int)sizeof(policy_buf)) return -1;
+        for (int i = 0; i < policy_len; i++) policy_buf[i] = policy[i];
+        policy_buf[policy_len] = 0;
+        exec_path  = "sandbox.elf";
+        argv[ai++] = "sandbox.elf";
+        argv[ai++] = policy_buf;
+        argv[ai++] = "--";
+    } else {
+        exec_path = cmd;
+    }
+    argv[ai++] = cmd;
+    if (n_args > 12)               return -1;
+    if (ai + n_args >= (int)(sizeof(argv) / sizeof(argv[0]))) return -1;
+    for (int i = 0; i < n_args; i++) {
+        if (!args[i]) return -1;
+        argv[ai++] = args[i];
+    }
+    argv[ai] = 0;
+
+    int slot = job_alloc_slot();
+    if (slot < 0) return -1;
+    struct job *j = &g_jobs[slot];
+    job_clear(j);
+
+    int out_fd, err_fd, pid;
+    if (spawn_child(exec_path, argv, (L && L->have) ? L : 0,
+                    &out_fd, &err_fd, &pid) < 0) {
+        /* slot was already job_clear'd to all-zeros + state=FREE */
+        return -1;
+    }
+
+    j->state      = JS_RUN;
+    j->pid        = pid;
+    j->out_fd     = out_fd;
+    j->err_fd     = err_fd;
+    j->cmd_n      = cmd_len;
+    for (int i = 0; i < cmd_len && i < JOB_CMD_MAX; i++) j->cmd[i] = cmd[i];
+    if (policy && policy_len > 0) {
+        j->sandboxed = 1;
+        int pl = policy_len < JOB_POL_MAX - 1 ? policy_len : JOB_POL_MAX - 1;
+        for (int i = 0; i < pl; i++) j->policy[i] = policy[i];
+        j->policy[pl] = 0;
+    }
+    j->start_tick = g_tick_ms;
+
+    if (out_pid) *out_pid = pid;
+    return slot;
+}
+
 /* shell.exec_background tool — spawn a child the same way shell.exec
  * does, but record it in g_jobs[] and return immediately. The two
  * captured streams drain into the slot's ring buffers each event-
@@ -1317,57 +1478,26 @@ static int emit_shell_exec_background(struct json_w *w,
             lim.max_fds   || lim.max_wall_ms) lim.have = 1;
     }
 
-    /* Build argv. Same layout as shell_exec_inner — prepend the
-     * sandbox wrapper trio iff a policy was given. */
-    const char *argv[20];
-    const char *exec_path;
-    int ai = 0;
-    char policy_buf[JOB_POL_MAX];
-    if (policy) {
-        for (int i = 0; i < p_len && i < (int)sizeof(policy_buf) - 1; i++)
-            policy_buf[i] = policy[i];
-        policy_buf[p_len] = 0;
-        exec_path  = "sandbox.elf";
-        argv[ai++] = "sandbox.elf";
-        argv[ai++] = policy_buf;
-        argv[ai++] = "--";
-    } else {
-        exec_path = cmd;
-    }
-    argv[ai++] = cmd;
+    /* Build the user-argv array from the parsed JSON. libjson
+     * NUL-terminates each string so we can pass json_to_str's
+     * pointers straight through. Their storage lives in the
+     * parser's arena (g_cur->scratch) for the duration of the
+     * dispatch, which is exactly the spawn_recorded_job window. */
+    const char *user_args[12];
     for (int i = 0; i < n_args; i++) {
         const struct json_v *a = json_arr_at(args_v, i);
         int al = 0;
         const char *as = json_to_str(a, &al);
         if (!as) return -32602;
-        argv[ai++] = as;
-    }
-    argv[ai] = 0;
-
-    int slot = job_alloc_slot();
-    if (slot < 0) return -32603;  /* table full + nothing to recycle */
-    struct job *j = &g_jobs[slot];
-    job_clear(j);
-
-    int out_fd, err_fd, pid;
-    if (spawn_child(exec_path, argv, lim.have ? &lim : 0,
-                    &out_fd, &err_fd, &pid) < 0) {
-        return -32603;
+        user_args[i] = as;
     }
 
-    j->state      = JS_RUN;
-    j->pid        = pid;
-    j->out_fd     = out_fd;
-    j->err_fd     = err_fd;
-    j->cmd_n      = cmd_len;
-    for (int i = 0; i < cmd_len; i++) j->cmd[i] = cmd[i];
-    if (policy) {
-        j->sandboxed = 1;
-        for (int i = 0; i < p_len && i < JOB_POL_MAX - 1; i++)
-            j->policy[i] = policy[i];
-        j->policy[p_len < JOB_POL_MAX ? p_len : JOB_POL_MAX - 1] = 0;
-    }
-    j->start_tick = g_tick_ms;
+    int pid = -1;
+    int slot = spawn_recorded_job(cmd, cmd_len,
+                                  policy, policy ? p_len : 0,
+                                  lim.have ? &lim : 0,
+                                  user_args, n_args, &pid);
+    if (slot < 0) return -32603;
 
     json_obj_begin(w);
       json_key(w, "job_id"); json_int(w, slot);
@@ -1564,6 +1694,746 @@ static int emit_shell_job_unsubscribe(struct json_w *w, const struct json_v *par
 }
 
 /* ============================================================
+ * Session 77 — cron scheduler core
+ * ============================================================ */
+
+/* Find an entry by id. Returns NULL if not found. */
+static struct cron_entry *cron_find(int id) {
+    if (id <= 0) return 0;
+    for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+        if (g_cron[i].in_use && g_cron[i].id == id) return &g_cron[i];
+    }
+    return 0;
+}
+
+static int cron_alloc_slot(void) {
+    for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+        if (!g_cron[i].in_use) return i;
+    }
+    return -1;
+}
+
+static void cron_clear(struct cron_entry *e) {
+    e->in_use = 0;
+    e->id = 0;
+    e->kind = 0;
+    e->state = 0;
+    e->fire_at = 0;
+    e->interval_sec = 0;
+    e->max_runs = 0;
+    e->run_count = 0;
+    e->last_run_at = 0;
+    e->last_exit_code = 0;
+    e->last_job_id = -1;
+    e->concurrent = 0;
+    e->cmd[0] = 0; e->cmd_n = 0;
+    e->args_raw[0] = 0; e->args_raw_n = 0;
+    e->policy[0] = 0; e->policy_n = 0;
+    e->limits.max_rss_kb  = 0;
+    e->limits.max_cpu_ms  = 0;
+    e->limits.max_fds     = 0;
+    e->limits.max_wall_ms = 0;
+    e->has_limits = 0;
+    for (int i = 0; i < CRON_MAX_SUBSCRIBERS; i++) e->subscribers[i] = -1;
+}
+
+static const char *cron_state_str(int s) {
+    switch (s) {
+        case CRON_STATE_SCHED:     return "scheduled";
+        case CRON_STATE_CANCELLED: return "cancelled";
+        case CRON_STATE_EXPIRED:   return "expired";
+        default:                   return "unknown";
+    }
+}
+static const char *cron_kind_str(int k) {
+    return (k == CRON_KIND_RECURRING) ? "recurring" : "oneshot";
+}
+
+/* Format "/var/cron/<id>.json" into buf. Returns the path length. */
+static int cron_path_for(int id, char *buf, int cap) {
+    const char *prefix = "/var/cron/";
+    int o = 0;
+    while (prefix[o] && o < cap - 1) { buf[o] = prefix[o]; o++; }
+    char tmp[12]; int ti = 0;
+    int n = id; if (n <= 0) { tmp[ti++] = '0'; }
+    else { while (n) { tmp[ti++] = (char)('0' + n % 10); n /= 10; } }
+    while (ti && o < cap - 1) buf[o++] = tmp[--ti];
+    const char *suf = ".json";
+    int si = 0;
+    while (suf[si] && o < cap - 1) buf[o++] = suf[si++];
+    buf[o] = 0;
+    return o;
+}
+
+/* Render an entry to JSON in `out` (cap bytes). Returns bytes
+ * written, or -1 on overflow. */
+static int cron_emit_json(const struct cron_entry *e, char *out, int cap) {
+    struct json_w w;
+    json_w_init(&w, out, cap);
+    json_obj_begin(&w);
+      json_key(&w, "id");             json_int (&w, e->id);
+      json_key(&w, "kind");           json_str (&w, cron_kind_str(e->kind));
+      json_key(&w, "state");          json_str (&w, cron_state_str(e->state));
+      json_key(&w, "fire_at");        json_uint(&w, e->fire_at);
+      json_key(&w, "interval_sec");   json_uint(&w, e->interval_sec);
+      json_key(&w, "max_runs");       json_uint(&w, e->max_runs);
+      json_key(&w, "run_count");      json_uint(&w, e->run_count);
+      json_key(&w, "last_run_at");    json_uint(&w, e->last_run_at);
+      json_key(&w, "last_exit_code"); json_int (&w, e->last_exit_code);
+      json_key(&w, "last_job_id");    json_int (&w, e->last_job_id);
+      json_key(&w, "concurrent");     json_bool(&w, e->concurrent);
+      json_key(&w, "cmd");            json_str_n(&w, e->cmd, e->cmd_n);
+      json_key(&w, "args");
+      if (e->args_raw_n > 0) {
+          json_raw(&w, e->args_raw, e->args_raw_n);
+      } else {
+          json_arr_begin(&w);
+          json_arr_end(&w);
+      }
+      if (e->policy_n > 0) {
+          json_key(&w, "policy");
+          json_str_n(&w, e->policy, e->policy_n);
+      }
+      if (e->has_limits) {
+          json_key(&w, "limits");
+          json_obj_begin(&w);
+            if (e->limits.max_rss_kb)  { json_key(&w, "max_rss_kb");
+                                         json_uint(&w, e->limits.max_rss_kb); }
+            if (e->limits.max_cpu_ms)  { json_key(&w, "max_cpu_ms");
+                                         json_uint(&w, e->limits.max_cpu_ms); }
+            if (e->limits.max_fds)     { json_key(&w, "max_fds");
+                                         json_uint(&w, e->limits.max_fds); }
+            if (e->limits.max_wall_ms) { json_key(&w, "max_wall_ms");
+                                         json_uint(&w, e->limits.max_wall_ms); }
+          json_obj_end(&w);
+      }
+    json_obj_end(&w);
+    json_w_finish(&w);
+    if (!json_w_ok(&w)) return -1;
+    return json_w_len(&w);
+}
+
+/* Atomically rewrite the on-disk file for this entry. Best-effort —
+ * a -1 here means the in-memory state is now ahead of the disk;
+ * the next mutation will retry. */
+static int cron_persist(const struct cron_entry *e) {
+    char buf[2048];
+    int n = cron_emit_json(e, buf, sizeof(buf));
+    if (n < 0) return -1;
+    char path[64];
+    cron_path_for(e->id, path, sizeof(path));
+    return sys_fs_write(path, buf, (uint32_t)n);
+}
+
+/* Remove the on-disk file for an entry. -1 == nothing to remove. */
+static int cron_unpersist(int id) {
+    char path[64];
+    cron_path_for(id, path, sizeof(path));
+    return sys_unlink(path);
+}
+
+/* Subscribe / unsubscribe the calling conn to an entry's fired
+ * notifications. Returns 1 on added/removed, 0 on no-op (already
+ * subscribed / not found in the list). */
+static int cron_subscriber_add(struct cron_entry *e, int conn_fd) {
+    for (int i = 0; i < CRON_MAX_SUBSCRIBERS; i++) {
+        if (e->subscribers[i] == conn_fd) return 0;       /* already in */
+    }
+    for (int i = 0; i < CRON_MAX_SUBSCRIBERS; i++) {
+        if (e->subscribers[i] < 0) { e->subscribers[i] = conn_fd; return 1; }
+    }
+    return 0;     /* full — silently cap, documented in agent-api.md */
+}
+static int cron_subscriber_remove(struct cron_entry *e, int conn_fd) {
+    for (int i = 0; i < CRON_MAX_SUBSCRIBERS; i++) {
+        if (e->subscribers[i] == conn_fd) {
+            e->subscribers[i] = -1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Build argv from args_raw + cmd at fire time, then invoke
+ * spawn_recorded_job. The libjson parse arena lives on the stack
+ * for the duration of this call — spawn_recorded_job consumes the
+ * c-string pointers before returning. */
+static int cron_spawn_job(const struct cron_entry *e) {
+    /* Parse args_raw if non-empty. Empty means no args (argv = [cmd]). */
+    const char *user_args[12];
+    int n_args = 0;
+    char arena[1024];
+    if (e->args_raw_n > 0) {
+        struct json_v *root = json_parse(e->args_raw, e->args_raw_n,
+                                         arena, sizeof(arena));
+        if (!root || root->type != JSON_ARR) {
+            printf("[cron] entry %d: args_raw parse failed; spawning bare cmd\n",
+                   e->id);
+        } else {
+            int al = json_arr_len(root);
+            if (al < 0)  al = 0;
+            if (al > 12) al = 12;
+            for (int i = 0; i < al; i++) {
+                const struct json_v *a = json_arr_at(root, i);
+                int len = 0;
+                const char *s = json_to_str(a, &len);
+                if (!s) { n_args = 0; break; }
+                user_args[i] = s;
+                n_args++;
+            }
+        }
+    }
+
+    const struct sb_limits_in *limp = 0;
+    struct sb_limits_in lim;
+    if (e->has_limits) {
+        lim.have = 1;
+        lim.max_rss_kb  = e->limits.max_rss_kb;
+        lim.max_cpu_ms  = e->limits.max_cpu_ms;
+        lim.max_fds     = e->limits.max_fds;
+        lim.max_wall_ms = e->limits.max_wall_ms;
+        limp = &lim;
+    }
+
+    int pid = -1;
+    return spawn_recorded_job(e->cmd, e->cmd_n,
+                              e->policy_n > 0 ? e->policy : 0,
+                              e->policy_n,
+                              limp,
+                              user_args, n_args, &pid);
+}
+
+/* Notification helper — pushed to each subscriber of this entry
+ * after a successful fire. Same wire shape as session-74's
+ * notifications/job.exit. */
+static void notify_cron_fired(struct cron_entry *e, int job_id) {
+    char buf[NOTIF_BUF];
+    struct json_w w;
+    json_w_init(&w, buf, sizeof(buf));
+    json_obj_begin(&w);
+      json_key(&w, "jsonrpc"); json_str(&w, "2.0");
+      json_key(&w, "method");  json_str(&w, "notifications/cron.fired");
+      json_key(&w, "params");
+      json_obj_begin(&w);
+        json_key(&w, "entry_id");  json_int (&w, e->id);
+        json_key(&w, "job_id");    json_int (&w, job_id);
+        json_key(&w, "fire_at");   json_uint(&w, e->last_run_at);
+        json_key(&w, "run_count"); json_uint(&w, e->run_count);
+      json_obj_end(&w);
+    json_obj_end(&w);
+    json_w_finish(&w);
+    if (!json_w_ok(&w)) return;
+    int len = json_w_len(&w);
+    if (len + 1 >= (int)sizeof(buf)) return;
+    buf[len] = '\n';
+    int frame_n = len + 1;
+    for (int i = 0; i < CRON_MAX_SUBSCRIBERS; i++) {
+        int fd = e->subscribers[i];
+        if (fd < 0) continue;
+        struct conn *c = conn_by_fd(fd);
+        if (!c) continue;
+        send_notif_to(c, buf, frame_n);
+    }
+}
+
+/* job_is_running — used by the concurrent=false skip logic. */
+static int job_is_running(int job_id) {
+    if (job_id < 0 || job_id >= JOB_MAX) return 0;
+    return g_jobs[job_id].state == JS_RUN;
+}
+
+/* The 1 Hz cron tick. Walks every scheduled entry, fires those
+ * whose fire_at <= epoch, updates bookkeeping, persists. */
+static void cron_tick(uint32_t epoch) {
+    for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+        struct cron_entry *e = &g_cron[i];
+        if (!e->in_use)                       continue;
+        if (e->state != CRON_STATE_SCHED)     continue;
+        if (e->fire_at > epoch)               continue;
+
+        if (!e->concurrent && job_is_running(e->last_job_id)) {
+            /* Skip this fire but advance the schedule so we don't
+             * drift. run_count stays put (the schedule slot was
+             * effectively dropped). */
+            printf("[cron] entry %d: prev job still running; skip fire\n", e->id);
+            if (e->kind == CRON_KIND_RECURRING) {
+                e->fire_at = epoch + e->interval_sec;
+            } else {
+                e->state = CRON_STATE_EXPIRED;
+            }
+            cron_persist(e);
+            continue;
+        }
+
+        int job_id = cron_spawn_job(e);
+        if (job_id < 0) {
+            printf("[cron] entry %d: spawn failed (table full / fork err)\n",
+                   e->id);
+            /* Leave state alone so we retry on the next tick. The
+             * fire_at stays put — a stuck spawn shouldn't silently
+             * skip a beat. */
+            continue;
+        }
+        e->last_job_id = job_id;
+        e->last_run_at = epoch;
+        e->run_count++;
+        if (e->kind == CRON_KIND_ONESHOT) {
+            e->state = CRON_STATE_EXPIRED;
+        } else {
+            e->fire_at = epoch + e->interval_sec;
+            if (e->max_runs && e->run_count >= e->max_runs) {
+                e->state = CRON_STATE_EXPIRED;
+            }
+        }
+        cron_persist(e);
+        notify_cron_fired(e, job_id);
+    }
+}
+
+/* ============================================================
+ * Session 77 — cron tool emitters
+ * ============================================================ */
+
+static int copy_str_field(char *dst, int cap, const char *src, int slen) {
+    if (slen < 0 || slen >= cap) return -1;
+    for (int i = 0; i < slen; i++) dst[i] = src[i];
+    dst[slen] = 0;
+    return slen;
+}
+
+/* Validate a policy string against the four canonical templates.
+ * Returns 1 if valid, 0 otherwise. NULL/empty is valid (means
+ * "no sandbox"). */
+static int cron_validate_policy(const char *p, int n) {
+    if (!p || n == 0) return 1;
+    static const char *names[] = {"minimal","compute","readfs","netclient"};
+    static const int  lens[]   = {7,        7,        6,       9};
+    for (int i = 0; i < 4; i++) {
+        if (n != lens[i]) continue;
+        int ok = 1;
+        for (int j = 0; j < n; j++) if (p[j] != names[i][j]) { ok = 0; break; }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+static int parse_kind(const char *s, int n) {
+    if (n == 7 && s[0]=='o' && s[1]=='n' && s[2]=='e' && s[3]=='s' &&
+        s[4]=='h' && s[5]=='o' && s[6]=='t') return CRON_KIND_ONESHOT;
+    if (n == 9 && s[0]=='r' && s[1]=='e' && s[2]=='c' && s[3]=='u' &&
+        s[4]=='r' && s[5]=='r' && s[6]=='i' && s[7]=='n' && s[8]=='g')
+        return CRON_KIND_RECURRING;
+    return 0;
+}
+
+static int parse_state(const char *s, int n) {
+    if (n == 9  && s[0]=='s' && s[7]=='e' && s[8]=='d') return CRON_STATE_SCHED;
+    if (n == 9  && s[0]=='c' && s[7]=='e' && s[8]=='d') return CRON_STATE_CANCELLED;
+    if (n == 7  && s[0]=='e' && s[6]=='d')              return CRON_STATE_EXPIRED;
+    return 0;
+}
+
+static int emit_cron_create(struct json_w *w, const struct json_v *params) {
+    /* kind, cmd are required; fire_at XOR delay_sec for the timing;
+     * interval_sec required when kind=recurring. */
+    int klen = 0;
+    const char *kind_s = kv_arg_str(params, "kind", &klen);
+    if (!kind_s)                 return -32602;
+    int kind = parse_kind(kind_s, klen);
+    if (!kind)                   return -32602;
+
+    int cmd_len = 0;
+    const char *cmd = kv_arg_str(params, "cmd", &cmd_len);
+    if (!cmd || cmd_len <= 0 || cmd_len >= CRON_CMD_MAX) return -32602;
+
+    /* Timing: fire_at (absolute epoch) XOR delay_sec (relative). */
+    const struct json_v *fa_v = json_obj_get(params, "fire_at");
+    const struct json_v *ds_v = json_obj_get(params, "delay_sec");
+    if (fa_v && ds_v) return -32602;
+    uint32_t now = sys_time();
+    uint32_t fire_at = now;
+    if (fa_v) {
+        if (fa_v->type != JSON_NUM) return -32602;
+        long v = json_to_int(fa_v);
+        if (v < 0) return -32602;
+        fire_at = (uint32_t)v;
+    } else if (ds_v) {
+        if (ds_v->type != JSON_NUM) return -32602;
+        long v = json_to_int(ds_v);
+        if (v < 0) return -32602;
+        fire_at = now + (uint32_t)v;
+    }
+
+    uint32_t interval_sec = 0;
+    uint32_t max_runs = 0;
+    if (kind == CRON_KIND_RECURRING) {
+        const struct json_v *iv = json_obj_get(params, "interval_sec");
+        if (!iv || iv->type != JSON_NUM) return -32602;
+        long v = json_to_int(iv);
+        if (v < 1) return -32602;
+        interval_sec = (uint32_t)v;
+        const struct json_v *mr = json_obj_get(params, "max_runs");
+        if (mr) {
+            if (mr->type != JSON_NUM) return -32602;
+            long mv = json_to_int(mr);
+            if (mv < 0) return -32602;
+            max_runs = (uint32_t)mv;
+        }
+    }
+
+    int concurrent = 0;
+    const struct json_v *cv = json_obj_get(params, "concurrent");
+    if (cv) {
+        if (cv->type != JSON_BOOL) return -32602;
+        concurrent = json_to_bool(cv);
+    }
+
+    /* args — optional JSON array. We re-emit it into args_raw so
+     * persistence is a single json_raw() splice and fire-time
+     * re-parsing is straightforward. */
+    const struct json_v *args_v = json_obj_get(params, "args");
+    if (args_v && args_v->type != JSON_ARR) return -32602;
+
+    /* policy — optional, must match a template name. */
+    int p_len = 0;
+    const char *policy = kv_arg_str(params, "policy", &p_len);
+    if (policy && !cron_validate_policy(policy, p_len)) return -32602;
+    if (p_len >= CRON_POL_MAX) return -32602;
+
+    /* limits — optional, same fields as shell.exec_sandboxed. */
+    struct sys_limits caps = {0, 0, 0, 0};
+    int has_caps = 0;
+    const struct json_v *lim_v = json_obj_get(params, "limits");
+    if (lim_v) {
+        if (lim_v->type != JSON_OBJ) return -32602;
+        const struct json_v *f;
+        if ((f = json_obj_get(lim_v, "max_rss_kb")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            caps.max_rss_kb = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_cpu_ms")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            caps.max_cpu_ms = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_fds")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            caps.max_fds = (uint32_t)json_to_int(f);
+        }
+        if ((f = json_obj_get(lim_v, "max_wall_ms")) != 0) {
+            if (f->type != JSON_NUM) return -32602;
+            caps.max_wall_ms = (uint32_t)json_to_int(f);
+        }
+        if (caps.max_rss_kb || caps.max_cpu_ms ||
+            caps.max_fds   || caps.max_wall_ms) has_caps = 1;
+    }
+
+    int slot = cron_alloc_slot();
+    if (slot < 0) return -32603;
+    struct cron_entry *e = &g_cron[slot];
+    cron_clear(e);
+    e->in_use = 1;
+    e->id     = g_cron_next_id++;
+    e->kind   = kind;
+    e->state  = CRON_STATE_SCHED;
+    e->fire_at = fire_at;
+    e->interval_sec = interval_sec;
+    e->max_runs = max_runs;
+    e->concurrent = concurrent;
+    e->last_job_id = -1;
+    if (copy_str_field(e->cmd, CRON_CMD_MAX, cmd, cmd_len) < 0) {
+        cron_clear(e); return -32602;
+    }
+    e->cmd_n = cmd_len;
+    if (policy && p_len > 0) {
+        copy_str_field(e->policy, CRON_POL_MAX, policy, p_len);
+        e->policy_n = p_len;
+    }
+    if (has_caps) {
+        e->limits = caps;
+        e->has_limits = 1;
+    }
+    /* Re-emit args into args_raw. */
+    if (args_v) {
+        struct json_w aw;
+        json_w_init(&aw, e->args_raw, sizeof(e->args_raw));
+        emit_value(&aw, args_v);
+        json_w_finish(&aw);
+        if (!json_w_ok(&aw)) { cron_clear(e); return -32602; }
+        e->args_raw_n = json_w_len(&aw);
+    }
+
+    if (cron_persist(e) != 0) {
+        printf("[cron] entry %d: persist failed at create\n", e->id);
+        cron_clear(e);
+        return -32603;
+    }
+
+    json_obj_begin(w);
+      json_key(w, "entry_id"); json_int (w, e->id);
+      json_key(w, "fire_at");  json_uint(w, e->fire_at);
+    json_obj_end(w);
+    return 0;
+}
+
+/* Emit a compact summary of a single entry — used by cron.list and
+ * (with a few more fields) cron.get. */
+static void emit_cron_summary(struct json_w *w, const struct cron_entry *e,
+                              int full) {
+    json_obj_begin(w);
+      json_key(w, "id");             json_int (w, e->id);
+      json_key(w, "kind");           json_str (w, cron_kind_str(e->kind));
+      json_key(w, "state");          json_str (w, cron_state_str(e->state));
+      json_key(w, "fire_at");        json_uint(w, e->fire_at);
+      json_key(w, "interval_sec");   json_uint(w, e->interval_sec);
+      json_key(w, "max_runs");       json_uint(w, e->max_runs);
+      json_key(w, "run_count");      json_uint(w, e->run_count);
+      json_key(w, "last_run_at");    json_uint(w, e->last_run_at);
+      json_key(w, "last_exit_code"); json_int (w, e->last_exit_code);
+      json_key(w, "last_job_id");    json_int (w, e->last_job_id);
+      json_key(w, "concurrent");     json_bool(w, e->concurrent);
+      json_key(w, "cmd");            json_str_n(w, e->cmd, e->cmd_n);
+      if (full) {
+          json_key(w, "args");
+          if (e->args_raw_n > 0) json_raw(w, e->args_raw, e->args_raw_n);
+          else { json_arr_begin(w); json_arr_end(w); }
+          if (e->policy_n > 0) {
+              json_key(w, "policy"); json_str_n(w, e->policy, e->policy_n);
+          }
+          if (e->has_limits) {
+              json_key(w, "limits");
+              json_obj_begin(w);
+                if (e->limits.max_rss_kb)  { json_key(w, "max_rss_kb");
+                                             json_uint(w, e->limits.max_rss_kb); }
+                if (e->limits.max_cpu_ms)  { json_key(w, "max_cpu_ms");
+                                             json_uint(w, e->limits.max_cpu_ms); }
+                if (e->limits.max_fds)     { json_key(w, "max_fds");
+                                             json_uint(w, e->limits.max_fds); }
+                if (e->limits.max_wall_ms) { json_key(w, "max_wall_ms");
+                                             json_uint(w, e->limits.max_wall_ms); }
+              json_obj_end(w);
+          }
+      }
+    json_obj_end(w);
+}
+
+static int emit_cron_list(struct json_w *w, const struct json_v *params) {
+    /* Optional state filter. */
+    int filter_state = 0;
+    const struct json_v *fv = json_obj_get(params, "filter");
+    if (fv) {
+        if (fv->type != JSON_OBJ) return -32602;
+        const struct json_v *sv = json_obj_get(fv, "state");
+        if (sv) {
+            int sl = 0;
+            const char *ss = json_to_str(sv, &sl);
+            if (!ss) return -32602;
+            filter_state = parse_state(ss, sl);
+            if (!filter_state) return -32602;
+        }
+    }
+    json_obj_begin(w);
+      json_key(w, "entries");
+      json_arr_begin(w);
+      for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+          if (!g_cron[i].in_use) continue;
+          if (filter_state && g_cron[i].state != filter_state) continue;
+          emit_cron_summary(w, &g_cron[i], 0);
+      }
+      json_arr_end(w);
+    json_obj_end(w);
+    return 0;
+}
+
+static int cron_entry_id_from_params(const struct json_v *params,
+                                     struct cron_entry **out) {
+    const struct json_v *iv = json_obj_get(params, "entry_id");
+    if (!iv || iv->type != JSON_NUM) return -32602;
+    int id = (int)json_to_int(iv);
+    struct cron_entry *e = cron_find(id);
+    if (!e) return -32602;
+    *out = e;
+    return 0;
+}
+
+static int emit_cron_get(struct json_w *w, const struct json_v *params) {
+    struct cron_entry *e;
+    int rc = cron_entry_id_from_params(params, &e);
+    if (rc) return rc;
+    json_obj_begin(w);
+      json_key(w, "entry");
+      emit_cron_summary(w, e, 1);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_cron_cancel(struct json_w *w, const struct json_v *params) {
+    struct cron_entry *e;
+    int rc = cron_entry_id_from_params(params, &e);
+    if (rc) return rc;
+    int was_sched = (e->state == CRON_STATE_SCHED);
+    if (was_sched) {
+        e->state = CRON_STATE_CANCELLED;
+        cron_persist(e);
+    }
+    json_obj_begin(w);
+      json_key(w, "ok");             json_bool(w, 1);
+      json_key(w, "was_scheduled");  json_bool(w, was_sched);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_cron_delete(struct json_w *w, const struct json_v *params) {
+    struct cron_entry *e;
+    int rc = cron_entry_id_from_params(params, &e);
+    if (rc) return rc;
+    int id = e->id;
+    cron_unpersist(id);
+    cron_clear(e);
+    json_obj_begin(w);
+      json_key(w, "ok");      json_bool(w, 1);
+      json_key(w, "removed"); json_int (w, id);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_cron_subscribe(struct json_w *w, const struct json_v *params) {
+    struct cron_entry *e;
+    int rc = cron_entry_id_from_params(params, &e);
+    if (rc) return rc;
+    if (!g_cur) return -32603;
+    cron_subscriber_add(e, g_cur->fd);
+    json_obj_begin(w);
+      json_key(w, "ok"); json_bool(w, 1);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_cron_unsubscribe(struct json_w *w, const struct json_v *params) {
+    struct cron_entry *e;
+    int rc = cron_entry_id_from_params(params, &e);
+    if (rc) return rc;
+    if (!g_cur) return -32603;
+    cron_subscriber_remove(e, g_cur->fd);
+    json_obj_begin(w);
+      json_key(w, "ok"); json_bool(w, 1);
+    json_obj_end(w);
+    return 0;
+}
+
+/* Boot recovery — read every /var/cron/<id>.json into g_cron[]. */
+static void cron_load_from_disk(void) {
+    int iter = 0;
+    char name[16];
+    int loaded = 0;
+    int max_id = 0;
+    while (1) {
+        int idx = sys_readdir("/var/cron", &iter, name);
+        if (idx < 0) break;
+        /* Skip entries that don't end in ".json" — defensive. */
+        int nl = 0; while (nl < 16 && name[nl]) nl++;
+        if (nl < 5 ||
+            name[nl-5] != '.' || name[nl-4] != 'j' ||
+            name[nl-3] != 's' || name[nl-2] != 'o' ||
+            name[nl-1] != 'n') continue;
+
+        char path[64];
+        int o = 0;
+        const char *pre = "/var/cron/";
+        while (pre[o]) { path[o] = pre[o]; o++; }
+        for (int i = 0; i < nl; i++) path[o++] = name[i];
+        path[o] = 0;
+
+        int fd = sys_open(path);
+        if (fd < 0) continue;
+        char raw[2048];
+        int n = sys_read(fd, raw, sizeof(raw) - 1);
+        sys_close(fd);
+        if (n <= 0) continue;
+        raw[n] = 0;
+
+        char arena[4096];
+        struct json_v *root = json_parse(raw, n, arena, sizeof(arena));
+        if (!root || root->type != JSON_OBJ) {
+            printf("[cron] %s: parse failed, skipping\n", path);
+            continue;
+        }
+
+        int slot = cron_alloc_slot();
+        if (slot < 0) { printf("[cron] g_cron table full at boot\n"); break; }
+        struct cron_entry *e = &g_cron[slot];
+        cron_clear(e);
+
+        const struct json_v *f;
+        if ((f = json_obj_get(root, "id"))      && f->type == JSON_NUM)
+            e->id = (int)json_to_int(f);
+        if (e->id <= 0) continue;
+        if ((f = json_obj_get(root, "kind"))    && f->type == JSON_STR)
+            e->kind = parse_kind(f->str, f->str_len);
+        if ((f = json_obj_get(root, "state"))   && f->type == JSON_STR)
+            e->state = parse_state(f->str, f->str_len);
+        if (!e->kind || !e->state) continue;
+
+        if ((f = json_obj_get(root, "fire_at"))      && f->type == JSON_NUM)
+            e->fire_at = (uint32_t)json_to_int(f);
+        if ((f = json_obj_get(root, "interval_sec")) && f->type == JSON_NUM)
+            e->interval_sec = (uint32_t)json_to_int(f);
+        if ((f = json_obj_get(root, "max_runs"))     && f->type == JSON_NUM)
+            e->max_runs = (uint32_t)json_to_int(f);
+        if ((f = json_obj_get(root, "run_count"))    && f->type == JSON_NUM)
+            e->run_count = (uint32_t)json_to_int(f);
+        if ((f = json_obj_get(root, "last_run_at"))  && f->type == JSON_NUM)
+            e->last_run_at = (uint32_t)json_to_int(f);
+        if ((f = json_obj_get(root, "last_exit_code")) && f->type == JSON_NUM)
+            e->last_exit_code = (int)json_to_int(f);
+        e->last_job_id = -1;  /* the job table is fresh on boot */
+        if ((f = json_obj_get(root, "concurrent"))   && f->type == JSON_BOOL)
+            e->concurrent = json_to_bool(f);
+
+        if ((f = json_obj_get(root, "cmd"))   && f->type == JSON_STR &&
+            f->str_len < CRON_CMD_MAX) {
+            for (int i = 0; i < f->str_len; i++) e->cmd[i] = f->str[i];
+            e->cmd[f->str_len] = 0;
+            e->cmd_n = f->str_len;
+        }
+        if ((f = json_obj_get(root, "policy")) && f->type == JSON_STR &&
+            f->str_len < CRON_POL_MAX) {
+            for (int i = 0; i < f->str_len; i++) e->policy[i] = f->str[i];
+            e->policy[f->str_len] = 0;
+            e->policy_n = f->str_len;
+        }
+        /* args[] — re-emit into args_raw for fire-time re-parse. */
+        const struct json_v *av = json_obj_get(root, "args");
+        if (av && av->type == JSON_ARR) {
+            struct json_w aw;
+            json_w_init(&aw, e->args_raw, sizeof(e->args_raw));
+            emit_value(&aw, av);
+            json_w_finish(&aw);
+            if (json_w_ok(&aw)) e->args_raw_n = json_w_len(&aw);
+        }
+        const struct json_v *lv = json_obj_get(root, "limits");
+        if (lv && lv->type == JSON_OBJ) {
+            const struct json_v *g;
+            if ((g = json_obj_get(lv, "max_rss_kb"))  && g->type == JSON_NUM)
+                e->limits.max_rss_kb = (uint32_t)json_to_int(g);
+            if ((g = json_obj_get(lv, "max_cpu_ms"))  && g->type == JSON_NUM)
+                e->limits.max_cpu_ms = (uint32_t)json_to_int(g);
+            if ((g = json_obj_get(lv, "max_fds"))     && g->type == JSON_NUM)
+                e->limits.max_fds = (uint32_t)json_to_int(g);
+            if ((g = json_obj_get(lv, "max_wall_ms")) && g->type == JSON_NUM)
+                e->limits.max_wall_ms = (uint32_t)json_to_int(g);
+            if (e->limits.max_rss_kb || e->limits.max_cpu_ms ||
+                e->limits.max_fds   || e->limits.max_wall_ms) e->has_limits = 1;
+        }
+
+        e->in_use = 1;
+        if (e->id > max_id) max_id = e->id;
+        loaded++;
+    }
+    if (max_id >= g_cron_next_id) g_cron_next_id = max_id + 1;
+    if (loaded > 0) printf("[cron] loaded %d entries from /var/cron\n", loaded);
+}
+
+/* ============================================================
  * Tool table — used by both direct and MCP dispatch paths
  * ============================================================ */
 
@@ -1603,6 +2473,16 @@ static const struct method g_methods[] = {
     { "shell.job.delete",      emit_shell_job_delete      },
     { "shell.job.subscribe",   emit_shell_job_subscribe   },
     { "shell.job.unsubscribe", emit_shell_job_unsubscribe },
+    /* Session 77: durable scheduler. cron entries fire as session-74
+     * background jobs at their scheduled time and survive reboot via
+     * /var/cron/<id>.json. */
+    { "cron.create",           emit_cron_create           },
+    { "cron.list",             emit_cron_list             },
+    { "cron.get",              emit_cron_get              },
+    { "cron.cancel",           emit_cron_cancel           },
+    { "cron.delete",           emit_cron_delete           },
+    { "cron.subscribe",        emit_cron_subscribe        },
+    { "cron.unsubscribe",      emit_cron_unsubscribe      },
     { 0, 0 }
 };
 
@@ -1681,6 +2561,24 @@ static int handle_initialize(const struct json_v *id, const struct json_v *param
             json_key(&w, "notifications");
             json_arr_begin(&w);
               json_str(&w, "notifications/kv/changed");
+            json_arr_end(&w);
+          json_obj_end(&w);
+          /* Session 77: cron scheduler. Two kinds (oneshot, recurring),
+           * 1 Hz tick granularity, durable across reboot via
+           * /var/cron/<id>.json. */
+          json_key(&w, "adventos.cron");
+          json_obj_begin(&w);
+            json_key(&w, "version");          json_int(&w, 1);
+            json_key(&w, "max_entries");      json_int(&w, MAX_CRON_ENTRIES);
+            json_key(&w, "min_interval_sec"); json_int(&w, 1);
+            json_key(&w, "kinds");
+            json_arr_begin(&w);
+              json_str(&w, "oneshot");
+              json_str(&w, "recurring");
+            json_arr_end(&w);
+            json_key(&w, "notifications");
+            json_arr_begin(&w);
+              json_str(&w, "notifications/cron.fired");
             json_arr_end(&w);
           json_obj_end(&w);
         json_obj_end(&w);
@@ -2391,7 +3289,9 @@ static int dispatch(int req_len) {
  * sys_write almost always carries the whole frame.
  */
 
-#define NOTIF_BUF        1280       /* envelope + JSON-escaped data    */
+/* NOTIF_BUF moved up to the session 76+77 forward-decl block so
+ * cron-tick code earlier in the file can build frames before
+ * reaching this definition site. */
 #define NOTIF_DATA_CHUNK 512        /* max bytes of pipe data per notif */
 
 /* Returns 1 if a notification may safely go out on this conn right
@@ -2658,6 +3558,19 @@ static void close_conn(struct conn *c) {
         for (int j = 0; j < MAX_KV_WATCHES; j++) {
             if (g_kv_watches[j].in_use && g_kv_watches[j].conn_fd == dead_fd) {
                 g_kv_watches[j].in_use = 0;
+            }
+        }
+        /* Session 77: drop any cron-fired subscriptions owned by this
+         * conn. Each entry holds at most CRON_MAX_SUBSCRIBERS slots,
+         * cleared individually rather than as a bitmask because cron
+         * entries outlive any conn — the on-disk state mustn't carry
+         * stale fds. */
+        for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+            if (!g_cron[i].in_use) continue;
+            for (int k = 0; k < CRON_MAX_SUBSCRIBERS; k++) {
+                if (g_cron[i].subscribers[k] == dead_fd) {
+                    g_cron[i].subscribers[k] = -1;
+                }
             }
         }
     }
@@ -2930,6 +3843,13 @@ int main(int argc, char **argv) {
         g_jobs[i].out_fd = -1;
         g_jobs[i].err_fd = -1;
     }
+    /* Session 77: initialise the cron table — subscribers[] needs -1
+     * sentinels (BSS zeroes are valid conn fds). Then scan
+     * /var/cron for persisted entries and rebuild the table. */
+    for (int i = 0; i < MAX_CRON_ENTRIES; i++) {
+        cron_clear(&g_cron[i]);
+    }
+    cron_load_from_disk();
 
     int s = sys_socket();
     if (s < 0)                  { puts("agentd: socket() failed\n"); return 1; }
@@ -2980,7 +3900,16 @@ int main(int argc, char **argv) {
             poll_subscribed_resources();
         }
 
-        /* 7. Yield. 10 ms tick lets sense-of-realtime stay tight
+        /* 7. Session 77: cron tick at 1 Hz. Walk the 32-entry table,
+         *    fire any entry whose fire_at <= now via a session-74
+         *    background job, persist the updated bookkeeping. */
+        static uint32_t g_cron_div;
+        if (++g_cron_div >= 100) {
+            g_cron_div = 0;
+            cron_tick(sys_time());
+        }
+
+        /* 8. Yield. 10 ms tick lets sense-of-realtime stay tight
          *    without burning the CPU when nothing's happening.   */
         sys_sleep_ms(10);
         g_tick_ms += 10;

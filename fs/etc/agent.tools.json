@@ -282,6 +282,86 @@
         },
         "required": ["job_id"]
       }
+    },
+    {
+      "name": "cron.create",
+      "description": "Submit a scheduled task (session 77). kind=oneshot fires once at fire_at (or now+delay_sec); kind=recurring fires every interval_sec until cancelled or max_runs hit. Optional sandbox policy + per-task resource limits, same shape as shell.exec_sandboxed. Each entry is persisted as /var/cron/<id>.json and survives reboot. Fires spawn a session-74 background job; subscribe via cron.subscribe to get notifications/cron.fired. Returns {entry_id, fire_at}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind":         {"type": "string", "enum": ["oneshot","recurring"]},
+          "fire_at":      {"type": "integer", "description": "Absolute UNIX epoch; mutually exclusive with delay_sec."},
+          "delay_sec":    {"type": "integer", "description": "Fire at now + delay_sec; mutually exclusive with fire_at."},
+          "interval_sec": {"type": "integer", "description": "Required when kind=recurring; >= 1."},
+          "max_runs":     {"type": "integer", "description": "Recurring only; 0 = unlimited."},
+          "concurrent":   {"type": "boolean", "description": "If false (default), skip the next fire when the previous run is still RUNNING."},
+          "cmd":          {"type": "string"},
+          "args":         {"type": "array", "items": {"type": "string"}},
+          "policy":       {"type": "string", "enum": ["minimal","compute","readfs","netclient"]},
+          "limits":       {"type": "object", "properties": {
+                             "max_rss_kb":  {"type": "integer"},
+                             "max_cpu_ms":  {"type": "integer"},
+                             "max_fds":     {"type": "integer"},
+                             "max_wall_ms": {"type": "integer"}}}
+        },
+        "required": ["kind","cmd"]
+      }
+    },
+    {
+      "name": "cron.list",
+      "description": "List every cron entry currently in the table (session 77). Optional state filter restricts to one of {scheduled, cancelled, expired}. Returns {entries: [...]} with one summary per slot.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filter": {"type": "object", "properties": {
+                       "state": {"type": "string", "enum": ["scheduled","cancelled","expired"]}}}
+        }
+      }
+    },
+    {
+      "name": "cron.get",
+      "description": "Return the full entry record for one cron id, including spawn config + limits (session 77).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"entry_id": {"type": "integer"}},
+        "required": ["entry_id"]
+      }
+    },
+    {
+      "name": "cron.cancel",
+      "description": "Mark a cron entry as CANCELLED — no further fires (session 77). Does NOT kill the most recent fire's job (use shell.job.cancel for that). The entry record stays on disk until cron.delete. Returns {ok, was_scheduled}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"entry_id": {"type": "integer"}},
+        "required": ["entry_id"]
+      }
+    },
+    {
+      "name": "cron.delete",
+      "description": "Free a cron entry's slot + remove its /var/cron/<id>.json file (session 77). Any in-flight job from a prior fire keeps running. Returns {ok, removed: id}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"entry_id": {"type": "integer"}},
+        "required": ["entry_id"]
+      }
+    },
+    {
+      "name": "cron.subscribe",
+      "description": "Register the calling connection to receive notifications/cron.fired for this entry (session 77). Up to 4 conns per entry; closing the connection unsubscribes automatically.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"entry_id": {"type": "integer"}},
+        "required": ["entry_id"]
+      }
+    },
+    {
+      "name": "cron.unsubscribe",
+      "description": "Drop the calling connection from a cron entry's subscriber list (session 77).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"entry_id": {"type": "integer"}},
+        "required": ["entry_id"]
+      }
     }
   ]
 }
