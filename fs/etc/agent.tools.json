@@ -127,6 +127,29 @@
       }
     },
     {
+      "name": "kv.watch",
+      "description": "Subscribe the calling connection to KV changes (session 76). Returns {watch_id}. Every successful kv.put / kv.del on a key under (namespace, prefix) pushes a notifications/kv/changed line with {namespace, key, op}. Empty / omitted prefix matches every key in the namespace. Event-driven (no polling). Max 16 concurrent watches per daemon; closing the connection drops all owned watches automatically.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string", "description": "1-31 chars, must match an existing namespace pattern (no validation here, just length)"},
+          "prefix":    {"type": "string", "description": "Optional. Match keys starting with this string; empty = match all in namespace."}
+        },
+        "required": ["namespace"]
+      }
+    },
+    {
+      "name": "kv.unwatch",
+      "description": "Cancel a kv.watch registration (session 76). Returns {ok}. Only the connection that registered the watch may unwatch it. Closing the connection also unwatches.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "watch_id": {"type": "integer", "description": "ID returned by a prior kv.watch call."}
+        },
+        "required": ["watch_id"]
+      }
+    },
+    {
       "name": "shell.exec_sandboxed",
       "description": "Like shell.exec, but the spawned process runs under a syscall sandbox AND optional resource caps. Any syscall not in the named policy returns -1 and bumps a per-process denial counter; exceeding a resource cap kills the child with SIGSEGV (RSS) or SIGKILL (CPU / wall-clock). Useful for running untrusted tools without risking the rest of the system. The child and any of its forks inherit both the mask and the caps. The response includes `sandbox_log` (snapshot of /proc/<child_pid>/sandbox) and `limits_state` (snapshot of /proc/<child_pid>/limits) captured just before the child is reaped.",
       "inputSchema": {

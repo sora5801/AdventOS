@@ -56,6 +56,8 @@ Every tool here is reachable two ways:
 | `kv.del` | `{namespace, key}` | `{ok, existed}` | session 73 |
 | `kv.list` | `{namespace, prefix?}` | `{keys:[...]}` | session 73 |
 | `kv.stat` | `{namespace, key}` | `{exists, size}` | session 73 |
+| `kv.watch` | `{namespace, prefix?}` | `{watch_id}` | session 76 |
+| `kv.unwatch` | `{watch_id}` | `{ok}` | session 76 |
 | `shell.exec_background` | `{cmd, args[], policy?, limits?}` | `{job_id, pid}` | session 74 |
 | `shell.job.list` | — | `{jobs:[...]}` | session 74 |
 | `shell.job.status` | `{job_id}` | `{job_id, pid, cmd, state, done, exit_code?, ...}` | session 74 |
@@ -100,29 +102,74 @@ kv://{namespace}/{key}          (mirror of kv.get)
 `resources/read {uri}` returns `{contents:[{uri, mimeType, text,
 truncated?}]}`. 4 KiB read cap per call.
 
-## Notifications (session 74)
+## Notifications (sessions 74 + 76)
 
-Server-initiated JSON-RPC messages (no `id` field). Pushed to
-connections that have called `shell.job.subscribe`. Each notification
-fits in a single TCP segment (≤ 1280 bytes); writes that would block
-or fail are dropped on the floor (the agent can poll via
-`shell.job.read` to backfill).
+Server-initiated JSON-RPC messages (no `id` field). Each fits in a
+single TCP segment (≤ 1280 bytes); writes that would block or fail
+are dropped on the floor.
 
-```
+| Notification | When | Subscription path |
+|---|---|---|
+| `notifications/job.output` | New bytes on a job's stdout/stderr | `shell.job.subscribe` (session 74) |
+| `notifications/job.exit` | Job's pid reaped + pipes drained | `shell.job.subscribe` (session 74) |
+| `notifications/resources/updated` | Subscribed URI's content hash changed (200 ms tick, FNV-1a) | `resources/subscribe` (session 76) |
+| `notifications/kv/changed` | `kv.put`/`kv.del` on a matching (namespace, prefix) | `kv.watch` (session 76) |
+
+Wire shapes:
+
+```jsonc
+// session 74
 {"jsonrpc":"2.0","method":"notifications/job.output",
  "params":{"job_id":0,"stream":"stdout","data":"..."}}
-
 {"jsonrpc":"2.0","method":"notifications/job.exit",
  "params":{"job_id":0,"exit_code":0}}
+
+// session 76 — MCP-standard, uri only (clients call resources/read to fetch)
+{"jsonrpc":"2.0","method":"notifications/resources/updated",
+ "params":{"uri":"file:///proc/3/status"}}
+
+// session 76 — AdventOS extension, op = "put" | "del"
+{"jsonrpc":"2.0","method":"notifications/kv/changed",
+ "params":{"namespace":"smoke","key":"counter","op":"put"}}
 ```
 
-The `initialize` handshake advertises this via
-`capabilities.experimental.adventos.jobs`:
+The `initialize` handshake advertises both feature groups:
 
-```json
-{"version":1, "max_jobs":8, "ring_bytes":4096,
- "notifications":["notifications/job.output","notifications/job.exit"]}
+```jsonc
+"capabilities": {
+  "resources": {"subscribe": true, "listChanged": false},   // session 76 turned subscribe on
+  "experimental": {
+    "adventos.jobs":      {"version":1, "max_jobs":8, "ring_bytes":4096,
+                           "notifications":["notifications/job.output",
+                                            "notifications/job.exit"]},
+    "adventos.kv_watch":  {"version":1, "max_concurrent_watches":16,
+                           "notifications":["notifications/kv/changed"]}
+  }
+}
 ```
+
+### Subscribing to volatile URIs
+
+`file:///proc/uptime` changes every PIT tick — subscribing means
+the daemon emits a `notifications/resources/updated` for it every
+200 ms forever. Same for `/proc/meminfo` and any `/proc/<pid>/status`
+of a busy process. Agents that don't want the firehose should poll
+via `resources/read` instead, OR subscribe to URIs whose contents
+change only occasionally (KV files, `/etc/*`, `/proc/bcache`).
+
+### `kv.watch` vs `resources/subscribe` on `kv://`
+
+Both can deliver KV-change notifications, but with different
+trade-offs:
+
+| Mechanism | Latency | Precision | Notification carries |
+|---|---|---|---|
+| `kv.watch` | Immediate (same tick as the write) | Prefix match across many keys | `{namespace, key, op}` |
+| `resources/subscribe kv://NS/KEY` | Up to 200 ms | Single key | `{uri}` |
+
+Use `kv.watch` when watching a class of keys or when latency matters.
+Use `resources/subscribe` when watching one specific key and you're
+already using the MCP-standard subscribe path for everything else.
 
 ## KV store layout (session 73)
 

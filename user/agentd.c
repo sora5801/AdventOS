@@ -213,6 +213,93 @@ struct job {
 
 static struct job g_jobs[JOB_MAX];
 
+/* ============================================================
+ * Session 76 — subscription tables
+ * ============================================================
+ *
+ * Two parallel surfaces, both delivering server-initiated
+ * `notifications/...` lines to subscribed conns without a request:
+ *
+ *   resources/subscribe  — polling-based change detection. URI's
+ *     content is re-hashed every 20 event-loop ticks (~200 ms).
+ *     On hash mismatch, every subscriber for that URI receives a
+ *     `notifications/resources/updated {uri}` push. The notification
+ *     does NOT carry the new content; clients call `resources/read`
+ *     if they want it. MCP-standard.
+ *
+ *   kv.watch  — event-driven. Every successful `kv.put` / `kv.del`
+ *     calls `kv_notify_change(ns, key, op)`, which walks the watch
+ *     table and emits `notifications/kv/changed {namespace, key,
+ *     op}` to each (namespace, prefix)-matching watcher. AdventOS
+ *     extension under `experimental.adventos.kv_watch`.
+ *
+ * URIs are deduplicated: 4 conns subscribed to /proc/uptime share
+ * one `res_uri` entry. The polling loop hashes once per tick per
+ * URI, regardless of how many subscribers attach to it.
+ */
+#define MAX_RES_URIS     16    /* distinct subscribed URIs              */
+#define MAX_RES_SUBS     32    /* (conn, uri) pairs                     */
+#define MAX_KV_WATCHES   16    /* (conn, namespace, prefix) tuples      */
+#define RES_URI_MAX      128   /* per-URI string length                 */
+#define KV_WATCH_NS_MAX  32
+#define KV_WATCH_PREFIX_MAX 64
+
+struct res_uri {
+    int      in_use;
+    char     uri[RES_URI_MAX];     /* NUL-terminated                    */
+    int      uri_len;              /* strlen(uri)                       */
+    uint32_t last_hash;            /* FNV-1a 32 of last-fetched content */
+};
+
+struct res_sub {
+    int      in_use;
+    int      conn_fd;              /* socket fd, not g_conns idx        */
+    int      uri_idx;              /* index into g_res_uris             */
+};
+
+struct kv_watch {
+    int      in_use;
+    int      id;                   /* monotonic; kv.unwatch identifier  */
+    int      conn_fd;
+    char     ns[KV_WATCH_NS_MAX];
+    char     prefix[KV_WATCH_PREFIX_MAX]; /* "" = match-all in this ns  */
+};
+
+static struct res_uri   g_res_uris  [MAX_RES_URIS];
+static struct res_sub   g_res_subs  [MAX_RES_SUBS];
+static struct kv_watch  g_kv_watches[MAX_KV_WATCHES];
+static int              g_kv_watch_next_id;   /* monotonic, never reused */
+
+/* FNV-1a 32-bit hash. The polling tick uses this to fingerprint a
+ * resource's content cheaply — 32-bit collisions occur ~1 in 2^32,
+ * acceptable for v1; agents wanting strict semantics can resync via
+ * a periodic resources/read. */
+static uint32_t fnv1a32(const void *buf, int len) {
+    uint32_t h = 0x811C9DC5u;
+    const unsigned char *p = (const unsigned char *)buf;
+    for (int i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* Buffer cap for both the polling tick AND the URI-validation read
+ * inside handle_resources_subscribe. 4 KiB covers every procfs
+ * file we generate today (gen_sandbox's session-75 ceiling is ~2
+ * KiB after the tmp buffer bump) plus typical /etc files. A
+ * resource that exceeds this gets its prefix hashed — agents that
+ * subscribe to a giant URI are choosing to detect changes in the
+ * first 4 KiB only. */
+#define RES_POLL_BUF 4096
+
+/* Session 76 forward decls — emit_kv_{put,del} fire kv_notify_change
+ * after the write succeeds, but that function lives further down in
+ * the file alongside the other notification machinery. */
+static void kv_notify_change(const char *ns, const char *key, const char *op);
+
+/* ============================================================ */
+
 /* Manifest cache. Populated once at boot from /etc/agent.tools.json
  * via load_tools_manifest; tools/list splices g_tools_arr into its
  * response. Re-emitted (not raw file bytes) so the JSON is parser-
@@ -851,6 +938,12 @@ static int emit_kv_put(struct json_w *w, const struct json_v *params) {
     if (kv_copy_cstr(k_c,  sizeof(k_c),  k,  klen) < 0) return -32602;
 
     int rc = kv_put(ns_c, k_c, v, vlen);
+    /* Session 76: notify watchers iff the write actually succeeded.
+     * A failed put doesn't change observable state, so we don't
+     * pretend it did. Identical value re-writes DO fire — the spec
+     * says "the op happened; the watcher decides whether to care",
+     * which is cheaper than diffing. */
+    if (rc >= 0) kv_notify_change(ns_c, k_c, "put");
     json_obj_begin(w);
       json_key(w, "ok"); json_bool(w, rc >= 0);
     json_obj_end(w);
@@ -870,6 +963,12 @@ static int emit_kv_del(struct json_w *w, const struct json_v *params) {
     /* Peek with stat to determine existed-before. */
     int sz, existed = (kv_stat(ns_c, k_c, &sz) == 0);
     int rc = kv_del(ns_c, k_c);
+    /* Session 76: per spec, a kv.del fires the notification even on
+     * a no-op (key didn't exist). Watchers that care about
+     * distinguishing real-delete from no-op can use the {existed}
+     * field on the response. Saves a separate stat-then-notify
+     * dance on every write. */
+    kv_notify_change(ns_c, k_c, "del");
     json_obj_begin(w);
       json_key(w, "ok");      json_bool(w, rc >= 0);
       json_key(w, "existed"); json_bool(w, existed);
@@ -919,6 +1018,78 @@ static int emit_kv_stat(struct json_w *w, const struct json_v *params) {
     json_obj_begin(w);
       json_key(w, "exists"); json_bool(w, exists);
       json_key(w, "size");   json_int (w, size);
+    json_obj_end(w);
+    return 0;
+}
+
+/* ============================================================
+ * Session 76 — kv.watch / kv.unwatch
+ * ============================================================
+ *
+ * Event-driven KV-change subscription. kv.put / kv.del fire
+ * `notifications/kv/changed` to every watcher whose (namespace,
+ * prefix) tuple matches. Per-connection — close the conn and the
+ * watch goes away.
+ *
+ * Returned watch_id is monotonic across the lifetime of the daemon
+ * so it doesn't get accidentally reused if a slot recycles.
+ */
+
+static int emit_kv_watch(struct json_w *w, const struct json_v *params) {
+    int nlen = 0, plen = 0;
+    const char *ns = kv_arg_str(params, "namespace", &nlen);
+    const char *p  = kv_arg_str(params, "prefix",    &plen);  /* optional */
+    if (!ns) return -32602;
+    if (nlen <= 0 || nlen >= KV_WATCH_NS_MAX)        return -32602;
+    if (plen <  0 || plen >= KV_WATCH_PREFIX_MAX)    return -32602;
+    if (!g_cur) return -32603;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_KV_WATCHES; i++) {
+        if (!g_kv_watches[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) return -32603;
+
+    struct kv_watch *kw = &g_kv_watches[slot];
+    for (int i = 0; i < nlen; i++) kw->ns[i] = ns[i];
+    kw->ns[nlen] = 0;
+    if (p && plen > 0) {
+        for (int i = 0; i < plen; i++) kw->prefix[i] = p[i];
+        kw->prefix[plen] = 0;
+    } else {
+        kw->prefix[0] = 0;
+    }
+    kw->conn_fd = g_cur->fd;
+    kw->id      = ++g_kv_watch_next_id;
+    kw->in_use  = 1;
+
+    json_obj_begin(w);
+      json_key(w, "watch_id"); json_int(w, kw->id);
+    json_obj_end(w);
+    return 0;
+}
+
+static int emit_kv_unwatch(struct json_w *w, const struct json_v *params) {
+    const struct json_v *wid_v = json_obj_get(params, "watch_id");
+    if (!wid_v || wid_v->type != JSON_NUM) return -32602;
+    int wid = (int)json_to_int(wid_v);
+    if (wid <= 0) return -32602;
+    if (!g_cur) return -32603;
+
+    int ok = 0;
+    for (int i = 0; i < MAX_KV_WATCHES; i++) {
+        if (!g_kv_watches[i].in_use)             continue;
+        if (g_kv_watches[i].id != wid)           continue;
+        /* Only the conn that registered may unwatch — keeps a
+         * misbehaving client from killing another agent's watch. */
+        if (g_kv_watches[i].conn_fd != g_cur->fd) continue;
+        g_kv_watches[i].in_use = 0;
+        ok = 1;
+        break;
+    }
+
+    json_obj_begin(w);
+      json_key(w, "ok"); json_bool(w, ok);
     json_obj_end(w);
     return 0;
 }
@@ -1417,6 +1588,9 @@ static const struct method g_methods[] = {
     { "kv.del",               emit_kv_del               },
     { "kv.list",              emit_kv_list              },
     { "kv.stat",              emit_kv_stat              },
+    /* Session 76: event-driven KV-change subscription. */
+    { "kv.watch",             emit_kv_watch             },
+    { "kv.unwatch",           emit_kv_unwatch           },
     /* Session 74: streaming background jobs. shell.job.wait is
      * dispatched directly out of dispatch_method() because it may
      * defer its response across event-loop ticks; the rest are
@@ -1468,19 +1642,19 @@ static int handle_initialize(const struct json_v *id, const struct json_v *param
         json_key(&w, "tools");
         json_obj_begin(&w);
         json_obj_end(&w);
-        /* Session 73: advertise the read-only resource surface
-         * (resources/list, resources/templates/list, resources/read).
-         * No subscribe + no list-changed — the resource set is static. */
+        /* Session 73 + 76: advertise the read-only resource surface
+         * (resources/list, resources/templates/list, resources/read)
+         * PLUS resources/subscribe + resources/unsubscribe (session
+         * 76). listChanged stays false — the static set never grows
+         * after boot. subscribe flipped to true now that the poll-
+         * driven change detector is wired up. */
         json_key(&w, "resources");
         json_obj_begin(&w);
-          json_key(&w, "subscribe");   json_bool(&w, 0);
+          json_key(&w, "subscribe");   json_bool(&w, 1);
           json_key(&w, "listChanged"); json_bool(&w, 0);
         json_obj_end(&w);
-        /* Session 74: experimental capability — advertises that we
-         * implement shell.exec_background + shell.job.* + push
-         * notifications. The "experimental" namespace per the MCP
-         * spec is the right home for vendor extensions; clients that
-         * don't know the key just ignore it. */
+        /* Session 74 + 76: experimental capabilities — vendor
+         * extensions clients ignore if they don't know the key. */
         json_key(&w, "experimental");
         json_obj_begin(&w);
           json_key(&w, "adventos.jobs");
@@ -1492,6 +1666,21 @@ static int handle_initialize(const struct json_v *id, const struct json_v *param
             json_arr_begin(&w);
               json_str(&w, "notifications/job.output");
               json_str(&w, "notifications/job.exit");
+            json_arr_end(&w);
+          json_obj_end(&w);
+          /* Session 76: kv.watch — event-driven KV-change subscription.
+           * Notifications fire on every kv.put / kv.del that matches
+           * a registered (namespace, prefix). Polling-based equivalents
+           * exist for KV via resources/subscribe on kv://NS/KEY URIs
+           * but kv.watch is precise (no 200 ms latency) and scoped
+           * to a prefix. */
+          json_key(&w, "adventos.kv_watch");
+          json_obj_begin(&w);
+            json_key(&w, "version");                json_int(&w, 1);
+            json_key(&w, "max_concurrent_watches"); json_int(&w, MAX_KV_WATCHES);
+            json_key(&w, "notifications");
+            json_arr_begin(&w);
+              json_str(&w, "notifications/kv/changed");
             json_arr_end(&w);
           json_obj_end(&w);
         json_obj_end(&w);
@@ -1681,27 +1870,38 @@ static int uri_strip_prefix(const char *uri, int ulen,
     return 1;
 }
 
-static int handle_resources_read(const struct json_v *id, const struct json_v *params) {
-    int ulen = 0;
-    const char *uri = kv_arg_str(params, "uri", &ulen);
-    if (!uri) return -32602;
+/* Session 76: URI-to-bytes resolver, shared by handle_resources_read
+ * AND the polling tick that runs change-detection on subscribed URIs.
+ *
+ * Writes up to `cap-1` bytes plus a NUL into `out`. On success returns
+ * the byte count and writes:
+ *    *mime_out         "text/plain" or "application/json"
+ *    *truncated_out    1 if the read hit cap-1 (more bytes on disk)
+ * On URI-not-recognized / missing / read-failure returns -1.
+ *
+ * Same code path the subscribe poller hashes against. /etc/passwd
+ * hash redaction is intentionally applied here too — a subscriber to
+ * file:///etc/passwd only sees the redacted text, and the hash that
+ * drives notifications is also taken against the redacted bytes (so
+ * a behind-the-scenes hash change doesn't leak observable signal).  */
+static int read_resource_by_uri(const char *uri, int ulen,
+                                char *out, int cap,
+                                const char **mime_out,
+                                int *truncated_out) {
+    if (mime_out)      *mime_out = "text/plain";
+    if (truncated_out) *truncated_out = 0;
+    if (!uri || ulen <= 0 || cap < 2) return -1;
 
-    static char content[RES_READ_MAX];
-    int  content_n = 0;
-    int  truncated = 0;
-    const char *mime = "text/plain";
-
-    /* file:///<path> — sys_open the FS path. */
     char fs_path[128];
     if (uri_strip_prefix(uri, ulen, "file://", fs_path, sizeof(fs_path))) {
         int fd = sys_open(fs_path);
-        if (fd < 0) return -32602;
-        int n = sys_read(fd, content, sizeof(content) - 1);
+        if (fd < 0) return -1;
+        int n = sys_read(fd, out, cap - 1);
         sys_close(fd);
         if (n < 0) n = 0;
-        if (n >= (int)sizeof(content) - 1) truncated = 1;
-        content[n] = 0;
-        content_n = n;
+        if (n >= cap - 1 && truncated_out) *truncated_out = 1;
+        out[n] = 0;
+        int content_n = n;
 
         /* /etc/passwd: redact hashes before emitting. */
         int is_passwd = 1;
@@ -1710,36 +1910,48 @@ static int handle_resources_read(const struct json_v *id, const struct json_v *p
             if (fs_path[i] != want[i]) { is_passwd = 0; break; }
         }
         if (is_passwd && fs_path[11] == 0) {
-            content_n = filter_passwd_hashes(content, content_n);
-            content[content_n] = 0;
+            content_n = filter_passwd_hashes(out, content_n);
+            out[content_n] = 0;
         }
 
-        /* MIME for agent.tools.json -> application/json. */
+        /* MIME tag for agent.tools.json. */
         const char *json_path = "/etc/agent.tools.json";
         int match = 1;
         for (int i = 0; json_path[i]; i++) {
             if (fs_path[i] != json_path[i]) { match = 0; break; }
         }
-        if (match && fs_path[21] == 0) mime = "application/json";
+        if (match && fs_path[21] == 0 && mime_out) *mime_out = "application/json";
+
+        return content_n;
     }
     /* kv://<ns>/<key> — read-only mirror of kv.get. */
-    else {
-        char kv_rest[128];
-        if (!uri_strip_prefix(uri, ulen, "kv://", kv_rest, sizeof(kv_rest))) {
-            return -32602;
-        }
-        /* Split on the first '/'. */
-        int slash = -1;
-        for (int i = 0; kv_rest[i]; i++) {
-            if (kv_rest[i] == '/') { slash = i; break; }
-        }
-        if (slash <= 0) return -32602;
-        kv_rest[slash] = 0;
-        int n = kv_get(kv_rest, kv_rest + slash + 1, content, sizeof(content) - 1);
-        if (n < 0) return -32602;
-        content_n = n;
-        content[content_n] = 0;
+    char kv_rest[128];
+    if (!uri_strip_prefix(uri, ulen, "kv://", kv_rest, sizeof(kv_rest))) {
+        return -1;
     }
+    int slash = -1;
+    for (int i = 0; kv_rest[i]; i++) {
+        if (kv_rest[i] == '/') { slash = i; break; }
+    }
+    if (slash <= 0) return -1;
+    kv_rest[slash] = 0;
+    int n = kv_get(kv_rest, kv_rest + slash + 1, out, cap - 1);
+    if (n < 0) return -1;
+    out[n] = 0;
+    return n;
+}
+
+static int handle_resources_read(const struct json_v *id, const struct json_v *params) {
+    int ulen = 0;
+    const char *uri = kv_arg_str(params, "uri", &ulen);
+    if (!uri) return -32602;
+
+    static char content[RES_READ_MAX];
+    const char *mime = "text/plain";
+    int truncated = 0;
+    int content_n = read_resource_by_uri(uri, ulen, content, sizeof(content),
+                                         &mime, &truncated);
+    if (content_n < 0) return -32602;
 
     /* Emit MCP-shaped response:
      *   {"contents": [{"uri": "...", "mimeType": "...", "text": "..."}]} */
@@ -1757,6 +1969,155 @@ static int handle_resources_read(const struct json_v *id, const struct json_v *p
           }
         json_obj_end(&w);
       json_arr_end(&w);
+    json_obj_end(&w);
+    resp_end(&w);
+    return json_w_ok(&w) ? 0 : -32603;
+}
+
+/* ============================================================
+ * Session 76 — resources/subscribe + resources/unsubscribe
+ * ============================================================
+ *
+ * MCP-builtin methods (not tools — they don't appear in tools/list;
+ * clients discover them via capabilities.resources.subscribe=true).
+ *
+ * subscribe shape:   {uri}            -> {ok: true}
+ * unsubscribe shape: {uri}            -> {ok: true}
+ *
+ * The subscribe path doubles as URI validation: we attempt to
+ * read_resource_by_uri once. If that fails we return -32602 and
+ * never register the sub. On success we cache the FNV-1a hash so
+ * the first poll tick after registration doesn't fire spuriously. */
+
+/* Locate (or create) the g_res_uris slot for `uri`. Returns the
+ * slot index or -1 if the table is full. */
+static int res_uri_get_or_alloc(const char *uri, int ulen) {
+    int free_slot = -1;
+    for (int i = 0; i < MAX_RES_URIS; i++) {
+        if (!g_res_uris[i].in_use) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (g_res_uris[i].uri_len == ulen) {
+            int eq = 1;
+            for (int k = 0; k < ulen; k++) {
+                if (g_res_uris[i].uri[k] != uri[k]) { eq = 0; break; }
+            }
+            if (eq) return i;
+        }
+    }
+    if (free_slot < 0) return -1;
+    if (ulen >= RES_URI_MAX) return -1;
+    for (int k = 0; k < ulen; k++) g_res_uris[free_slot].uri[k] = uri[k];
+    g_res_uris[free_slot].uri[ulen] = 0;
+    g_res_uris[free_slot].uri_len   = ulen;
+    g_res_uris[free_slot].last_hash = 0;
+    g_res_uris[free_slot].in_use    = 1;
+    return free_slot;
+}
+
+/* Drop the slot if no remaining subs point at it. */
+static void res_uri_release_if_unused(int uri_idx) {
+    if (uri_idx < 0 || uri_idx >= MAX_RES_URIS) return;
+    for (int j = 0; j < MAX_RES_SUBS; j++) {
+        if (g_res_subs[j].in_use && g_res_subs[j].uri_idx == uri_idx) return;
+    }
+    g_res_uris[uri_idx].in_use = 0;
+    g_res_uris[uri_idx].uri_len = 0;
+    g_res_uris[uri_idx].uri[0] = 0;
+}
+
+static int handle_resources_subscribe(const struct json_v *id,
+                                      const struct json_v *params) {
+    int ulen = 0;
+    const char *uri = kv_arg_str(params, "uri", &ulen);
+    if (!uri || ulen <= 0 || ulen >= RES_URI_MAX) return -32602;
+    if (!g_cur) return -32603;
+
+    /* Validate the URI by reading it once. If it doesn't resolve,
+     * refuse the subscription rather than silently accepting and
+     * never notifying. The read result also seeds last_hash so the
+     * first poll-tick compare is same-to-same. */
+    static char tmp[RES_POLL_BUF];
+    int n = read_resource_by_uri(uri, ulen, tmp, sizeof(tmp), 0, 0);
+    if (n < 0) return -32602;
+
+    int uri_idx = res_uri_get_or_alloc(uri, ulen);
+    if (uri_idx < 0) {
+        return -32603;     /* uri table full */
+    }
+    g_res_uris[uri_idx].last_hash = fnv1a32(tmp, n);
+
+    /* De-dup (conn, uri) so a careless caller doesn't burn slots.
+     * If the pair already exists, treat the call as idempotent and
+     * return ok. */
+    int conn_fd = g_cur->fd;
+    for (int j = 0; j < MAX_RES_SUBS; j++) {
+        if (g_res_subs[j].in_use &&
+            g_res_subs[j].conn_fd == conn_fd &&
+            g_res_subs[j].uri_idx == uri_idx) {
+            struct json_w w;
+            resp_begin_result(&w, id);
+            json_obj_begin(&w);
+              json_key(&w, "ok"); json_bool(&w, 1);
+            json_obj_end(&w);
+            resp_end(&w);
+            return json_w_ok(&w) ? 0 : -32603;
+        }
+    }
+
+    int sub_slot = -1;
+    for (int j = 0; j < MAX_RES_SUBS; j++) {
+        if (!g_res_subs[j].in_use) { sub_slot = j; break; }
+    }
+    if (sub_slot < 0) {
+        res_uri_release_if_unused(uri_idx);   /* might have just been allocated */
+        return -32603;     /* sub table full */
+    }
+    g_res_subs[sub_slot].in_use  = 1;
+    g_res_subs[sub_slot].conn_fd = conn_fd;
+    g_res_subs[sub_slot].uri_idx = uri_idx;
+
+    struct json_w w;
+    resp_begin_result(&w, id);
+    json_obj_begin(&w);
+      json_key(&w, "ok"); json_bool(&w, 1);
+    json_obj_end(&w);
+    resp_end(&w);
+    return json_w_ok(&w) ? 0 : -32603;
+}
+
+static int handle_resources_unsubscribe(const struct json_v *id,
+                                        const struct json_v *params) {
+    int ulen = 0;
+    const char *uri = kv_arg_str(params, "uri", &ulen);
+    if (!uri || ulen <= 0 || ulen >= RES_URI_MAX) return -32602;
+    if (!g_cur) return -32603;
+
+    int removed = 0;
+    int conn_fd = g_cur->fd;
+    for (int j = 0; j < MAX_RES_SUBS; j++) {
+        if (!g_res_subs[j].in_use)           continue;
+        if (g_res_subs[j].conn_fd != conn_fd) continue;
+        int u = g_res_subs[j].uri_idx;
+        if (u < 0 || u >= MAX_RES_URIS) continue;
+        if (!g_res_uris[u].in_use)           continue;
+        if (g_res_uris[u].uri_len != ulen)   continue;
+        int eq = 1;
+        for (int k = 0; k < ulen; k++) {
+            if (g_res_uris[u].uri[k] != uri[k]) { eq = 0; break; }
+        }
+        if (!eq) continue;
+        g_res_subs[j].in_use = 0;
+        res_uri_release_if_unused(u);
+        removed = 1;
+        break;
+    }
+
+    struct json_w w;
+    resp_begin_result(&w, id);
+    json_obj_begin(&w);
+      json_key(&w, "ok"); json_bool(&w, removed);
     json_obj_end(&w);
     resp_end(&w);
     return json_w_ok(&w) ? 0 : -32603;
@@ -1942,6 +2303,11 @@ static int dispatch_method(const struct json_v *id,
         return handle_resources_templates_list(id, params);
     if (str_eq(method, mlen, "resources/read"))
         return handle_resources_read(id, params);
+    /* Session 76: subscribe + unsubscribe — MCP-builtins, not tools. */
+    if (str_eq(method, mlen, "resources/subscribe"))
+        return handle_resources_subscribe(id, params);
+    if (str_eq(method, mlen, "resources/unsubscribe"))
+        return handle_resources_unsubscribe(id, params);
 
     /* Session 74 special: shell.job.wait may defer the response. */
     if (str_eq(method, mlen, "shell.job.wait")) {
@@ -2111,6 +2477,121 @@ static void emit_job_exit_notif(int job_id, int exit_code) {
     }
 }
 
+/* Session 76 — find an in-use conn by socket fd. Returns the conn
+ * pointer or NULL. Used by the subscriber tables, which key on
+ * `conn_fd` (the socket fd, not the array index) so a subscription
+ * survives slot reshuffling — though we don't reshuffle today, it
+ * keeps the API close to the wire identity. */
+static struct conn *conn_by_fd(int fd) {
+    if (fd < 0) return 0;
+    for (int i = 0; i < MAX_CONN; i++) {
+        if (g_conns[i].state != CST_FREE && g_conns[i].fd == fd) {
+            return &g_conns[i];
+        }
+    }
+    return 0;
+}
+
+/* Session 76 — notifications/resources/updated.
+ *
+ * Fired by the polling tick when a subscribed URI's content hash
+ * changes. The notification carries the URI only; clients call
+ * `resources/read` to fetch the new bytes (MCP spec). Fans out to
+ * every conn with a matching res_sub.uri_idx. */
+static void emit_resources_updated_notif(int uri_idx) {
+    if (uri_idx < 0 || uri_idx >= MAX_RES_URIS) return;
+    if (!g_res_uris[uri_idx].in_use)            return;
+
+    char buf[NOTIF_BUF];
+    struct json_w w;
+    json_w_init(&w, buf, sizeof(buf));
+    json_obj_begin(&w);
+      json_key(&w, "jsonrpc"); json_str(&w, "2.0");
+      json_key(&w, "method");  json_str(&w, "notifications/resources/updated");
+      json_key(&w, "params");
+      json_obj_begin(&w);
+        json_key(&w, "uri");
+        json_str_n(&w, g_res_uris[uri_idx].uri, g_res_uris[uri_idx].uri_len);
+      json_obj_end(&w);
+    json_obj_end(&w);
+    json_w_finish(&w);
+    if (!json_w_ok(&w)) return;
+    int len = json_w_len(&w);
+    if (len + 1 >= (int)sizeof(buf)) return;
+    buf[len] = '\n';
+    int frame_n = len + 1;
+
+    for (int j = 0; j < MAX_RES_SUBS; j++) {
+        if (!g_res_subs[j].in_use)               continue;
+        if (g_res_subs[j].uri_idx != uri_idx)    continue;
+        struct conn *c = conn_by_fd(g_res_subs[j].conn_fd);
+        if (!c)                                  continue;
+        send_notif_to(c, buf, frame_n);
+    }
+}
+
+/* Session 76 — notifications/kv/changed.
+ *
+ * Called from emit_kv_put / emit_kv_del after a successful write.
+ * Walks the watch table, matches (namespace == ns) AND (key starts
+ * with prefix), emits to each watcher's conn. `op` is "put" or "del";
+ * the new value is NOT included — clients re-read with `kv.get` if
+ * they want it.
+ *
+ * O(MAX_KV_WATCHES) per write; max 16 watches so worst case is a
+ * handful of strcmp's even with a full table. */
+static void emit_kv_changed_notif(struct conn *c,
+                                  const char *ns,
+                                  const char *key,
+                                  const char *op) {
+    char buf[NOTIF_BUF];
+    struct json_w w;
+    json_w_init(&w, buf, sizeof(buf));
+    json_obj_begin(&w);
+      json_key(&w, "jsonrpc"); json_str(&w, "2.0");
+      json_key(&w, "method");  json_str(&w, "notifications/kv/changed");
+      json_key(&w, "params");
+      json_obj_begin(&w);
+        json_key(&w, "namespace"); json_str(&w, ns);
+        json_key(&w, "key");       json_str(&w, key);
+        json_key(&w, "op");        json_str(&w, op);
+      json_obj_end(&w);
+    json_obj_end(&w);
+    json_w_finish(&w);
+    if (!json_w_ok(&w)) return;
+    int len = json_w_len(&w);
+    if (len + 1 >= (int)sizeof(buf)) return;
+    buf[len] = '\n';
+    send_notif_to(c, buf, len + 1);
+}
+
+static int starts_with(const char *s, const char *prefix) {
+    for (int i = 0; prefix[i]; i++) {
+        if (s[i] != prefix[i]) return 0;
+    }
+    return 1;
+}
+
+static int str_eq_c(const char *a, const char *b) {
+    for (int i = 0; a[i] || b[i]; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+static void kv_notify_change(const char *ns, const char *key, const char *op) {
+    for (int i = 0; i < MAX_KV_WATCHES; i++) {
+        if (!g_kv_watches[i].in_use)             continue;
+        if (!str_eq_c(g_kv_watches[i].ns, ns))   continue;
+        /* Empty prefix matches everything in the namespace. */
+        if (g_kv_watches[i].prefix[0] != 0 &&
+            !starts_with(key, g_kv_watches[i].prefix)) continue;
+        struct conn *c = conn_by_fd(g_kv_watches[i].conn_fd);
+        if (!c) continue;
+        emit_kv_changed_notif(c, ns, key, op);
+    }
+}
+
 /* ============================================================
  * Session 74 — Event-loop helpers
  * ============================================================ */
@@ -2145,6 +2626,9 @@ static void try_send_more(struct conn *c) {
 }
 
 static void close_conn(struct conn *c) {
+    /* Capture fd BEFORE we clear it — the res/kv tables key on the
+     * socket fd, not the g_conns index. */
+    int dead_fd = c->fd;
     if (c->fd >= 0) sys_close(c->fd);
     c->fd        = -1;
     c->state     = CST_FREE;
@@ -2159,6 +2643,24 @@ static void close_conn(struct conn *c) {
         }
     }
     c->sub_mask = 0;
+
+    /* Session 76: drop any resource subs / kv watches owned by this
+     * conn. After clearing res_subs we run a single pass that frees
+     * any res_uri whose subscriber count went to zero — the polling
+     * tick stops re-hashing it the next iteration. */
+    if (dead_fd >= 0) {
+        for (int j = 0; j < MAX_RES_SUBS; j++) {
+            if (g_res_subs[j].in_use && g_res_subs[j].conn_fd == dead_fd) {
+                g_res_subs[j].in_use = 0;
+            }
+        }
+        for (int i = 0; i < MAX_RES_URIS; i++) res_uri_release_if_unused(i);
+        for (int j = 0; j < MAX_KV_WATCHES; j++) {
+            if (g_kv_watches[j].in_use && g_kv_watches[j].conn_fd == dead_fd) {
+                g_kv_watches[j].in_use = 0;
+            }
+        }
+    }
 }
 
 /* Mark resp[] ready to send (newline-terminated, resp_n includes the
@@ -2363,6 +2865,38 @@ static void process_pending_waits(void) {
     }
 }
 
+/* Session 76 — re-read every subscribed URI, FNV-1a it, compare to
+ * the cached hash. On mismatch, update the cache and fan out a
+ * `notifications/resources/updated` to every subscriber.
+ *
+ * Called from the event loop every 20 ticks (~200 ms). The shared
+ * 4 KiB poll buffer caps the hashable region: a procfs file that
+ * grows past it has its prefix hashed only (rare today — the bcache
+ * + meminfo + ssh_keys files are all far below). A future kprintf-
+ * once warning could flag the truncation case if it actually bites.
+ *
+ * NO immediate notification on first poll after a subscribe — that
+ * would be a "fired the moment you subscribed" race the agent
+ * doesn't want. handle_resources_subscribe seeds `last_hash` with
+ * the freshly-read value at registration time, so the first poll
+ * compares same-to-same and stays quiet. RES_POLL_BUF is defined
+ * once with the session 76 tables up top. */
+static void poll_subscribed_resources(void) {
+    static char poll_buf[RES_POLL_BUF];
+    for (int i = 0; i < MAX_RES_URIS; i++) {
+        if (!g_res_uris[i].in_use) continue;
+        int n = read_resource_by_uri(g_res_uris[i].uri,
+                                     g_res_uris[i].uri_len,
+                                     poll_buf, sizeof(poll_buf), 0, 0);
+        if (n < 0) continue;       /* skip unreadable; don't churn cache */
+        uint32_t h = fnv1a32(poll_buf, n);
+        if (h != g_res_uris[i].last_hash) {
+            g_res_uris[i].last_hash = h;
+            emit_resources_updated_notif(i);
+        }
+    }
+}
+
 static int add_conn(int fd) {
     for (int i = 0; i < MAX_CONN; i++) {
         if (g_conns[i].state == CST_FREE) {
@@ -2435,7 +2969,18 @@ int main(int argc, char **argv) {
         /* 5. Resolve any conn parked on shell.job.wait. */
         process_pending_waits();
 
-        /* 6. Yield. 10 ms tick lets sense-of-realtime stay tight
+        /* 6. Session 76: poll-driven resource-change detection.
+         *    Every 20 ticks (~200 ms) re-fetch + hash + diff every
+         *    subscribed URI. The cadence is the worst-case latency
+         *    for a notifications/resources/updated push; faster
+         *    would burn CPU on volatile URIs like /proc/uptime. */
+        static uint32_t g_poll_div;
+        if (++g_poll_div >= 20) {
+            g_poll_div = 0;
+            poll_subscribed_resources();
+        }
+
+        /* 7. Yield. 10 ms tick lets sense-of-realtime stay tight
          *    without burning the CPU when nothing's happening.   */
         sys_sleep_ms(10);
         g_tick_ms += 10;
