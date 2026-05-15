@@ -30,15 +30,27 @@
 struct test {
     const char *label;       /* short name for the summary line  */
     const char *path;        /* /<name>.elf the FS exposes       */
+    const char *arg1;        /* optional argv[1] (NULL = no arg) */
 };
 
 static const struct test g_tests[] = {
-    { "sandbox-selftest",   "/sbx-selftest.elf" },
-    { "limits-selftest",    "/lim-selftest.elf" },
-    { "kv-selftest",        "/kv-selftest.elf"  },
-    { "jobs-selftest",      "/job-selftest.elf" },
-    { "subscribe-selftest", "/sub-selftest.elf" },
-    { "cron-selftest",      "/crn-selftest.elf" },
+    { "sandbox-selftest",   "/sbx-selftest.elf", 0     },
+    { "limits-selftest",    "/lim-selftest.elf", 0     },
+    { "kv-selftest",        "/kv-selftest.elf",  0     },
+    { "jobs-selftest",      "/job-selftest.elf", 0     },
+    { "subscribe-selftest", "/sub-selftest.elf", 0     },
+    { "cron-selftest",      "/crn-selftest.elf", 0     },
+    /* Session 80: smp-hammer fires 200 back-to-back TCP loopback
+     * requests at agentd, hammering the scheduler/BKL/net_lock
+     * discipline. Under -smp 1 it's a low-stress sanity run that
+     * passes in ~1 s. Under -smp 2 it's the canary for the four
+     * scheduler/locking bugs fixed in session 80 (see
+     * docs/68-smp2-deadlock-fixes.md) — any regression in the
+     * trampoline-IF, schedule-keep, preempt-while-BKL, or
+     * keyboard-wait-BKL discipline will show up as either a
+     * non-zero failure count or a DEADLOCK-OBSERVED stall (exit=2).
+     * Selftest under -smp 2 is the recommended regression gate. */
+    { "smp-hammer",         "/smp-hammer.elf",   "200" },
 };
 #define N_TESTS  (int)(sizeof(g_tests) / sizeof(g_tests[0]))
 
@@ -102,7 +114,20 @@ int main(int argc, char **argv) {
             continue;
         }
         if (pid == 0) {
-            const char *argv2[2] = { g_tests[i].path, 0 };
+            /* argv layout depends on whether this test takes an arg:
+             *   no arg:   { path, NULL }
+             *   one arg:  { path, arg1, NULL }
+             * The libuser exec ABI reads argv as a NULL-terminated
+             * char ** so the trailing NULL slot is mandatory. */
+            const char *argv2[3];
+            argv2[0] = g_tests[i].path;
+            if (g_tests[i].arg1) {
+                argv2[1] = g_tests[i].arg1;
+                argv2[2] = 0;
+            } else {
+                argv2[1] = 0;
+                argv2[2] = 0;
+            }
             sys_exec(g_tests[i].path, argv2);
             puts("selftest: exec failed: ");
             puts(g_tests[i].path);
