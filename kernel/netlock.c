@@ -58,9 +58,25 @@ void net_unlock(void) {
         SMP_LOG("net_unlock pop depth=%d", g_depth);
         return;
     }
+    /* Session 80: print "rel" BEFORE releasing the lock. If we
+     * print after spin_unlock, a peer CPU spinning on g_inner can
+     * acquire and start its own SMP_LOG("acq") before our "rel"
+     * print ever hits the UART — kprintf serializes only via
+     * g_kvprintf_lock, not via g_inner, so the two prints race
+     * independently of the actual mutex state. The visible
+     * artifact under -smp 2 was traces showing two "acq" lines
+     * (one per CPU) before either "rel" line, suggesting a
+     * mutex violation that wasn't real.
+     *
+     * Printing while still holding g_inner serializes the "rel"
+     * print with any peer's pending "acq" print: the peer's
+     * spin_lock can't return until we release, and they can't
+     * print "acq" until spin_lock returns. So the trace order
+     * matches the actual mutex order. bkl_unlock already follows
+     * this convention — we now match it. */
+    SMP_LOG("net_unlock rel");
     g_owner_cpu = -1;
     spin_unlock(&g_inner);
-    SMP_LOG("net_unlock rel");
 }
 
 int net_lock_owned_by_me(void) {
