@@ -118,7 +118,9 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
         static const char finals[4] = { 'C', 'D', 'B', 'A' };
         char esc[3] = { 27, '[', finals[usage - 0x4F] };
         keyboard_inject(esc, 3);
+#ifdef USB_HID_TRACE
         kprintf("[usb-hid] arrow (usage=%x final=%c)\n", usage, esc[2]);
+#endif
         return;
     }
 
@@ -130,10 +132,16 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
     else if (ctrl && c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 1);
 
     keyboard_inject(&c, 1);
-    /* Per-keystroke log makes it obvious in serial output that a
-     * USB key (vs a PS/2 key) reached us. Quiet enough for normal
-     * typing — eight bytes per press. */
+    /* Session 82: the per-keystroke log corrupts the agent-facing
+     * shell readability — every key emits a debug line interleaved
+     * with the shell's character echo, making the agent-training-
+     * surface "prompt + echo + output" contract unparseable. Gated
+     * on -DUSB_HID_TRACE so kernel devs debugging the USB stack
+     * can still see it, but the default agent-driven build is silent.
+     * Same convention as SMP_TRACE (kernel/smp_trace.h, session 80). */
+#ifdef USB_HID_TRACE
     kprintf("[usb-hid] '%c' (usage=%x mods=%x)\n", c, usage, mods);
+#endif
 }
 
 static void poll_one(struct hid_kbd *k) {

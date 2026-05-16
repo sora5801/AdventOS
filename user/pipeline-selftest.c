@@ -137,7 +137,12 @@ static void case_where_count(void) {
            ok, ok ? "" : "count missing or too small");
 }
 
-/* Case 3: `ps |> sort -k pid |> head -1` -> kmain record. */
+/* Case 3: `ps |> sort -k pid |> head -1` -> the lowest-pid record.
+ * That's pid=1 (reaper), NOT pid=0 (kmain), because ps.c filters
+ * pid<=0 entries from /proc — kmain is the bootstrap thread and
+ * not user-visible. The test verifies sort-by-numeric-field +
+ * head -1 round-trip; the specific pid value just needs to match
+ * the lowest entry ps actually emits. */
 static void case_ps_sort_head(void) {
     static char buf[BUF_MAX];
     int n = run_sh("ps |> sort -k pid |> head -1", buf, sizeof(buf));
@@ -145,11 +150,20 @@ static void case_ps_sort_head(void) {
     static char scratch[1024];
     struct json_v *root = json_parse(buf, n, scratch, sizeof(scratch));
     int ok = 0;
+    int pid = -1;
     if (root && root->type == JSON_OBJ) {
         const struct json_v *pid_v = json_obj_get(root, "pid");
-        if (pid_v && pid_v->type == JSON_NUM && pid_v->num == 0) ok = 1;
+        if (pid_v && pid_v->type == JSON_NUM) {
+            pid = (int)pid_v->num;
+            /* Lowest pid ps emits is the reaper kernel task (pid=1)
+             * since kmain (pid=0) is filtered. Any positive integer
+             * value here means sort+head worked end-to-end; we tighten
+             * to "must be 1" because the kernel boot order is
+             * deterministic and reaper is always the first allocated. */
+            ok = (pid == 1);
+        }
     }
-    report("ps |> sort -k pid |> head -1 -> pid=0",
+    report("ps |> sort -k pid |> head -1 -> pid=1 (reaper)",
            ok, ok ? "" : "not the lowest-pid record");
 }
 

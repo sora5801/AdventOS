@@ -37,6 +37,16 @@ if [ "${SMP_TRACE:-0}" = "1" ]; then
     CFLAGS+=(-DSMP_TRACE)
 fi
 
+# Session 82 — opt-in USB-HID per-keystroke trace. Default OFF because
+# the per-key serial print used to interleave with the shell's char
+# echo, corrupting the agent-training-surface "prompt + echo + output"
+# contract. USB driver devs can re-enable with `USB_HID_TRACE=1
+# bash build.sh` to see scancode / usage-id diagnostics.
+if [ "${USB_HID_TRACE:-0}" = "1" ]; then
+    echo "[note] USB_HID_TRACE=1 — kernel will emit [usb-hid] per-key lines"
+    CFLAGS+=(-DUSB_HID_TRACE)
+fi
+
 # User programs share the kernel's freestanding constraints, plus
 # -fno-zero-initialized-in-bss so uninitialized globals end up in .data
 # rather than .bss. That keeps filesz == memsz, so the kernel's ELF

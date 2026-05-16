@@ -56,6 +56,9 @@ int main(int argc, char **argv) {
     int want = 10;
     int argi = 1;
 
+    /* Session 82: silently consume --advjson — same rationale as head. */
+    while (argi < argc && strcmp(argv[argi], "--advjson") == 0) argi++;
+
     if (argi < argc && argv[argi][0] == '-') {
         if (argv[argi][1] == 'n' && argv[argi][2] == 0) {
             argi++;

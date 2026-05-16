@@ -33,6 +33,15 @@ int main(int argc, char **argv) {
     int want = 10;
     int argi = 1;
 
+    /* Session 82: silently consume --advjson. head is byte-transparent
+     * in JSONL mode (newlines bound records the same as text lines),
+     * so the flag is a no-op for us — but we have to recognise it
+     * explicitly because the shell injects it as argv[1] for every
+     * |> pipeline stage, and the older "bad flag" path would error
+     * out on the first byte of every structured pipeline that ends
+     * with head. Same pattern as tee. */
+    while (argi < argc && strcmp(argv[argi], "--advjson") == 0) argi++;
+
     /* -N or -n N */
     if (argi < argc && argv[argi][0] == '-') {
         if (argv[argi][1] == 'n' && argv[argi][2] == 0) {
