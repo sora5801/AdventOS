@@ -256,7 +256,29 @@ int main(int argc, char **argv) {
          * parked in sys_sleep_ms takes a few PIT ticks to actually
          * terminate the child; bump the wait so cron-selftest (which
          * runs next in the meta-runner) doesn't see a still-full
-         * job table. */
+         * job table.
+         *
+         * Session 83: verify-and-retry cancel pattern. Background:
+         * agentd's task fd table is TASK_MAX_FDS=24 and with 8 jobs
+         * alive, agentd is already holding 16 pipe-read fds + 3 stdio
+         * + 1 listen = 20 fds; only 4 free for active conns. A
+         * back-to-back cancel burst (the test's natural rhythm —
+         * agent_method_call closes + re-opens a conn each call) can
+         * leave 2+ stale CST_IDLE conn slots on agentd's side (waiting
+         * for the kernel to deliver the peer FIN), and the next
+         * accept's alloc_fd silently fails. The test sees EOF, the
+         * cancel never reaches agentd's handler, the sleeper task is
+         * never SIGKILL'd, and the next ~30 seconds of downstream
+         * tests see a full job table.
+         *
+         * A single 50ms post-cancel sleep mostly works but the FIRST
+         * cancel can still race the previous RPC's conn-teardown
+         * (test [9]'s rejection response was sent ~ms before the loop
+         * starts). The robust shape is: send cancel, read killed
+         * field, if false retry up to 3x with 100ms backoff. With
+         * libagent's session-83 EOF-clear fix, a connect-failed or
+         * EOF cancel always shows up here as killed:false, so the
+         * retry catches every transient. */
         for (int i = 0; i < 8; i++) {
             if (spawned[i] < 0) continue;
             char d[64];
@@ -269,7 +291,12 @@ int main(int argc, char **argv) {
             else while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
             while (ti) d[o++] = tmp[--ti];
             d[o++] = '}'; d[o] = 0;
-            agent_method_call("shell.job.cancel", d, resp, sizeof(resp));
+            int killed = 0;
+            for (int retry = 0; retry < 3 && !killed; retry++) {
+                agent_method_call("shell.job.cancel", d, resp, sizeof(resp));
+                killed = agent_get_bool(resp, "killed", 0);
+                if (!killed) sys_sleep_ms(100);
+            }
         }
         /* Poll-and-retry delete: SIGKILL on a chunked /sleep.elf
          * lands within 100 ms, but the reaper + drain transition

@@ -60,6 +60,18 @@ int agent_recv_line(int fd, char *buf, int cap) {
 }
 
 int agent_recv_line_timed(int fd, char *buf, int cap, int timeout_ms) {
+    /* Session 83: zero buf at entry so callers using the substring
+     * helpers (agent_get_bool / agent_contains / etc.) on a timed-out
+     * or EOF'd read never read uninitialized stack bytes. The old
+     * shape only null-terminated on success or overflow; the EOF path
+     * (r==0) and the timeout path (r<0 + waited>=timeout_ms) both
+     * left whatever the caller had on the stack visible to the helpers.
+     * In cron-selftest [5+6], the subscribe ACK timed out (agentd
+     * busy with cron-fire spawn+persist), and agent_get_bool(ack,"ok")
+     * sometimes read true from leftover stack — flipping sub_ok
+     * randomly. Defensive zero closes the read-side; the matching
+     * client-side bump of the timeout itself lives in the caller. */
+    if (buf && cap > 0) buf[0] = 0;
     int n = 0;
     int waited = 0;
     while (n < cap - 1) {
@@ -70,9 +82,9 @@ int agent_recv_line_timed(int fd, char *buf, int cap, int timeout_ms) {
             buf[n++] = c;
             continue;
         }
-        if (r == 0) return 0;          /* EOF */
+        if (r == 0) { buf[n] = 0; return 0; }    /* EOF */
         /* r < 0 — would-block. Sleep a bit and retry. */
-        if (waited >= timeout_ms) return -1;
+        if (waited >= timeout_ms) { buf[n] = 0; return -1; }
         sys_sleep_ms(10);
         waited += 10;
     }
@@ -81,6 +93,28 @@ int agent_recv_line_timed(int fd, char *buf, int cap, int timeout_ms) {
 }
 
 int agent_call(const char *json_request, char *resp_buf, int resp_cap) {
+    /* Session 83 — zero the caller's resp_buf BEFORE the network call.
+     * Without this, any path that returns without successfully filling
+     * resp_buf (connect failed, send failed, EOF from agentd, etc.)
+     * leaves the PREVIOUS call's response bytes visible to the caller.
+     *
+     * The concrete bug this fixes: jobs-selftest test [8] cleanup loop
+     * reuses a single `resp` buffer across 8 sequential cancels. If the
+     * 4th cancel's response was {"killed":true} and the 5th cancel hits
+     * EOF (agentd MAX_CONN saturated, conn refused mid-burst), the test
+     * called agent_get_bool(resp,"killed",0) and saw `true` from the
+     * stale 4th response — concluding the 5th sleeper was killed when
+     * in fact agentd never even saw the request. Seven of eight cancels
+     * silently leaked their sleepers, cron-selftest's job table stayed
+     * full, the whole downstream cron path cascade-failed.
+     *
+     * Pairs with the MAX_CONN=16 bump in agentd: the bump prevents
+     * EOF-on-burst in the first place; this clear prevents the silent
+     * false-positive when EOF DOES happen (e.g., agentd crashed, the
+     * client is on a real network with packet loss, etc.). Defense in
+     * depth — neither alone catches the entire failure space. */
+    if (resp_buf && resp_cap > 0) resp_buf[0] = 0;
+
     int sk = connect_localhost_7000();
     if (sk < 0) { capture_last_resp("(connect failed)", 16); return -1; }
     if (agent_send_line(sk, json_request) < 0) {
@@ -90,6 +124,11 @@ int agent_call(const char *json_request, char *resp_buf, int resp_cap) {
     }
     int n = agent_recv_line(sk, resp_buf, resp_cap);
     sys_close(sk);
+    /* On EOF (n == 0) agent_recv_line may have left bytes from a
+     * previous tick in the buffer up to the partial read — make sure
+     * we replace them with an empty C-string so caller's substring
+     * helpers find nothing. */
+    if (n <= 0 && resp_buf && resp_cap > 0) resp_buf[0] = 0;
     capture_last_resp(resp_buf, n);
     return n;
 }

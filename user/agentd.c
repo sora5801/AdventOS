@@ -91,6 +91,20 @@
  * for a loopback-only daemon servicing a small set of agent processes;
  * each conn carries 20 KiB of BSS (req + resp + scratch + bookkeeping).
  *
+ * Session 83 note: a brief experiment bumped this to 16 to absorb a
+ * jobs-selftest test [8] cleanup burst (8 sequential cancel RPCs). It
+ * worked at the conn-table layer but introduced a worse failure: agentd
+ * has TASK_MAX_FDS=24 (kernel limit), and with 8 jobs active that's
+ * 16 pipe-read fds + 3 stdio + 1 listen = 20 fds already allocated, so
+ * only 4 fds remain for any conn. With MAX_CONN=16, sys_accept's
+ * alloc_fd would silently fail after the 5th concurrent conn — the
+ * test's recv saw EOF with no diagnostic visible at the add_conn layer.
+ * Reverted to 4. The right fix lives on the client side (libagent's
+ * agent_test_reset already has a 200ms post-burst sleep; jobs-selftest
+ * test [8] cleanup gained a per-iteration sys_sleep_ms(50) so the
+ * 8-cancel burst becomes 8 cancels-with-breathing-room) plus a libagent
+ * resp-buffer clear-on-EOF that closes the false-positive read path.
+ *
  * Each conn moves through a tiny state machine:
  *   CST_FREE         slot unused
  *   CST_IDLE         buffering bytes of the next request line in req[]
@@ -4039,11 +4053,30 @@ int main(int argc, char **argv) {
 
         /* 7. Session 77: cron tick at 1 Hz. Walk the 32-entry table,
          *    fire any entry whose fire_at <= now via a session-74
-         *    background job, persist the updated bookkeeping. */
-        static uint32_t g_cron_div;
-        if (++g_cron_div >= 100) {
-            g_cron_div = 0;
-            cron_tick(sys_time());
+         *    background job, persist the updated bookkeeping.
+         *
+         *    Session 83: wall-time gating instead of iter-count gating.
+         *    The old `++g_cron_div >= 100` assumed each iter is ~10 ms
+         *    (matching sys_sleep_ms(10) below), so 100 iters = 1 sec.
+         *    But spawn_recorded_job (fork+exec+pipes) can stretch a
+         *    single iter to 30-100 ms, AND the cron-fired job's stdout
+         *    drain + reap can add another 10-30 ms. Under a recurring
+         *    entry's load the iter rate dropped enough that cron_tick
+         *    fired roughly every 5 sec instead of every 1 sec, and
+         *    cron-selftest's `recurring(max_runs=3) fired >= 2 times
+         *    in 7 s` consistently got only 1 fire — root cause of 3
+         *    of the cron-selftest failures.
+         *
+         *    Wall-time gating closes the gap: cron_tick fires the next
+         *    iter after sys_time() advances past the last tick's
+         *    epoch. Independent of iter latency. Per-second resolution
+         *    matches the existing fire_at field width (uint32_t epoch
+         *    seconds) so no sub-second drift creeps in. */
+        static uint32_t g_cron_last_epoch;
+        uint32_t cron_now = sys_time();
+        if (cron_now != g_cron_last_epoch) {
+            g_cron_last_epoch = cron_now;
+            cron_tick(cron_now);
         }
 
         /* 8. Yield. 10 ms tick lets sense-of-realtime stay tight

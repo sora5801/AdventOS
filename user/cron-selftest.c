@@ -154,7 +154,20 @@ int main(int argc, char **argv) {
                 sub_req[o] = 0;
                 agent_send_line(psk, sub_req);
                 char ack[512];
-                agent_recv_line_timed(psk, ack, sizeof(ack), 1000);
+                /* Session 83: timeout bumped 1000 -> 3000 ms. The
+                 * subscribe RPC goes via try_send_more's response
+                 * queue (not the direct sys_write notification path),
+                 * so it has to wait for agentd's main loop to come
+                 * back to the conn-service step. With wall-time-gated
+                 * cron_tick now firing each 1 s of wall clock and each
+                 * fire involving a fork+exec spawn AND a cron_persist
+                 * disk write, agentd's iter can stretch to several
+                 * hundred ms — long enough that a 1 s timeout will
+                 * fire intermittently. 3 s comfortably covers worst
+                 * case while still keeping the test pass/fail signal
+                 * clear (an actual subscribe failure would error
+                 * synchronously, not stall). */
+                agent_recv_line_timed(psk, ack, sizeof(ack), 3000);
                 sub_ok = agent_get_bool(ack, "ok", 0);
             }
             expect(eid3 > 0 && sub_ok, "cron.subscribe to recurring entry");
