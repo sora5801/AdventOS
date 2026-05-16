@@ -133,7 +133,7 @@ echo "[5/7] build user programs"
 # Basic programs — no libjson, no libcrypto. The smallest binaries.
 # Session 78 additions: sleep (for cancel tests), selftest (meta runner).
 USER_PROGS=(hello sh echo httpd ed init
-            head tail grep uniq tee tr seq kill pwd
+            head tail tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
@@ -141,6 +141,10 @@ USER_PROGS=(hello sh echo httpd ed init
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.
+# Session 82: `grep` and `uniq` joined them. tee/tr stay here —
+# tee is byte-transparent (no JSONL parsing) and tr refuses
+# --advjson outright (no JSONL parsing either), so neither needs
+# libjson linked.
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
@@ -162,7 +166,8 @@ done
 # Session 64: programs with a --json mode or built directly on libjson
 # (the agent RPC daemon). Link libjson.o in addition to libuser.
 # Session 81: pluck, where, count, sort are JSONL-aware too.
-JSON_PROGS=(ls cat wc date ps agentd pluck where count sort)
+# Session 82: grep, uniq joined them.
+JSON_PROGS=(ls cat wc date ps agentd pluck where count sort grep uniq)
 for name in "${JSON_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \

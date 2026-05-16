@@ -449,6 +449,16 @@ static int run_pipeline(struct pipeline *pl) {
              * which is harmless mid-pipeline where stdin is the data
              * source. tr is the one tool that hard-errors on JSONL
              * input because it would corrupt the records; see docs/69. */
+            /* Session 82 update: inject --advjson as argv[1] (right
+             * after the command name), NOT at the tail. The tail
+             * insertion broke greedy-flag parsers like grep, which
+             * stop parsing flags at the first positional arg (the
+             * pattern) and never see a trailing --advjson. Putting it
+             * first guarantees every tool's flag parser sees it
+             * before any pattern / filename. Tools that don't
+             * recognise it (echo, kill) see it as their first arg
+             * and either skip it or open-file it harmlessly. tr is
+             * the one tool that hard-errors on JSONL input. */
             if (pl->advjson) {
                 int argc = pl->stages[i].argc;
                 static const char *adv_argv[64];
@@ -456,9 +466,10 @@ static int run_pipeline(struct pipeline *pl) {
                     sys_write(2, "sh: stage argv too long for |> injection\n", 41);
                     sys_exit(127);
                 }
-                for (int k = 0; k < argc; k++)
-                    adv_argv[k] = pl->stages[i].argv[k];
-                adv_argv[argc]     = "--advjson";
+                adv_argv[0] = pl->stages[i].argv[0];
+                adv_argv[1] = "--advjson";
+                for (int k = 1; k < argc; k++)
+                    adv_argv[k + 1] = pl->stages[i].argv[k];
                 adv_argv[argc + 1] = 0;
                 sys_exec(path, (const char *const *)adv_argv);
             } else {

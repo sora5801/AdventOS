@@ -26,6 +26,23 @@ static int set_index(const char *set, char c) {
 }
 
 int main(int argc, char **argv) {
+    /* Session 82: tr refuses to run inside a structured pipeline.
+     * Char-level substitution would corrupt JSON quoting, object
+     * braces, and the `:` between key and value — silently producing
+     * malformed JSONL downstream tools would then drop or, worse,
+     * misparse. This is the one tool that breaks the "ignore the
+     * flag silently" convention because the silent path is actively
+     * destructive. Per the agent-learning-surface principle: loud
+     * failure beats silent corruption every time. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--advjson") == 0) {
+            sys_write(2,
+                "tr: refusing to corrupt JSONL stream "
+                "— use pluck/where/grep instead\n", 68);
+            return 2;
+        }
+    }
+
     if (argc == 3 && argv[1][0] == '-' && argv[1][1] == 'd' && argv[1][2] == 0) {
         const char *del = argv[2];
         char buf[256];

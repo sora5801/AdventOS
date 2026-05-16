@@ -42,9 +42,36 @@ static void emit(uint32_t l, uint32_t w, uint32_t b,
     else putchar('\n');
 }
 
+/* Session 82: JSONL emitter. One record per file. Multi-file
+ * invocations append a `{"file":"TOTAL", ...}` aggregate matching
+ * text-mode wc's `total` line.
+ *
+ * Field omission: when -l / -w / -c are passed, only the requested
+ * counts populate the record. Un-requested fields are OMITTED
+ * (not zeroed), so an agent doing `wc -l |> pluck lines` never
+ * accidentally gets 0 from a `wc -w` invocation. This is the
+ * "predictable failure mode" principle from the agent learning-
+ * surface design: missing fields are diagnosable; silent zeros are
+ * not. */
+static void emit_wc_record_jsonl(const char *file_label,
+                                 uint32_t l, uint32_t w, uint32_t b,
+                                 int show_l, int show_w, int show_c) {
+    char obuf[256];
+    struct json_w jw;
+    json_w_init(&jw, obuf, sizeof(obuf));
+    json_obj_begin(&jw);
+      json_key(&jw, "file"); json_str(&jw, file_label);
+      if (show_l) { json_key(&jw, "lines"); json_uint(&jw, l); }
+      if (show_w) { json_key(&jw, "words"); json_uint(&jw, w); }
+      if (show_c) { json_key(&jw, "bytes"); json_uint(&jw, b); }
+    json_obj_end(&jw);
+    if (json_w_ok(&jw)) json_emit_line(&jw, 1);
+}
+
 int main(int argc, char **argv) {
     int show_l = 0, show_w = 0, show_c = 0;
     int json_mode = 0;
+    int advjson   = 0;
     int argi   = 1;
 
     /* Parse flags. --json is a long flag, handled before short flags
@@ -53,6 +80,11 @@ int main(int argc, char **argv) {
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--json") == 0) {
             json_mode = 1;
+            argi++;
+            continue;
+        }
+        if (strcmp(argv[argi], "--advjson") == 0) {
+            advjson = 1;
             argi++;
             continue;
         }
@@ -71,6 +103,36 @@ int main(int argc, char **argv) {
     }
     if (!show_l && !show_w && !show_c) {
         show_l = show_w = show_c = 1;
+    }
+
+    if (advjson) {
+        if (argi >= argc) {
+            uint32_t l = 0, w = 0, b = 0;
+            count_fd(0, &l, &w, &b);
+            emit_wc_record_jsonl("<stdin>", l, w, b, show_l, show_w, show_c);
+            return 0;
+        }
+        uint32_t tl = 0, tw = 0, tb = 0;
+        int nfiles = 0;
+        for (int i = argi; i < argc; i++) {
+            int fd = sys_open(argv[i]);
+            if (fd < 0) {
+                sys_write(2, "wc: ", 4);
+                sys_write(2, argv[i], (int)strlen(argv[i]));
+                sys_write(2, ": cannot open\n", 14);
+                continue;
+            }
+            uint32_t l = 0, w = 0, b = 0;
+            count_fd(fd, &l, &w, &b);
+            sys_close(fd);
+            emit_wc_record_jsonl(argv[i], l, w, b, show_l, show_w, show_c);
+            tl += l; tw += w; tb += b;
+            nfiles++;
+        }
+        if (nfiles > 1) {
+            emit_wc_record_jsonl("TOTAL", tl, tw, tb, show_l, show_w, show_c);
+        }
+        return 0;
     }
 
     if (json_mode) {

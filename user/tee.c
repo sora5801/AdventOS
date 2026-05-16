@@ -22,6 +22,12 @@ int main(int argc, char **argv) {
     int  nfds = 0;
 
     for (int i = 1; i < argc && nfds < MAX_OUT; i++) {
+        /* Session 82: silently consume --advjson — tee is byte-
+         * transparent so the flag is a no-op. We have to recognise
+         * it explicitly though, otherwise the argv-injection path
+         * would have us trying to open a file named `--advjson`
+         * and erroring out, surprising the agent. */
+        if (strcmp(argv[i], "--advjson") == 0) continue;
         int fd = sys_open_w(argv[i]);
         if (fd < 0) {
             sys_write(2, "tee: cannot open ", 17);

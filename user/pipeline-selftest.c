@@ -212,6 +212,115 @@ static void case_bare_pipe(void) {
            ok, ok ? "" : "JSON leaked into text-mode pipeline");
 }
 
+/* ---- Session 82: widen the JSONL surface (cat/wc/grep/uniq/tee/tr) ---- */
+
+/* Helper to extract integer value of a top-level field from a single
+ * JSONL line (first line of buf). Returns -1 if not parseable. */
+static int json_field_int(const char *buf, int n, const char *key) {
+    /* Find end of first line. */
+    int line_n = 0;
+    while (line_n < n && buf[line_n] != '\n') line_n++;
+    static char scratch[1024];
+    struct json_v *root = json_parse(buf, line_n, scratch, sizeof(scratch));
+    if (!root || root->type != JSON_OBJ) return -1;
+    const struct json_v *v = json_obj_get(root, key);
+    if (!v || v->type != JSON_NUM) return -1;
+    return (int)v->num;
+}
+
+/* Case 7: cat /etc/passwd |> count matches wc -l /etc/passwd */
+static void case_cat_count(void) {
+    static char buf_jsonl[BUF_MAX];
+    static char buf_wc   [BUF_MAX];
+    int n1 = run_sh("cat /etc/passwd |> count", buf_jsonl, sizeof(buf_jsonl));
+    int n2 = run_sh("wc -l /etc/passwd",        buf_wc,    sizeof(buf_wc));
+    int jc = (n1 > 0) ? json_field_int(buf_jsonl, n1, "count") : -1;
+    /* Parse text wc -l output: first token is line count. */
+    int wc_lines = -1;
+    if (n2 > 0) {
+        int v = 0, started = 0;
+        for (int i = 0; i < n2; i++) {
+            if (buf_wc[i] >= '0' && buf_wc[i] <= '9') {
+                v = v * 10 + (buf_wc[i] - '0'); started = 1;
+            } else if (started) break;
+        }
+        if (started) wc_lines = v;
+    }
+    int ok = (jc >= 0 && jc == wc_lines);
+    report("cat /etc/passwd |> count == wc -l /etc/passwd",
+           ok, ok ? "" : "counts disagree");
+}
+
+/* Case 8: wc /etc/passwd |> pluck bytes matches ls' size field */
+static void case_wc_pluck_bytes(void) {
+    static char a[BUF_MAX], b[BUF_MAX];
+    int na = run_sh("wc /etc/passwd |> pluck bytes",                a, sizeof(a));
+    int nb = run_sh("ls /etc |> where name=passwd |> pluck size",   b, sizeof(b));
+    /* Both should be bare integers. Compare as text (whitespace-stripped). */
+    int wa = 0, wb = 0;
+    for (int i = 0; i < na; i++) if (a[i] >= '0' && a[i] <= '9') wa = wa*10 + (a[i]-'0'); else if (wa) break;
+    for (int i = 0; i < nb; i++) if (b[i] >= '0' && b[i] <= '9') wb = wb*10 + (b[i]-'0'); else if (wb) break;
+    int ok = (wa > 0 && wa == wb);
+    report("wc |> pluck bytes == ls --advjson size for /etc/passwd",
+           ok, ok ? "" : "byte counts disagree");
+}
+
+/* Case 9: ps |> grep -f name init |> count == 1 */
+static void case_ps_grep_init(void) {
+    static char buf[BUF_MAX];
+    int n = run_sh("ps |> grep -f name init |> count", buf, sizeof(buf));
+    int c = (n > 0) ? json_field_int(buf, n, "count") : -1;
+    /* Exactly one task named init.elf today (pid 3). The selftest's
+     * own process is named `pip-selftest` and the meta-runner pid
+     * varies — so `init` should be uniquely 1. */
+    int ok = (c == 1);
+    report("ps |> grep -f name init |> count -> {count:1}",
+           ok, ok ? "" : "expected exactly 1 init record");
+}
+
+/* Case 10: sort+uniq with -f name is a no-op on an already-unique /. */
+static void case_sort_uniq(void) {
+    static char a[BUF_MAX], b[BUF_MAX];
+    int na = run_sh("ls / |> sort -k name |> uniq -f name |> count |> pluck count", a, sizeof(a));
+    int nb = run_sh("ls / |> count |> pluck count", b, sizeof(b));
+    int wa = 0, wb = 0;
+    for (int i = 0; i < na; i++) if (a[i] >= '0' && a[i] <= '9') wa = wa*10 + (a[i]-'0'); else if (wa) break;
+    for (int i = 0; i < nb; i++) if (b[i] >= '0' && b[i] <= '9') wb = wb*10 + (b[i]-'0'); else if (wb) break;
+    int ok = (wa > 0 && wa == wb);
+    report("uniq -f name is a no-op on already-unique listing",
+           ok, ok ? "" : "uniq changed the count");
+}
+
+/* Case 11: tee writes a JSONL file AND passes the stream through unchanged. */
+static void case_tee_passthrough(void) {
+    static char a[BUF_MAX], b[BUF_MAX];
+    /* tee writes to /tmp/saved.jsonl (tmpfs) and we then cat it back
+     * and count. The tee'd stream count must equal cat-back count. */
+    int na = run_sh("ls / |> tee /saved.jsonl |> count |> pluck count",  a, sizeof(a));
+    int nb = run_sh("cat /saved.jsonl |> count |> pluck count",          b, sizeof(b));
+    int wa = 0, wb = 0;
+    for (int i = 0; i < na; i++) if (a[i] >= '0' && a[i] <= '9') wa = wa*10 + (a[i]-'0'); else if (wa) break;
+    for (int i = 0; i < nb; i++) if (b[i] >= '0' && b[i] <= '9') wb = wb*10 + (b[i]-'0'); else if (wb) break;
+    int ok = (wa > 0 && wa == wb);
+    report("tee /saved.jsonl is transparent: stream count == file count",
+           ok, ok ? "" : "tee mutated the stream or the file");
+}
+
+/* Case 12: tr refuses --advjson with non-zero exit + diagnostic. */
+static void case_tr_refuses(void) {
+    /* tr sends its error to stderr, which run_sh doesn't capture.
+     * What we CAN observe is the empty stdout + the surrounding
+     * pipeline's behaviour. We invoke `ls / |> tr a A |> count` —
+     * tr exits 2 immediately, which makes the pipe to count produce
+     * zero records, so {"count":0} is the success signal. */
+    static char buf[BUF_MAX];
+    int n = run_sh("ls / |> tr a A |> count", buf, sizeof(buf));
+    int c = (n > 0) ? json_field_int(buf, n, "count") : -1;
+    int ok = (c == 0);
+    report("tr refuses --advjson (downstream sees 0 records)",
+           ok, ok ? "" : "tr did NOT refuse — stream corruption risk");
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     sys_write(1, "[pipeline] selftest — session 81 (structured pipelines)\n", 56);
@@ -222,6 +331,14 @@ int main(int argc, char **argv) {
     case_date_unix();
     case_shell_run();
     case_bare_pipe();
+
+    /* Session 82 — widen the JSONL surface. */
+    case_cat_count();
+    case_wc_pluck_bytes();
+    case_ps_grep_init();
+    case_sort_uniq();
+    case_tee_passthrough();
+    case_tr_refuses();
 
     sys_write(1, "[pipeline] ", 11);
     if (g_fail == 0) sys_write(1, "selftest: all checks PASS\n", 26);
