@@ -587,7 +587,11 @@ int fs_chown_idx(int idx, uint16_t uid, uint16_t gid) {
  * references; zero means "no task has this file open right now". */
 static int fs_entry_open_refs(int idx) {
     int refs = 0;
-    for (uint32_t t_i = 0; t_i < 16; t_i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. With the old
+     * cap, unlink would falsely report "no open refs" for files
+     * opened by tasks in slots 16+, allowing removal of a file
+     * that was still in use. Latent since session 50 bumped TASK_MAX. */
+    for (uint32_t t_i = 0; t_i < TASK_MAX; t_i++) {
         struct task *tt = task_at(t_i);
         if (!tt) continue;
         for (int fd = 0; fd < TASK_MAX_FDS; fd++) {

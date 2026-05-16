@@ -57,7 +57,12 @@ static int alloc_fd(struct task *t) {
  * syscalls (setpgid / getpgid / getsid). */
 static struct task *find_task_by_pid(uint32_t pid) {
     if (pid == 0) return task_current();
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: scan TASK_MAX slots, not the literal 16.
+     * Same class of bug as signal_send / signal_send_pgrp — the
+     * literal predates session 50's bump from 16 to 32 and was
+     * silently broken until a task allocated at slot 16+ couldn't
+     * be found by pgid/sid syscalls. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *t = task_at(i);
         if (t && t->id == pid) return t;
     }

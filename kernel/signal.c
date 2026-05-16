@@ -73,7 +73,18 @@ int signal_send(uint32_t target_pid, int sig) {
     if (target_pid == 0)        return -1;     /* don't signal kmain */
 
     struct task *t = NULL;
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: scan ALL TASK_MAX slots, not the literal 16.
+     * This was the same latent bug `signal_send_pgrp` already called
+     * out below — TASK_MAX bumped 16→32 in session 50 but signal_send
+     * was missed. Symptom: agentd's shell.job.cancel returns success
+     * but SIGKILL silently dropped for pids whose task slot index
+     * ended up past 16 (common after sandbox/limits/kv selftests have
+     * allocated their share of the slot table). That left the
+     * `/sleep.elf 30` sleeper jobs from jobs-selftest running to
+     * natural completion — 30 s instead of the expected ~100 ms —
+     * which leaked job-table slots into cron-selftest and produced
+     * the recurring cron-selftest 6-FAIL cascade. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *cand = task_at(i);
         if (cand && cand->id == target_pid) { t = cand; break; }
     }

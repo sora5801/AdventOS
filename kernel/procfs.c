@@ -182,7 +182,8 @@ static int gen_status(int pid, char *buf, int cap) {
     /* Find the task by id. We walk task_at() over all slots so that
      * tasks not at slot==id (which is most of them) are still found. */
     struct task *t = 0;
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *tt = task_at(i);
         if (tt && (int)tt->id == pid) { t = tt; break; }
     }
@@ -216,7 +217,8 @@ static int gen_status(int pid, char *buf, int cap) {
  * emit the same data as JSON for richer tooling. */
 static int gen_sandbox(int pid, char *buf, int cap) {
     struct task *t = 0;
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *tt = task_at(i);
         if (tt && (int)tt->id == pid) { t = tt; break; }
     }
@@ -271,7 +273,8 @@ static int gen_sandbox(int pid, char *buf, int cap) {
  * like a hard 0. Same pattern across all four fields. */
 static int gen_limits(int pid, char *buf, int cap_buf) {
     struct task *t = 0;
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *tt = task_at(i);
         if (tt && (int)tt->id == pid) { t = tt; break; }
     }
@@ -330,7 +333,8 @@ static int parse_pid(const char *s, int *out) {
 /* Verify that pid is currently a live task. Returns 1 if so.
  * Used to gate /proc/<pid> opens and to filter readdir of /proc. */
 static int pid_is_live(int pid) {
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *t = task_at(i);
         if (t && (int)t->id == pid) return 1;
     }

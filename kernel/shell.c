@@ -299,7 +299,8 @@ static void cmd_kmalloc(const char *arg) {
 static void cmd_tasks(void) {
     kputs(" ID  STATE  NAME             ESP         SWITCHES\n");
     struct task *cur = task_current();
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Session 82 followup: TASK_MAX, not literal 16. */
+    for (uint32_t i = 0; i < TASK_MAX; i++) {
         struct task *t = task_at(i);
         if (!t) continue;
         kprintf(" %2u  %-5s  %-16s 0x%08x  %u%s\n",

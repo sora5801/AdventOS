@@ -261,44 +261,54 @@ static int find_next_int(const char *resp, const char **cursor,
 
 static int reset_jobs(void) {
     int removed = 0;
-    /* Up to 3 s of retry, in case a JS_RUN slot just got SIGKILL'd
-     * and we want to wait for the reaper to flip it to JS_EXIT. */
-    for (int round = 0; round < 30; round++) {
-        agent_method_call("shell.job.list", "{}",
+    /* Session 82 followup: this used to SIGKILL every RUN-state job
+     * in agentd's table, but that's actively dangerous when the
+     * caller is itself running under agentd (e.g. the meta-runner
+     * driven via shell.run) — cancelling job_id=0 would kill the
+     * caller's own ancestor. There's no syscall that lets a child
+     * task introspect its ancestor's agentd-job-id, so we can't
+     * reliably skip "self" entries either.
+     *
+     * Now that signal_send actually delivers SIGKILL across the
+     * full TASK_MAX slot range (also a session-82 followup), each
+     * test's own per-test cleanup loop reliably reaps its own
+     * sleeper children — no cross-test leak. reset_jobs's role
+     * shrinks to "delete already-exited zombie slots so the table
+     * stays clean for the next test"; the CANCEL path is gone.
+     *
+     * Net: tests that fork-and-cancel within themselves still work
+     * exactly as before; tests that crash-leak a running job will
+     * leave it visible to subsequent tests via the state-summary
+     * print (which is the right signal — the leak is the bug). */
+    agent_method_call("shell.job.list", "{}",
+                      g_reset_resp, sizeof(g_reset_resp));
+    if (agent_contains(g_reset_resp, "\"jobs\":[]")) return 0;
+
+    int jids[16]; int n_jids = 0;
+    const char *cursor = g_reset_resp;
+    while (n_jids < 16) {
+        int jid = find_next_int(g_reset_resp, &cursor, "job_id", -1);
+        if (jid < 0) break;
+        jids[n_jids++] = jid;
+    }
+    for (int k = 0; k < n_jids; k++) {
+        char args[64];
+        int o = 0;
+        const char *p = "{\"job_id\":";
+        while (*p) args[o++] = *p++;
+        int v = jids[k];
+        char tmp[12]; int ti = 0;
+        if (v == 0) tmp[ti++] = '0';
+        else while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
+        while (ti) args[o++] = tmp[--ti];
+        args[o++] = '}'; args[o] = 0;
+        /* No cancel — only attempt delete. delete returns
+         * removed:false for RUN-state slots (safe no-op). */
+        agent_method_call("shell.job.delete", args,
                           g_reset_resp, sizeof(g_reset_resp));
-        if (agent_contains(g_reset_resp, "\"jobs\":[]")) break;
-
-        int jids[16]; int n_jids = 0;
-        const char *cursor = g_reset_resp;
-        while (n_jids < 16) {
-            int jid = find_next_int(g_reset_resp, &cursor,
-                                    "job_id", -1);
-            if (jid < 0) break;
-            jids[n_jids++] = jid;
+        if (agent_contains(g_reset_resp, "\"removed\":true")) {
+            removed++;
         }
-        if (n_jids == 0) break;
-
-        for (int k = 0; k < n_jids; k++) {
-            char args[64];
-            int o = 0;
-            const char *p = "{\"job_id\":";
-            while (*p) args[o++] = *p++;
-            int v = jids[k];
-            char tmp[12]; int ti = 0;
-            if (v == 0) tmp[ti++] = '0';
-            else while (v) { tmp[ti++] = (char)('0' + v % 10); v /= 10; }
-            while (ti) args[o++] = tmp[--ti];
-            args[o++] = '}'; args[o] = 0;
-            agent_method_call("shell.job.cancel", args,
-                              g_reset_resp, sizeof(g_reset_resp));
-            agent_method_call("shell.job.delete", args,
-                              g_reset_resp, sizeof(g_reset_resp));
-            if (agent_contains(g_reset_resp, "\"removed\":true") ||
-                agent_get_int(g_reset_resp, "removed", 0) > 0) {
-                removed++;
-            }
-        }
-        sys_sleep_ms(100);
     }
     return removed;
 }
