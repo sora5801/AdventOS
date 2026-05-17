@@ -168,6 +168,39 @@ static struct str_fixup g_str_fixups[MAX_STR_FIXUPS];
 static int              g_n_str_fixups;
 static int              g_str_pool_base_va;   /* set during finalization */
 
+/* Session 93 — global variables.
+ *
+ * Each global declaration at file scope allocates a slot here. The
+ * data pool is a parallel byte buffer that mirrors the binary layout
+ * — initialized globals get their bytes pre-written; uninitialized
+ * globals are left as zero. Globals always occupy 4-byte-aligned
+ * chunks so absolute addresses stay aligned for dword loads/stores.
+ *
+ * Fixups for global accesses behave like the string-fixup table:
+ * codegen emits a placeholder imm32, and a later patch pass writes
+ * (global_pool_base_va + g_globals[i].offset) at the right code
+ * location. */
+#define MAX_GLOBALS    128
+#define DATA_POOL_MAX  8192
+#define MAX_GLOB_FIXUPS 256
+struct global_info {
+    char name[NAME_MAX];
+    int  offset;     /* byte offset within g_data_pool */
+    int  size;       /* bytes reserved (padded to 4) */
+    int  kind;       /* LK_* */
+};
+static struct global_info g_globals[MAX_GLOBALS];
+static int                g_n_globals;
+static unsigned char      g_data_pool[DATA_POOL_MAX];
+static int                g_data_pool_len;
+struct glob_fixup {
+    int code_off;
+    int glob_idx;
+};
+static struct glob_fixup  g_glob_fixups[MAX_GLOB_FIXUPS];
+static int                g_n_glob_fixups;
+static int                g_data_pool_base_va;
+
 /* Intern a (potentially un-terminated) source-side string. Returns
  * the index into g_str_offs. Re-uses an existing entry if the
  * payload is byte-identical (cheap to do because of NUL terminators).
@@ -433,6 +466,14 @@ enum {
     LK_INT_ARR   = 3,   /* int x[N]  — name yields &x[0] (an int*) */
     LK_CHAR_ARR  = 4,   /* char x[N] — name yields &x[0] (a  char*) */
 };
+
+/* Forward decls — these are referenced from the parser but defined in
+ * the symbol-table section further down. */
+static int  kind_is_array(int k);
+static int  kind_is_pointerlike(int k);
+static int  kind_elem_size(int k);
+static int  global_declare(const char *name, int size, int kind);
+static int  global_find(const char *name);
 
 enum {
     N_NUM, N_NAME, N_STR,
@@ -817,11 +858,87 @@ static struct node *parse_func(void) {
     return fn;
 }
 
+/* Session 93 — parse a top-level global declaration. The current
+ * token is T_INT or T_CHAR. We peek ahead to distinguish the function
+ * form (`int name(...)`) from the global form (`int name;` or
+ * `int name = ...;` or `int *name;` or `int name[N];`).
+ *
+ * Initializers: only NUMBER literals (positive or negative) are
+ * accepted as global init values for scalars; arrays default to all
+ * zeros (no brace-init yet). Strings as global init are NOT supported
+ * yet — they'd need to allocate-then-fixup the pool address into
+ * the data section, which requires running string-pool finalization
+ * before global finalization. Future work. */
+static void parse_global_decl(void) {
+    int is_char = (tk_cur()->kind == T_CHAR);
+    g_tk++;
+    int is_ptr = accept(T_STAR);
+    if (tk_cur()->kind != T_NAME)
+        die_at(tk_cur()->line, "expected name in global declaration", 0);
+    char nm[NAME_MAX];
+    int i = 0;
+    while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+    nm[i] = 0;
+    g_tk++;
+    if (accept(T_LBRACKET)) {
+        if (is_ptr) die_at(tk_cur()->line, "ptr-to-array global not supported", 0);
+        if (tk_cur()->kind != T_NUM)
+            die_at(tk_cur()->line, "array size must be integer literal", 0);
+        int sz = tk_cur()->num;
+        if (sz <= 0) die_at(tk_cur()->line, "array size must be positive", 0);
+        g_tk++;
+        expect(T_RBRACKET, "']'");
+        expect(T_SEMI, "';'");
+        int elem = is_char ? 1 : 4;
+        int kind = is_char ? LK_CHAR_ARR : LK_INT_ARR;
+        global_declare(nm, elem * sz, kind);
+        return;
+    }
+    int kind = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+    int gi = global_declare(nm, 4, kind);
+    if (accept(T_ASSIGN)) {
+        /* Accept signed-integer literal as the initial value. */
+        int neg = 0;
+        if (accept(T_MINUS)) neg = 1;
+        if (tk_cur()->kind != T_NUM)
+            die_at(tk_cur()->line, "global init must be an integer literal", 0);
+        int v = tk_cur()->num;
+        if (neg) v = -v;
+        g_tk++;
+        /* Write the int into g_data_pool at this global's offset. */
+        int off = g_globals[gi].offset;
+        g_data_pool[off + 0] = (unsigned char)(v & 0xff);
+        g_data_pool[off + 1] = (unsigned char)((v >> 8) & 0xff);
+        g_data_pool[off + 2] = (unsigned char)((v >> 16) & 0xff);
+        g_data_pool[off + 3] = (unsigned char)((v >> 24) & 0xff);
+    }
+    expect(T_SEMI, "';'");
+}
+
 static struct node *parse_program(void) {
     struct node *p = new_node(N_PROGRAM);
     int cap = 0;
     while (tk_cur()->kind != T_END) {
-        node_push(&p->list, &p->n_list, &cap, parse_func());
+        /* Top-level disambiguation between function and global decl.
+         * Both start with `int|char [*] NAME`. After the name we look
+         * at the next token: `(` → function; `;`/`=`/`[` → global. */
+        if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
+            die_at(tk_cur()->line, "expected 'int' or 'char' at top level", 0);
+        /* Peek past the type (and optional '*' and name) to find the
+         * disambiguator. We don't actually advance g_tk here. */
+        int peek = 1;     /* tk_peek(0)==current type kw */
+        if (tk_peek(peek)->kind == T_STAR) peek++;
+        if (tk_peek(peek)->kind != T_NAME)
+            die_at(tk_peek(peek)->line, "expected name", 0);
+        peek++;
+        int after = tk_peek(peek)->kind;
+        if (after == T_LPAREN) {
+            /* Function. */
+            node_push(&p->list, &p->n_list, &cap, parse_func());
+        } else {
+            /* Global declaration. */
+            parse_global_decl();
+        }
     }
     return p;
 }
@@ -967,6 +1084,83 @@ static void e_storeb_al_at_ebx(void) { emit_b(0x88); emit_b(0x03); }
 /* shl eax, imm8   →  c1 e0 imm8.  Used for index scaling. */
 static void e_shl_eax_imm8(int imm) {
     emit_b(0xc1); emit_b(0xe0); emit_b((unsigned char)(imm & 0xff));
+}
+
+/* Session 93 — absolute-address forms (used by global accesses).
+ * Each emit returns the file offset of the imm32 so the caller can
+ * record a fixup; the imm itself is emitted as 0 and patched later. */
+
+/* mov eax, [imm32]   →  a1 imm32   (special form for EAX-from-memoffs32) */
+static int e_mov_eax_at_abs(void) {
+    emit_b(0xa1);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+/* mov [imm32], eax   →  a3 imm32 */
+static int e_mov_at_abs_eax(void) {
+    emit_b(0xa3);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+/* movzx eax, byte [imm32]  →  0f b6 05 imm32 */
+static int e_movzx_eax_at_abs_b(void) {
+    emit_b(0x0f); emit_b(0xb6); emit_b(0x05);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+/* mov [imm32], al   →  a2 imm32 */
+static int e_mov_at_abs_al(void) {
+    emit_b(0xa2);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+/* mov eax, imm32-as-address (used as `lea` substitute for &global)
+ *   b8 imm32 — same as e_mov_eax_imm but exposing the imm-offset. */
+static int e_mov_eax_imm_for_fixup(void) {
+    emit_b(0xb8);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+
+/* Session 93 — record a code-offset → global-index fixup. */
+static void record_glob_fixup(int code_off, int glob_idx) {
+    if (g_n_glob_fixups >= MAX_GLOB_FIXUPS) die("too many global fixups");
+    g_glob_fixups[g_n_glob_fixups].code_off = code_off;
+    g_glob_fixups[g_n_glob_fixups].glob_idx = glob_idx;
+    g_n_glob_fixups++;
+}
+
+/* Emit a load-the-value-of-a-global into eax. Width depends on the
+ * global's kind: dword for int / int* / char*; byte (movzx) for
+ * future LK_CHAR scalars; for arrays we emit the BASE ADDRESS
+ * (array names decay). */
+static void emit_load_global(int gi) {
+    int k = g_globals[gi].kind;
+    if (kind_is_array(k)) {
+        int off = e_mov_eax_imm_for_fixup();
+        record_glob_fixup(off, gi);
+        return;
+    }
+    /* All scalar globals stored as 4 bytes; load as dword. */
+    int off = e_mov_eax_at_abs();
+    record_glob_fixup(off, gi);
+}
+/* Emit `mov eax, GLOBAL_VA` — the address of the global. */
+static void emit_addrof_global(int gi) {
+    int off = e_mov_eax_imm_for_fixup();
+    record_glob_fixup(off, gi);
+}
+/* Emit `mov [GLOBAL_VA], eax` — scalar store. */
+static void emit_store_global(int gi) {
+    if (kind_is_array(g_globals[gi].kind))
+        die("can't assign to whole array");
+    int off = e_mov_at_abs_eax();
+    record_glob_fixup(off, gi);
 }
 /* sub esp, imm32  /  add esp, imm32 */
 static void e_sub_esp_imm32(int v) {
@@ -1130,6 +1324,33 @@ static int local_declare(const char *name) {
     return local_declare_sized(name, 4, LK_INT);
 }
 
+/* Session 93 — global lookup + declaration. */
+static int global_find(const char *name) {
+    for (int i = 0; i < g_n_globals; i++) {
+        if (my_streq(g_globals[i].name, name)) return i;
+    }
+    return -1;
+}
+static int global_declare(const char *name, int size, int kind) {
+    if (g_n_globals >= MAX_GLOBALS) die("too many globals");
+    if (global_find(name) >= 0)
+        die_at(0, "duplicate global", name);
+    int padded = (size + 3) & ~3;
+    if (g_data_pool_len + padded > DATA_POOL_MAX) die("global data overflow");
+    int idx = g_n_globals++;
+    int j = 0;
+    while (name[j]) { g_globals[idx].name[j] = name[j]; j++; }
+    g_globals[idx].name[j] = 0;
+    g_globals[idx].offset = g_data_pool_len;
+    g_globals[idx].size   = padded;
+    g_globals[idx].kind   = kind;
+    /* Bytes are zero by default (g_data_pool lives in .bss). The
+     * parser writes initial bytes directly afterward if there's an
+     * initializer. */
+    g_data_pool_len += padded;
+    return idx;
+}
+
 /* ---------- Codegen ----------------------------------------------- */
 
 static void gen_expr(struct node *n);
@@ -1268,55 +1489,79 @@ static void gen_expr(struct node *n) {
         }
         case N_NAME: {
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "undefined variable", n->name);
-            /* Session 92 — array names decay to the array's address
-             * (i.e. the value of `arr` is `&arr[0]`). Everything else
-             * (int, int*, char*) is a dword load through ebp. */
-            int k = local_kind(n->name);
-            if (kind_is_array(k)) e_lea_eax_ebp(off);
-            else                  e_load_local(off);
+            if (off != 0) {
+                /* Session 92 — local. Array names decay to address;
+                 * everything else is a dword load through ebp. */
+                int k = local_kind(n->name);
+                if (kind_is_array(k)) e_lea_eax_ebp(off);
+                else                  e_load_local(off);
+                return;
+            }
+            /* Session 93 — fall through to globals. */
+            int gi = global_find(n->name);
+            if (gi < 0) die_at(n->line, "undefined variable", n->name);
+            emit_load_global(gi);
             return;
         }
         case N_ADDR_OF: {
             /* Session 92 — `&NAME`. */
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "& of undefined variable", n->name);
-            e_lea_eax_ebp(off);
+            if (off != 0) { e_lea_eax_ebp(off); return; }
+            int gi = global_find(n->name);
+            if (gi < 0) die_at(n->line, "& of undefined variable", n->name);
+            emit_addrof_global(gi);
             return;
         }
         case N_DEREF: {
             /* Session 92 — `*expr`. Evaluate the pointer, then load.
              * Width depends on the pointer's kind: char* → byte,
              * everything else (int*, plain int treated as ptr) → dword.
-             * We look at the inner expr to decide. For the common case
-             * `*p` where p is a NAME, that's local_kind(p->name). For
-             * arbitrary expressions we default to dword. */
+             * Session 93 — also check the globals table for the
+             * common `*p` case where p is a NAME. */
             gen_expr(n->a);
             int k = LK_INT;
-            if (n->a && n->a->kind == N_NAME)
-                k = local_kind(n->a->name);
+            if (n->a && n->a->kind == N_NAME) {
+                int lk = local_kind(n->a->name);
+                if (lk >= 0) k = lk;
+                else {
+                    int gi = global_find(n->a->name);
+                    if (gi >= 0) k = g_globals[gi].kind;
+                }
+            }
             if (k == LK_CHAR_PTR || k == LK_CHAR_ARR) e_loadb_eax_at_eax();
             else                                       e_load_eax_at_eax();
             return;
         }
         case N_INDEX: {
-            /* Session 92 — `NAME[idx]`. Parser restricts the base to
-             * a NAME, so we can look up its kind cheaply. */
+            /* Session 92/93 — `NAME[idx]`. Parser restricts the base
+             * to a NAME, so we can look up its kind cheaply (local
+             * first, then global). */
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "indexing undefined name", n->name);
-            int k = local_kind(n->name);
+            int k, is_local = (off != 0);
+            int gi = -1;
+            if (is_local) {
+                k = local_kind(n->name);
+            } else {
+                gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "indexing undefined name", n->name);
+                k = g_globals[gi].kind;
+            }
             if (!kind_is_pointerlike(k))
                 die_at(n->line, "indexing a non-pointer/non-array", n->name);
             int elem = kind_elem_size(k);
-            /* base address into eax: array → lea, pointer → load. */
-            if (kind_is_array(k)) e_lea_eax_ebp(off);
-            else                  e_load_local(off);
-            e_push_eax();           /* save base */
-            gen_expr(n->a);         /* index → eax */
-            if (elem == 4) e_shl_eax_imm8(2);   /* scale by 4 */
-            /* pop base into ebx, add eax to it, load thru result. */
+            /* base address into eax: array → lea/&global, pointer → load. */
+            if (is_local) {
+                if (kind_is_array(k)) e_lea_eax_ebp(off);
+                else                  e_load_local(off);
+            } else {
+                if (kind_is_array(k)) emit_addrof_global(gi);
+                else                  emit_load_global(gi);
+            }
+            e_push_eax();
+            gen_expr(n->a);
+            if (elem == 4) e_shl_eax_imm8(2);
             e_pop_ebx();
-            e_add_eax_ebx();        /* eax = base + idx*elem */
+            e_add_eax_ebx();
             if (elem == 1) e_loadb_eax_at_eax();
             else           e_load_eax_at_eax();
             return;
@@ -1441,19 +1686,34 @@ static void gen_stmt(struct node *n) {
         }
         case N_ASSIGN: {
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "undefined variable", n->name);
-            int k = local_kind(n->name);
-            if (kind_is_array(k))
-                die_at(n->line, "can't assign to whole array", n->name);
+            if (off != 0) {
+                int k = local_kind(n->name);
+                if (kind_is_array(k))
+                    die_at(n->line, "can't assign to whole array", n->name);
+                gen_expr(n->a);
+                e_store_local(off);
+                return;
+            }
+            int gi = global_find(n->name);
+            if (gi < 0) die_at(n->line, "undefined variable", n->name);
             gen_expr(n->a);
-            e_store_local(off);
+            emit_store_global(gi);
             return;
         }
         case N_DEREF_ASSIGN: {
-            /* Session 92 — `*NAME = expr;`. Width depends on NAME's kind. */
+            /* Session 92/93 — `*NAME = expr;`. NAME can be local or
+             * global; load its pointer value, then byte/dword-store
+             * `expr` at that address. */
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "* of undefined variable", n->name);
-            int k = local_kind(n->name);
+            int k, is_local = (off != 0);
+            int gi = -1;
+            if (is_local) {
+                k = local_kind(n->name);
+            } else {
+                gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "* of undefined variable", n->name);
+                k = g_globals[gi].kind;
+            }
             if (!kind_is_pointerlike(k))
                 die_at(n->line, "* applied to non-pointer", n->name);
             int elem = kind_elem_size(k);
@@ -1461,9 +1721,13 @@ static void gen_stmt(struct node *n) {
             gen_expr(n->a);
             e_push_eax();
             /* address: load (pointer) or lea (array). */
-            if (kind_is_array(k)) e_lea_eax_ebp(off);
-            else                  e_load_local(off);
-            /* mov ebx, eax — store helper expects ebx = addr. */
+            if (is_local) {
+                if (kind_is_array(k)) e_lea_eax_ebp(off);
+                else                  e_load_local(off);
+            } else {
+                if (kind_is_array(k)) emit_addrof_global(gi);
+                else                  emit_load_global(gi);
+            }
             e_mov_ebx_eax();
             e_pop_eax();
             if (elem == 1) e_storeb_al_at_ebx();
@@ -1471,28 +1735,38 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_INDEX_ASSIGN: {
-            /* Session 92 — `NAME[idx] = val;`. */
+            /* Session 92/93 — `NAME[idx] = val;`. */
             int off = local_find(n->name);
-            if (off == 0) die_at(n->line, "indexing undefined name", n->name);
-            int k = local_kind(n->name);
+            int k, is_local = (off != 0);
+            int gi = -1;
+            if (is_local) {
+                k = local_kind(n->name);
+            } else {
+                gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "indexing undefined name", n->name);
+                k = g_globals[gi].kind;
+            }
             if (!kind_is_pointerlike(k))
                 die_at(n->line, "indexing a non-pointer/non-array", n->name);
             int elem = kind_elem_size(k);
-            /* val first → eax → push (so registers are free for addr calc). */
+            /* val first. */
             gen_expr(n->b);
             e_push_eax();
-            /* base address: array → lea, pointer → load. */
-            if (kind_is_array(k)) e_lea_eax_ebp(off);
-            else                  e_load_local(off);
+            /* base address. */
+            if (is_local) {
+                if (kind_is_array(k)) e_lea_eax_ebp(off);
+                else                  e_load_local(off);
+            } else {
+                if (kind_is_array(k)) emit_addrof_global(gi);
+                else                  emit_load_global(gi);
+            }
             e_push_eax();
-            /* index → eax. */
             gen_expr(n->a);
             if (elem == 4) e_shl_eax_imm8(2);
-            /* eax = base + idx (via ebx). */
             e_pop_ebx();
             e_add_eax_ebx();
-            e_mov_ebx_eax();        /* ebx = final addr */
-            e_pop_eax();            /* eax = val */
+            e_mov_ebx_eax();
+            e_pop_eax();
             if (elem == 1) e_storeb_al_at_ebx();
             else           e_store_eax_at_ebx();
             return;
@@ -2106,6 +2380,20 @@ int main(int argc, char **argv) {
         int sidx = g_str_fixups[i].str_idx;
         unsigned int va = (unsigned int)g_str_pool_base_va + (unsigned int)g_str_offs[sidx];
         patch_d(g_str_fixups[i].code_off, va);
+    }
+
+    /* Session 93 — append the global data pool after the string pool
+     * and patch every N_NAME/etc fixup that touches a global. The
+     * single PT_LOAD covers code + strings + globals, all mapped RWX. */
+    int data_start_off = g_code_len;
+    g_data_pool_base_va = ENTRY_VA + data_start_off;
+    if (g_data_pool_len + g_code_len > CODE_MAX)
+        die("code+strings+globals would exceed CODE_MAX");
+    for (int i = 0; i < g_data_pool_len; i++) g_code[g_code_len++] = g_data_pool[i];
+    for (int i = 0; i < g_n_glob_fixups; i++) {
+        int gi = g_glob_fixups[i].glob_idx;
+        unsigned int va = (unsigned int)g_data_pool_base_va + (unsigned int)g_globals[gi].offset;
+        patch_d(g_glob_fixups[i].code_off, va);
     }
 
     if (write_elf(out_path, g_code_len) < 0) return 1;

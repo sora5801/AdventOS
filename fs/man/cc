@@ -55,6 +55,15 @@ IMPLEMENTED
                    Forward references work — codegen patches
                    call sites after parsing.
 
+    Globals        int x;  int x = N;  int *p;  int  a[N];
+                   char c;             char *p; char a[N];
+                   (session 93)
+                   Top-level declarations live in a single .data
+                   region appended to the binary. Initializers must
+                   be integer literals (signed); arrays default to
+                   all-zero. Functions read/write globals via
+                   absolute-address moves (mov eax, [VA]).
+
     Intrinsics     sys_exit(code)              syscall 3, no return
                    sys_write(fd, addr, n)      syscall 12
                    sys_getpid()                syscall 2
@@ -79,7 +88,6 @@ CODEGEN
 
 DELIBERATELY NOT IMPLEMENTED
     - printf-style formatted output (use puts + print_int + print_str)
-    - global variables
     - preprocessor: #include, #define
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
@@ -109,6 +117,7 @@ EXAMPLES
     Sample at /hello.c demonstrates fact / sum / gcd.
     Sample at /strs.c demonstrates puts / print_str / escapes.
     Sample at /chars.c demonstrates char arrays, my_strlen, my_strcpy.
+    Sample at /globs.c demonstrates global int/char arrays + initializers.
 
 EXIT STATUS
     0   compile succeeded
