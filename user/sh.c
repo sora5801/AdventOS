@@ -565,10 +565,16 @@ static void cmd_help(void) {
     puts("  source FILE / . FILE   run a .sh script in the current shell\n");
     puts("  exit [CODE]       exit the shell\n");
     puts("\n");
-    puts("Line editing (raw-mode, session 49):\n");
-    puts("  Backspace         erase the previous char\n");
+    puts("Line editing (raw-mode, sessions 49 + 84):\n");
+    puts("  Backspace         erase char before cursor\n");
+    puts("  Left / Right      move cursor one char (also Ctrl-B / Ctrl-F)\n");
+    puts("  Home / Ctrl-A     jump cursor to start of line\n");
+    puts("  End  / Ctrl-E     jump cursor to end of line\n");
     puts("  Up / Down         walk the command history\n");
     puts("  Tab               complete a filename from the cwd\n");
+    puts("  Ctrl-W            delete the word before cursor\n");
+    puts("  Ctrl-U            delete from start of line to cursor\n");
+    puts("  Ctrl-K            delete from cursor to end of line\n");
     puts("  Ctrl-C            discard the current line\n");
     puts("\n");
     puts("Pipelines and redirection:\n");
@@ -687,14 +693,37 @@ static const char *current_prompt(void) {
 }
 
 /* Redraw "<prompt><buf>" from column 0 and erase to EOL. Called after
- * arrow keys or tab-completion rewrite the buffer in-place. We don't
- * track cursor column ourselves — the kernel TTY does, and clear_eol
- * scrubs whatever stale chars are left from the previous longer line. */
+ * arrow keys, tab-completion, or any mid-line edit rewrites the buffer
+ * in-place. We don't track cursor column ourselves — the kernel TTY
+ * does, and clear_eol scrubs whatever stale chars are left from the
+ * previous longer line. */
 static void redraw_line(const char *buf, int len) {
     putchar('\r');
     puts(current_prompt());
     for (int i = 0; i < len; i++) putchar(buf[i]);
     sys_tty_clear_eol();
+}
+
+/* Session 84: compute the printable length of the current prompt.
+ * Used by the line editor to know how many cells to skip past when
+ * positioning the cursor for in-line edits. (We render the prompt
+ * verbatim — no escape parsing — so visible length == byte length.) */
+static int prompt_len(void) {
+    const char *p = current_prompt();
+    int n = 0; while (p[n]) n++; return n;
+}
+
+/* Session 84: position the cursor on the prompt's row at column
+ * (prompt + want_col_in_buf). Called after redraw_line leaves the
+ * cursor at end-of-line, when we need it somewhere in the middle.
+ * `prompt_row` is the row captured at line-start via
+ * sys_tty_get_cursor. The kernel cursor setter updates BOTH the
+ * VGA text grid and the framebuffer console; on a serial terminal
+ * the cursor stays at end-of-line (no ANSI emit), but the typed
+ * buffer is still correct and the user can switch to the QEMU
+ * window for visual feedback. */
+static void position_cursor(int prompt_row, int want_col_in_buf) {
+    sys_tty_cursor(prompt_row, prompt_len() + want_col_in_buf);
 }
 
 /* Filename completion. Walk cwd looking for entries that start with the
@@ -778,30 +807,119 @@ static void tab_complete(char *buf, int *len_p, int cap) {
  * line is NUL-terminated in `buf`. */
 static int read_line_interactive(char *buf, int cap) {
     uint32_t prev_mode = tty_set_mode(TTY_RAW);
-    int  len = 0;
-    int  hist_view = g_hist_count;       /* count = "showing current input" */
+    int  len  = 0;
+    int  cur  = 0;                   /* cursor position within buf */
+    int  hist_view = g_hist_count;   /* count = "showing current input" */
     char saved[LINE_MAX]; int saved_len = 0;
     buf[0] = 0;
+
+    /* Session 84: snapshot the prompt row so mid-line edits can move
+     * the cursor back to the right place without scanning the screen.
+     * The prompt was just printed by the caller; we query right after
+     * entering raw mode so the row reflects the prompt's row even if
+     * scrolling happened. Long lines that wrap to the next row will
+     * have a slightly-misplaced cursor — known limitation; documented
+     * in the session-84 deep dive. */
+    int prompt_row = 0, prompt_col = 0;
+    sys_tty_get_cursor(&prompt_row, &prompt_col);
+
+    /* Helper-as-lambda via a label-free local: every state change to
+     * (buf, len, cur) is followed by `goto repaint` so the screen
+     * matches the logical state. Done as a label/goto rather than a
+     * function call because the editor's locals (prompt_row, etc.)
+     * are deeply involved in the redraw. */
+#define REPAINT()  do { redraw_line(buf, len); \
+                        position_cursor(prompt_row, cur); } while (0)
 
     for (;;) {
         char c;
         int  n = sys_read(0, &c, 1);
         if (n <= 0) continue;
 
-        /* Enter — commit the line. */
+        /* Enter — commit the line. Move cursor to end first so the
+         * trailing \n appears on the right row even if the user was
+         * mid-line. */
         if (c == '\r' || c == '\n') {
+            position_cursor(prompt_row, len);
             putchar('\n');
             buf[len] = 0;
             tty_set_mode(prev_mode);
             return len;
         }
 
-        /* Backspace (kbd sends \b=0x08; serial DEL=0x7F). */
+        /* Backspace (kbd sends \b=0x08; serial DEL=0x7F). Now cursor-
+         * aware: deletes the char BEFORE the cursor and shifts the
+         * right side left. At column 0 (cursor == 0), no-op. */
         if (c == 0x08 || c == 0x7F) {
-            if (len > 0) {
+            if (cur > 0) {
+                for (int i = cur - 1; i < len - 1; i++) buf[i] = buf[i + 1];
                 len--;
+                cur--;
                 buf[len] = 0;
-                putchar('\b'); putchar(' '); putchar('\b');
+                REPAINT();
+            }
+            continue;
+        }
+
+        /* Ctrl-A — start of line. */
+        if (c == 0x01) {
+            if (cur != 0) { cur = 0; REPAINT(); }
+            continue;
+        }
+        /* Ctrl-E — end of line. */
+        if (c == 0x05) {
+            if (cur != len) { cur = len; REPAINT(); }
+            continue;
+        }
+        /* Ctrl-B — back one char (alternative to Left arrow, emacs). */
+        if (c == 0x02) {
+            if (cur > 0) { cur--; position_cursor(prompt_row, cur); }
+            continue;
+        }
+        /* Ctrl-F — forward one char (alternative to Right arrow). */
+        if (c == 0x06) {
+            if (cur < len) { cur++; position_cursor(prompt_row, cur); }
+            continue;
+        }
+        /* Ctrl-K — kill from cursor to end of line. */
+        if (c == 0x0B) {
+            if (cur < len) {
+                len = cur;
+                buf[len] = 0;
+                REPAINT();
+            }
+            continue;
+        }
+        /* Ctrl-U — kill from start of line up to cursor. */
+        if (c == 0x15) {
+            if (cur > 0) {
+                int tail = len - cur;
+                for (int i = 0; i < tail; i++) buf[i] = buf[cur + i];
+                len = tail;
+                cur = 0;
+                buf[len] = 0;
+                REPAINT();
+            }
+            continue;
+        }
+        /* Ctrl-W — kill the word immediately before the cursor.
+         * "Word" = run of non-whitespace; skip trailing whitespace
+         * first (matches bash/readline). */
+        if (c == 0x17) {
+            if (cur > 0) {
+                int end = cur;
+                while (end > 0 && (buf[end - 1] == ' ' || buf[end - 1] == '\t'))
+                    end--;
+                while (end > 0 && buf[end - 1] != ' ' && buf[end - 1] != '\t')
+                    end--;
+                int killed = cur - end;
+                if (killed > 0) {
+                    for (int i = end; i < len - killed; i++) buf[i] = buf[i + killed];
+                    len -= killed;
+                    cur  = end;
+                    buf[len] = 0;
+                    REPAINT();
+                }
             }
             continue;
         }
@@ -813,7 +931,7 @@ static int read_line_interactive(char *buf, int cap) {
             if (a != '[') continue;
             if (sys_read(0, &b, 1) <= 0) continue;
 
-            if (b == 'A') {                              /* up */
+            if (b == 'A') {                              /* up — history back */
                 if (g_hist_count == 0) continue;
                 if (hist_view == g_hist_count) {
                     saved_len = len;
@@ -824,9 +942,10 @@ static int read_line_interactive(char *buf, int cap) {
                 const char *src = g_hist[hist_view];
                 while (src[j] && j < cap - 1) { buf[j] = src[j]; j++; }
                 len = j;
+                cur = len;
                 buf[len] = 0;
-                redraw_line(buf, len);
-            } else if (b == 'B') {                       /* down */
+                REPAINT();
+            } else if (b == 'B') {                       /* down — history forward */
                 if (hist_view >= g_hist_count) continue;
                 hist_view++;
                 if (hist_view == g_hist_count) {
@@ -838,39 +957,79 @@ static int read_line_interactive(char *buf, int cap) {
                     while (src[j] && j < cap - 1) { buf[j] = src[j]; j++; }
                     len = j;
                 }
+                cur = len;
                 buf[len] = 0;
-                redraw_line(buf, len);
+                REPAINT();
+            } else if (b == 'C') {                       /* right */
+                if (cur < len) { cur++; position_cursor(prompt_row, cur); }
+            } else if (b == 'D') {                       /* left */
+                if (cur > 0)  { cur--; position_cursor(prompt_row, cur); }
+            } else if (b == 'H') {                       /* Home */
+                if (cur != 0)   { cur = 0;   REPAINT(); }
+            } else if (b == 'F') {                       /* End */
+                if (cur != len) { cur = len; REPAINT(); }
             }
-            /* ESC[C / ESC[D (right/left) ignored — no mid-line editing. */
+            /* Other CSI sequences (modifier prefixes, F-keys) dropped. */
             continue;
         }
 
-        /* Tab — complete from cwd. */
+        /* Tab — complete from cwd. Tab is most useful at end-of-line;
+         * if the user pressed Tab mid-line, jump cursor to end first
+         * so tab_complete's "complete the last whitespace-delimited
+         * word" logic does the obvious thing. */
         if (c == '\t') {
+            if (cur != len) { cur = len; position_cursor(prompt_row, cur); }
             tab_complete(buf, &len, cap);
+            cur = len;
+            /* tab_complete echoes the spliced chars directly, so no
+             * REPAINT needed for the common single-match case. The
+             * multi-match path already does its own redraw_line at
+             * the end of tab_complete. After either path, cursor
+             * lives at end of buf. Re-anchor it explicitly so a
+             * subsequent edit knows where to be. */
+            position_cursor(prompt_row, cur);
             continue;
         }
 
-        /* Ctrl-C — discard the current line, fresh prompt. */
+        /* Ctrl-C — discard the current line, fresh prompt. The new
+         * prompt starts on the next row, so re-snapshot prompt_row. */
         if (c == 0x03) {
             putchar('\n');
             len = 0;
+            cur = 0;
             buf[0] = 0;
             puts(current_prompt());
+            sys_tty_get_cursor(&prompt_row, &prompt_col);
             continue;
         }
 
-        /* Printable ASCII — append + echo. */
+        /* Printable ASCII — insert at cursor and shift right side
+         * one position right. At end-of-line this collapses to the
+         * old "append + echo" fast path. */
         if (c >= 32 && c < 127) {
             if (len < cap - 1) {
-                buf[len++] = c;
-                buf[len] = 0;
-                putchar(c);
+                if (cur == len) {
+                    /* Fast path: appending. */
+                    buf[len++] = c;
+                    cur = len;
+                    buf[len] = 0;
+                    putchar(c);
+                } else {
+                    /* Insert path: shift tail one byte right. */
+                    for (int i = len; i > cur; i--) buf[i] = buf[i - 1];
+                    buf[cur] = c;
+                    len++;
+                    cur++;
+                    buf[len] = 0;
+                    REPAINT();
+                }
             }
             continue;
         }
         /* Anything else (control bytes we don't handle) is dropped. */
     }
+
+#undef REPAINT
 }
 
 /* ---- new builtins (session 49) ------------------------------------- */

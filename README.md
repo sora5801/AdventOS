@@ -90,7 +90,11 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **83 — Usable Unix**. See [`docs/70-usable-unix-coreutils.md`](docs/70-usable-unix-coreutils.md) for the latest deep dive (selftest reliability fixes + coreutils gap-fill).
+Current session: **84 — Usable Unix Phase 2**. See [`docs/71-shell-mid-line-editing.md`](docs/71-shell-mid-line-editing.md) for the latest deep dive (left/right arrows, Home/End, Ctrl-A/E/B/F/W/U/K in `sh.elf`).
+
+Recent session deep dives:
+- [Session 84 — Shell mid-line editing](docs/71-shell-mid-line-editing.md)
+- [Session 83 — Usable Unix Phase 1: coreutils gap-fill + selftest reliability](docs/70-usable-unix-coreutils.md)
 
 The full session index is in `docs/`. Highlights:
 - [Session 80 — SMP=2 deadlock fixes](docs/68-smp2-deadlock-fixes.md) (`-smp 2` finally usable)

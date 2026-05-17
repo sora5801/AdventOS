@@ -276,6 +276,20 @@ int sys_tty_cursor(int row, int col) {
                       : "memory");
     return ret;
 }
+int sys_tty_get_cursor(int *out_row, int *out_col) {
+    /* The kernel writes (row, col) into a 2-int buffer; we copy the
+     * pieces out so the caller can pass nulls for fields they don't
+     * care about. */
+    int out[2] = { 0, 0 };
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_TTY_GET_CURSOR), "b"(out)
+                      : "memory");
+    if (out_row) *out_row = out[0];
+    if (out_col) *out_col = out[1];
+    return ret;
+}
 int sys_tty_clear(void) {
     int ret;
     __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(SYS_TTY_CLEAR) : "memory");

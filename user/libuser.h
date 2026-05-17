@@ -119,6 +119,7 @@ typedef unsigned int   size_t;
 #define SYS_UNLINK         84
 #define SYS_FS_SIZE        85    /* session 81: file size in bytes */
 #define SYS_RMDIR          86    /* session 83: remove empty dir */
+#define SYS_TTY_GET_CURSOR 87    /* session 84: read cursor (row,col) */
 
 /* Session 70: syscall sandbox.
  *
@@ -357,6 +358,7 @@ int      sys_block_write(int dev_idx, unsigned int lba, unsigned int n, const vo
  * AdventOS's VGA / fbcon consoles don't interpret ANSI escapes, so
  * cursor placement + line clearing is exposed directly. */
 int      sys_tty_cursor   (int row, int col);
+int      sys_tty_get_cursor(int *out_row, int *out_col);
 int      sys_tty_clear    (void);
 int      sys_tty_clear_eol(void);
 

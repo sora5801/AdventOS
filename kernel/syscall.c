@@ -180,6 +180,7 @@ const char *syscall_name(unsigned num) {
         case SYS_SETLIMIT:        return "SYS_SETLIMIT";
         case SYS_UNLINK:          return "SYS_UNLINK";
         case SYS_RMDIR:           return "SYS_RMDIR";
+        case SYS_TTY_GET_CURSOR:  return "SYS_TTY_GET_CURSOR";
         default:                  return "SYS_???";
     }
 }
@@ -1076,6 +1077,22 @@ void syscall_dispatch(struct registers *r) {
             extern void fbcon_set_cursor(int, int);
             vga_set_cursor((int)a, (int)b);
             fbcon_set_cursor((int)a, (int)b);
+            ret = 0;
+            break;
+        }
+        case SYS_TTY_GET_CURSOR: {
+            /* Session 84: read back the console cursor. Returns the
+             * row/col of the framebuffer console (which tracks the
+             * VGA cursor in lockstep — both setters fire together).
+             * Used by sh.c's line editor to anchor the prompt row
+             * before doing redraws on mid-line edits. */
+            extern void fbcon_get_cursor(int *out_row, int *out_col);
+            int *uout = (int *)(uintptr_t)a;
+            if (!uout) { ret = -1; break; }
+            int row = 0, col = 0;
+            fbcon_get_cursor(&row, &col);
+            uout[0] = row;
+            uout[1] = col;
             ret = 0;
             break;
         }

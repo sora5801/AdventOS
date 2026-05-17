@@ -261,6 +261,16 @@ struct sys_limits {
                                 * blocks removal — POSIX ENOTEMPTY analog).
                                 * Same owner-or-root permission model. */
 
+/* ---- Session 84 (path-A shell line-editor): cursor query ---- */
+#define SYS_TTY_GET_CURSOR 87  /* (eax=87, ebx=int out[2]) -> 0.
+                                * Writes (row, col) of the current
+                                * console cursor into out[0], out[1].
+                                * Pairs with SYS_TTY_CURSOR (= 60) which
+                                * is the setter. Used by sh.c's line
+                                * editor to anchor the prompt row before
+                                * doing in-place redraws for left/right
+                                * cursor movement and Ctrl-A/E/W/U/K. */
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

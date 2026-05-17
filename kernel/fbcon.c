@@ -190,6 +190,17 @@ void fbcon_set_cursor(int row, int col) {
     g_cur_col = (uint32_t)col;
 }
 
+/* Session 84: read back the current cursor row/col. Used by the shell
+ * line editor to anchor the prompt row before doing in-place redraws
+ * for mid-line edits. fbcon and VGA stay in sync on cursor updates
+ * (sys_tty_cursor calls both setters), so this and vga_get_cursor are
+ * interchangeable from userspace's perspective — pick the one that
+ * matches the active console. */
+void fbcon_get_cursor(int *out_row, int *out_col) {
+    if (out_row) *out_row = (int)g_cur_row;
+    if (out_col) *out_col = (int)g_cur_col;
+}
+
 void fbcon_clear_to_eol(void) {
     if (!g_enabled) return;
     /* Fill cells from current col to the right edge with bg color. */

@@ -102,6 +102,14 @@ void vga_set_cursor(int row, int col) {
     update_cursor_hw();
 }
 
+/* Session 84: read back the current cursor row/col. Used by the shell
+ * line editor to anchor the prompt row before doing in-place redraws
+ * for mid-line edits (left/right arrows, Ctrl-A/E/W/U/K). */
+void vga_get_cursor(int *out_row, int *out_col) {
+    if (out_row) *out_row = cursor_row;
+    if (out_col) *out_col = cursor_col;
+}
+
 /* Clear from the current cursor position to the end of the line.
  * Used by the vi-style editor (session 46) for in-place screen
  * updates — without a way to clear residual chars, every redraw
