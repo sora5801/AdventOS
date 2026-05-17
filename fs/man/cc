@@ -87,6 +87,10 @@ IMPLEMENTED
                    p->field   = expr;            arrow assign
                    var.field, p->field           member reads (rvalue)
                    &var                          address-of (yields T*)
+                   lhs = rhs;                    struct value copy via
+                                                  rep movsd (session 101).
+                                                 Both sides must be NAMEs
+                                                 of the same struct type.
                    Restrictions: every field is 4-byte (no byte-packed
                    char fields yet); struct typed fields must be
                    pointers (no nested struct values); only forward
@@ -163,7 +167,6 @@ DELIBERATELY NOT IMPLEMENTED
       Cross-file calls work without them because cc resolves
       `call rel32` via fixups regardless of declaration order.
     - struct value passing/returning (use pointers)
-    - struct value assignment (use field-by-field)
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof on an expression (only sizeof(TYPE) is supported)

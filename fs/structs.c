@@ -77,5 +77,15 @@ int main() {
     }
     printf("linked-list sum = %d\n", total);     /* 1+2+3 = 6 */
 
+    /* Session 101 — whole-struct value assignment via memcpy. */
+    struct point orig;
+    orig.x = 42; orig.y = 99;
+    struct point copy;
+    copy = orig;                      /* rep movsd 2 dwords */
+    printf("after copy: (%d, %d)\n", copy.x, copy.y);  /* (42, 99) */
+    orig.x = 0; orig.y = 0;           /* mutate orig — copy must not change */
+    printf("orig is now (%d, %d)\n", orig.x, orig.y);  /* (0, 0) */
+    printf("copy still   (%d, %d)\n", copy.x, copy.y); /* (42, 99) */
+
     return total;
 }

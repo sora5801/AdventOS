@@ -2790,18 +2790,78 @@ static void gen_stmt(struct node *n) {
         }
         case N_ASSIGN: {
             int off = local_find(n->name);
-            if (off != 0) {
-                int k = local_kind(n->name);
-                if (kind_is_array(k))
-                    die_at(n->line, "can't assign to whole array", n->name);
-                gen_expr(n->a);
-                e_store_local(off);
+            int is_local = (off != 0);
+            int gi = is_local ? -1 : global_find(n->name);
+            int k, sidx = -1;
+            if (is_local) {
+                k = local_kind(n->name); sidx = local_meta(n->name);
+            } else if (gi >= 0) {
+                k = g_globals[gi].kind; sidx = g_globals[gi].meta;
+            } else {
+                die_at(n->line, "undefined variable", n->name);
+                k = LK_INT;
+            }
+            if (kind_is_array(k))
+                die_at(n->line, "can't assign to whole array", n->name);
+
+            /* Session 101 — struct value assignment. Both sides must
+             * be NAMEs of the same struct kind. Emit a memcpy via
+             * rep movsd. Restriction documented: RHS must be a plain
+             * struct-name; `p = *q` or `p = func_returning_struct()`
+             * aren't supported (we don't have struct-by-value calls). */
+            if (k == LK_STRUCT) {
+                struct node *rhs = n->a;
+                if (!rhs || rhs->kind != N_NAME)
+                    die_at(n->line, "struct = must be struct-NAME = struct-NAME", n->name);
+                int r_off = local_find(rhs->name);
+                int r_is_local = (r_off != 0);
+                int r_gi = r_is_local ? -1 : global_find(rhs->name);
+                int r_k = -1, r_sidx = -1;
+                if (r_is_local) {
+                    r_k = local_kind(rhs->name); r_sidx = local_meta(rhs->name);
+                } else if (r_gi >= 0) {
+                    r_k = g_globals[r_gi].kind; r_sidx = g_globals[r_gi].meta;
+                }
+                if (r_k != LK_STRUCT || r_sidx != sidx)
+                    die_at(n->line, "struct = type mismatch", n->name);
+
+                int sz = g_structs[sidx].size;
+                int dwords = sz / 4;     /* size is field_count * 4, divisible */
+
+                /* Preserve esi/edi (callee-saved in cdecl). */
+                emit_b(0x56);                  /* push esi */
+                emit_b(0x57);                  /* push edi */
+                /* lea esi, [src]. */
+                if (r_is_local) {
+                    e_lea_eax_ebp(r_off);
+                    emit_b(0x89); emit_b(0xc6);      /* mov esi, eax */
+                } else {
+                    emit_b(0xbe);                    /* mov esi, imm32 */
+                    int off_imm = g_code_len; emit_d(0);
+                    record_glob_fixup(off_imm, r_gi);
+                }
+                /* lea edi, [dst]. */
+                if (is_local) {
+                    e_lea_eax_ebp(off);
+                    emit_b(0x89); emit_b(0xc7);      /* mov edi, eax */
+                } else {
+                    emit_b(0xbf);                    /* mov edi, imm32 */
+                    int off_imm = g_code_len; emit_d(0);
+                    record_glob_fixup(off_imm, gi);
+                }
+                /* mov ecx, dwords */
+                emit_b(0xb9); emit_d((unsigned)dwords);
+                /* rep movsd  →  f3 a5 */
+                emit_b(0xf3); emit_b(0xa5);
+                emit_b(0x5f);                  /* pop edi */
+                emit_b(0x5e);                  /* pop esi */
                 return;
             }
-            int gi = global_find(n->name);
-            if (gi < 0) die_at(n->line, "undefined variable", n->name);
+
+            /* Default scalar path. */
             gen_expr(n->a);
-            emit_store_global(gi);
+            if (is_local) e_store_local(off);
+            else          emit_store_global(gi);
             return;
         }
         case N_DEREF_ASSIGN: {
