@@ -55,6 +55,17 @@ IMPLEMENTED
                    Forward references work — codegen patches
                    call sites after parsing.
 
+    Preprocessor   #define NAME body        single-line object macros
+                   #undef  NAME             remove a macro
+                   #include "FILE"          relative paths resolve to /FILE
+                   #ifdef NAME / #ifndef NAME / #else / #endif
+                                            conditional compilation
+                   (session 95)
+                   The preprocessor runs as a pass over the source
+                   before the lexer. Macro expansion is single-pass
+                   text substitution — no rescanning, no function-
+                   like macros, no line-continuation, no #if exprs.
+
     Globals        int x;  int x = N;  int *p;  int  a[N];
                    char c;             char *p; char a[N];
                    (session 93)
@@ -103,7 +114,9 @@ DELIBERATELY NOT IMPLEMENTED
       intrinsic, not a real variadic function)
     - %f / floating-point — no FPU support in user code
     - width / precision modifiers in printf (e.g. %5d, %.3s)
-    - preprocessor: #include, #define
+    - function-like macros: #define ADD(a,b) ((a)+(b))
+    - #if with arithmetic expressions (#ifdef / #ifndef only)
+    - multi-line macro bodies (backslash continuation)
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
     - struct / union / enum / typedef
@@ -134,6 +147,8 @@ EXAMPLES
     Sample at /chars.c demonstrates char arrays, my_strlen, my_strcpy.
     Sample at /globs.c demonstrates global int/char arrays + initializers.
     Sample at /printf.c demonstrates %d %s %c %x %% formatting.
+    Sample at /prep.c + /colors.h demonstrates #include + #define +
+    #ifdef + #ifndef + #else + #endif + #undef.
 
 EXIT STATUS
     0   compile succeeded

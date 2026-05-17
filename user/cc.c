@@ -254,6 +254,276 @@ static void push_tok(int kind, int line) {
     g_n_toks++;
 }
 
+/* =================================================================
+ * Session 95 — Preprocessor.
+ *
+ * Runs BEFORE the lexer. Reads the source line-by-line; for lines that
+ * start (after optional whitespace) with '#', it parses a directive.
+ * Other lines are scanned for identifiers, and any identifier that
+ * matches an active #define is replaced with its body.
+ *
+ * Supported directives:
+ *   #define NAME body       single-token / single-line body
+ *   #undef  NAME
+ *   #include "FILE"         relative paths resolve to /FILE
+ *   #ifdef  NAME            push true if NAME is defined
+ *   #ifndef NAME            push true if NAME is NOT defined
+ *   #else                   flip the top of the if-stack
+ *   #endif                  pop the if-stack
+ *
+ * Not supported: function-like macros, line-continuation backslash,
+ * #if with expressions, #pragma, #error, #line. Macro bodies are
+ * single-pass text substitution (no rescanning, no recursion).
+ * ============================================================== */
+
+#define MAX_MACROS    128
+#define MACRO_BODY_MAX 128
+#define MAX_IF_DEPTH   16
+#define MAX_INC_DEPTH  8
+#define PP_BUF_MAX     16384
+
+struct macro {
+    char name[NAME_MAX];
+    char body[MACRO_BODY_MAX];
+    int  body_len;
+};
+static struct macro g_macros[MAX_MACROS];
+static int          g_n_macros;
+
+static int  g_if_stack[MAX_IF_DEPTH];    /* 1 = active branch */
+static int  g_if_depth;
+
+static char g_pp_buf[PP_BUF_MAX];
+static int  g_pp_len;
+
+static int  pp_output_active(void) {
+    for (int i = 0; i < g_if_depth; i++) if (!g_if_stack[i]) return 0;
+    return 1;
+}
+
+static int  pp_find_macro(const char *name) {
+    for (int i = 0; i < g_n_macros; i++) {
+        if (my_streq(g_macros[i].name, name)) return i;
+    }
+    return -1;
+}
+
+static void pp_define(const char *name, const char *body, int body_len) {
+    int idx = pp_find_macro(name);
+    if (idx < 0) {
+        if (g_n_macros >= MAX_MACROS) die("too many #defines");
+        idx = g_n_macros++;
+        int j = 0;
+        while (name[j] && j < NAME_MAX - 1) {
+            g_macros[idx].name[j] = name[j]; j++;
+        }
+        g_macros[idx].name[j] = 0;
+    }
+    if (body_len > MACRO_BODY_MAX) body_len = MACRO_BODY_MAX;
+    for (int j = 0; j < body_len; j++) g_macros[idx].body[j] = body[j];
+    g_macros[idx].body_len = body_len;
+}
+
+static void pp_undef(const char *name) {
+    int idx = pp_find_macro(name);
+    if (idx < 0) return;
+    /* Swap-remove. */
+    g_macros[idx] = g_macros[--g_n_macros];
+}
+
+static void pp_emit_byte(char c) {
+    if (g_pp_len >= PP_BUF_MAX) die("preprocessor output overflow");
+    g_pp_buf[g_pp_len++] = c;
+}
+
+static void pp_emit_bytes(const char *s, int n) {
+    for (int i = 0; i < n; i++) pp_emit_byte(s[i]);
+}
+
+/* Read an identifier starting at src[*pos]. Writes into out (NUL-
+ * terminated) and updates *pos. Caller verifies first char is id_start. */
+static int pp_read_ident(const char *src, int len, int *pos,
+                         char *out, int cap) {
+    int n = 0;
+    while (*pos < len && is_id_cont(src[*pos]) && n < cap - 1) {
+        out[n++] = src[(*pos)++];
+    }
+    out[n] = 0;
+    return n;
+}
+
+/* Skip ASCII whitespace (but not newline) starting at *pos. */
+static void pp_skip_hspace(const char *src, int len, int *pos) {
+    while (*pos < len && (src[*pos] == ' ' || src[*pos] == '\t' || src[*pos] == '\r'))
+        (*pos)++;
+}
+
+static int pp_at_eol(const char *src, int len, int pos) {
+    return pos >= len || src[pos] == '\n';
+}
+
+/* Forward decl — directives may #include, which recurses. */
+static void pp_process_buf(const char *src, int len, int depth);
+
+/* Slurp a file from disk and recursively preprocess it. */
+static void pp_include_file(const char *path, int depth) {
+    if (depth >= MAX_INC_DEPTH) die("#include nesting too deep");
+    int sz = sys_fs_size(path);
+    if (sz < 0) die_at(0, "#include cannot open", path);
+    char *buf = (char *)malloc((unsigned)(sz + 1));
+    if (!buf) die("out of memory for #include");
+    int fd = sys_open(path);
+    if (fd < 0) die_at(0, "#include open failed for", path);
+    int got = 0;
+    while (got < sz) {
+        int n = sys_read(fd, buf + got, sz - got);
+        if (n <= 0) break;
+        got += n;
+    }
+    sys_close(fd);
+    buf[got] = 0;
+    pp_process_buf(buf, got, depth + 1);
+    /* `buf` leaks for the lifetime of compilation — that's fine; we
+     * don't reuse the heap. */
+}
+
+/* Core preprocessor. Walks src line-by-line; expanding macros on
+ * regular lines and dispatching directives on '#'-prefixed lines. */
+static void pp_process_buf(const char *src, int len, int depth) {
+    int pos = 0;
+    while (pos < len) {
+        /* Find end of current line. */
+        int line_start = pos;
+        int line_end   = pos;
+        while (line_end < len && src[line_end] != '\n') line_end++;
+        int has_newline = (line_end < len);
+
+        /* Quick check: directive? Look at first non-whitespace char. */
+        int scan = line_start;
+        while (scan < line_end && (src[scan] == ' ' || src[scan] == '\t'))
+            scan++;
+        if (scan < line_end && src[scan] == '#') {
+            /* Directive. Parse keyword. */
+            scan++;
+            pp_skip_hspace(src, line_end, &scan);
+            char kw[16];
+            int kw_n = 0;
+            while (scan < line_end && is_id_cont(src[scan]) && kw_n < (int)sizeof(kw) - 1) {
+                kw[kw_n++] = src[scan++];
+            }
+            kw[kw_n] = 0;
+            pp_skip_hspace(src, line_end, &scan);
+
+            if (my_streq(kw, "define") && pp_output_active()) {
+                char name[NAME_MAX];
+                if (scan >= line_end || !is_id_start(src[scan]))
+                    die_at(0, "#define needs a name", 0);
+                pp_read_ident(src, line_end, &scan, name, NAME_MAX);
+                pp_skip_hspace(src, line_end, &scan);
+                int body_start = scan;
+                int body_end   = line_end;
+                /* Trim trailing whitespace from body. */
+                while (body_end > body_start &&
+                       (src[body_end - 1] == ' ' || src[body_end - 1] == '\t' ||
+                        src[body_end - 1] == '\r'))
+                    body_end--;
+                pp_define(name, src + body_start, body_end - body_start);
+            } else if (my_streq(kw, "undef") && pp_output_active()) {
+                char name[NAME_MAX];
+                if (scan >= line_end || !is_id_start(src[scan]))
+                    die_at(0, "#undef needs a name", 0);
+                pp_read_ident(src, line_end, &scan, name, NAME_MAX);
+                pp_undef(name);
+            } else if (my_streq(kw, "include") && pp_output_active()) {
+                if (scan >= line_end || src[scan] != '"')
+                    die_at(0, "#include needs \"FILE\"", 0);
+                scan++;
+                char path[80];
+                int p = 0;
+                /* Auto-prefix '/' if the user gave a relative path,
+                 * so `#include "x.h"` opens `/x.h`. */
+                if (scan < line_end && src[scan] != '/' &&
+                    p < (int)sizeof(path) - 1) path[p++] = '/';
+                while (scan < line_end && src[scan] != '"' &&
+                       p < (int)sizeof(path) - 1) {
+                    path[p++] = src[scan++];
+                }
+                path[p] = 0;
+                if (scan >= line_end || src[scan] != '"')
+                    die_at(0, "#include missing closing quote", 0);
+                pp_include_file(path, depth);
+            } else if (my_streq(kw, "ifdef")) {
+                char name[NAME_MAX];
+                if (scan >= line_end || !is_id_start(src[scan]))
+                    die_at(0, "#ifdef needs a name", 0);
+                pp_read_ident(src, line_end, &scan, name, NAME_MAX);
+                if (g_if_depth >= MAX_IF_DEPTH) die("#ifdef nesting too deep");
+                g_if_stack[g_if_depth++] = (pp_find_macro(name) >= 0);
+            } else if (my_streq(kw, "ifndef")) {
+                char name[NAME_MAX];
+                if (scan >= line_end || !is_id_start(src[scan]))
+                    die_at(0, "#ifndef needs a name", 0);
+                pp_read_ident(src, line_end, &scan, name, NAME_MAX);
+                if (g_if_depth >= MAX_IF_DEPTH) die("#ifndef nesting too deep");
+                g_if_stack[g_if_depth++] = (pp_find_macro(name) < 0);
+            } else if (my_streq(kw, "else")) {
+                if (g_if_depth == 0) die("#else without #if");
+                g_if_stack[g_if_depth - 1] = !g_if_stack[g_if_depth - 1];
+            } else if (my_streq(kw, "endif")) {
+                if (g_if_depth == 0) die("#endif without #if");
+                g_if_depth--;
+            } else {
+                /* Unknown directive or directive inside a skip block —
+                 * silently drop. We still consumed the line. */
+            }
+            /* Preserve the newline so line numbers in the lexer track
+             * the source. (Even when skipping.) */
+            if (has_newline) pp_emit_byte('\n');
+        } else if (pp_output_active()) {
+            /* Regular line — scan for identifiers, expand macros, emit. */
+            int p = line_start;
+            while (p < line_end) {
+                char c = src[p];
+                /* Skip string literals: copy them through verbatim. */
+                if (c == '"' || c == '\'') {
+                    char q = c;
+                    pp_emit_byte(src[p++]);
+                    while (p < line_end && src[p] != q) {
+                        if (src[p] == '\\' && p + 1 < line_end) {
+                            pp_emit_byte(src[p++]);
+                        }
+                        pp_emit_byte(src[p++]);
+                    }
+                    if (p < line_end) pp_emit_byte(src[p++]);
+                    continue;
+                }
+                if (is_id_start(c)) {
+                    char id[NAME_MAX];
+                    int id_n = 0;
+                    while (p < line_end && is_id_cont(src[p]) && id_n < NAME_MAX - 1) {
+                        id[id_n++] = src[p++];
+                    }
+                    id[id_n] = 0;
+                    int mi = pp_find_macro(id);
+                    if (mi >= 0) {
+                        pp_emit_bytes(g_macros[mi].body, g_macros[mi].body_len);
+                    } else {
+                        pp_emit_bytes(id, id_n);
+                    }
+                    continue;
+                }
+                pp_emit_byte(src[p++]);
+            }
+            if (has_newline) pp_emit_byte('\n');
+        } else {
+            /* Inside a skip block — drop the line, preserve newline
+             * so the lexer's line counter stays aligned. */
+            if (has_newline) pp_emit_byte('\n');
+        }
+        pos = line_end + (has_newline ? 1 : 0);
+    }
+}
+
 static void lex_all(const char *src, int len) {
     g_src = src; g_src_len = len; g_pos = 0; g_line = 1;
     g_n_toks = 0;
@@ -2615,7 +2885,14 @@ int main(int argc, char **argv) {
     char *src = slurp(in_path, &sz);
     if (!src) die_at(0, "cannot read", in_path);
 
-    lex_all(src, sz);
+    /* Session 95 — run the preprocessor first; lex the output. */
+    g_pp_len = 0;
+    g_n_macros = 0;
+    g_if_depth = 0;
+    pp_process_buf(src, sz, 0);
+    if (g_if_depth != 0) die("unterminated #ifdef/#ifndef");
+
+    lex_all(g_pp_buf, g_pp_len);
     struct node *prog = parse_program();
 
     /* Emit start stub at offset 0 — calls main. We don't know

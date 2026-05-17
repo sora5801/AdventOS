@@ -247,6 +247,9 @@ DATA_FILES = [
     ('globs.c',   'fs/globs.c',   None),
     # Session 94 — printf demo.
     ('printf.c',  'fs/printf.c',  None),
+    # Session 95 — preprocessor demo (+ header).
+    ('prep.c',    'fs/prep.c',    None),
+    ('colors.h',  'fs/colors.h',  None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
