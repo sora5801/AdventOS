@@ -19,17 +19,30 @@ DESCRIPTION
       echo $?                 inspect exit status
 
 IMPLEMENTED
-    Types          int (signed 32-bit). No char/short/long/float.
+    Types          int (signed 32-bit). char is recognized but
+                   represents a byte only as the element type of
+                   arrays/pointers — scalar `char x` is still int-sized.
+                   Pointers: `int *p`, `char *p`. Arrays: `int x[N]`,
+                   `char x[N]`.
 
     Operators      + - * / %    binary
                    == != < > <= >=    comparison
                    && ||  !     short-circuit boolean
                    & | ^ ~ << >>     bitwise
                    unary -      negation
+                   unary &      address-of   (NAME only)         (session 92)
+                   unary *      dereference                       (session 92)
+                   a[i]         array/pointer indexing            (session 92)
+                   'X' '\n'     char literal — lexes as T_NUM     (session 92)
                    Assignment is a statement, not an expression.
 
     Statements     int x;  int x = expr;       local declaration
+                   char x;  char x = expr;     local declaration (session 92)
+                   int *p;  char *p;           pointer declaration (session 92)
+                   int a[N];  char a[N];       array declaration  (session 92)
                    name = expr;                 assignment
+                   *p   = expr;                 store thru pointer (session 92)
+                   a[i] = expr;                 store thru index   (session 92)
                    expr;                        expression-statement
                    if (e) stmt [else stmt]      conditional
                    while (e) stmt               loop
@@ -37,6 +50,8 @@ IMPLEMENTED
                    { stmts }                    block
 
     Functions      int NAME(int p1, int p2, ...) { body }
+                   Params may be int, char, int*, or char*.
+                   (session 92)
                    Forward references work — codegen patches
                    call sites after parsing.
 
@@ -63,14 +78,15 @@ CODEGEN
     past EAX/EBX, no peephole. Produces correct but bulky code.
 
 DELIBERATELY NOT IMPLEMENTED
-    - char / pointer / array types
-    - printf-style formatted output (use puts + print_int instead)
+    - printf-style formatted output (use puts + print_int + print_str)
     - global variables
     - preprocessor: #include, #define
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
     - struct / union / enum / typedef
     - function pointers
+    - multi-dimensional arrays / arbitrary-base indexing
+      (a[i] only works when a is a NAME; `f()[i]` won't parse)
     - the linker step (multi-file compilation)
 
 EXAMPLES
@@ -92,6 +108,7 @@ EXAMPLES
 
     Sample at /hello.c demonstrates fact / sum / gcd.
     Sample at /strs.c demonstrates puts / print_str / escapes.
+    Sample at /chars.c demonstrates char arrays, my_strlen, my_strcpy.
 
 EXIT STATUS
     0   compile succeeded

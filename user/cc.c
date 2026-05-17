@@ -114,8 +114,9 @@ static void die_at(int line, const char *what, const char *detail) {
 
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
-    T_INT, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
+    T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
+    T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT,
     T_EQ, T_NEQ, T_LT, T_GT, T_LE, T_GE,
@@ -202,6 +203,7 @@ static int is_digit(char c)    { return c >= '0' && c <= '9'; }
 
 static int kw_lookup(const char *s) {
     if (my_streq(s, "int"))    return T_INT;
+    if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -241,6 +243,38 @@ static void lex_all(const char *src, int len) {
                 g_pos++;
             }
             g_pos += 2;
+            continue;
+        }
+        /* Character literals — 'X' or '\n', '\t', etc.
+         * Lexed to a T_NUM token holding the byte value. Session 92. */
+        if (c == '\'') {
+            g_pos++;
+            if (g_pos >= g_src_len) die_at(g_line, "unterminated char literal", 0);
+            int ch;
+            if (g_src[g_pos] == '\\') {
+                g_pos++;
+                if (g_pos >= g_src_len) die_at(g_line, "unterminated char literal", 0);
+                char esc = g_src[g_pos++];
+                switch (esc) {
+                    case 'n':  ch = '\n'; break;
+                    case 't':  ch = '\t'; break;
+                    case 'r':  ch = '\r'; break;
+                    case '0':  ch = '\0'; break;
+                    case '\\': ch = '\\'; break;
+                    case '"':  ch = '"';  break;
+                    case '\'': ch = '\''; break;
+                    default:
+                        die_at(g_line, "unknown escape in char literal", 0);
+                        ch = 0;
+                }
+            } else {
+                ch = (unsigned char)g_src[g_pos++];
+            }
+            if (g_pos >= g_src_len || g_src[g_pos] != '\'')
+                die_at(g_line, "expected closing quote in char literal", 0);
+            g_pos++;
+            push_tok(T_NUM, g_line);
+            g_toks[g_n_toks - 1].num = ch & 0xff;
             continue;
         }
         /* String literals — "..." with the usual escapes. The decoded
@@ -315,6 +349,8 @@ static void lex_all(const char *src, int len) {
             case ')': push_tok(T_RPAREN, g_line); g_pos++; break;
             case '{': push_tok(T_LBRACE, g_line); g_pos++; break;
             case '}': push_tok(T_RBRACE, g_line); g_pos++; break;
+            case '[': push_tok(T_LBRACKET, g_line); g_pos++; break;
+            case ']': push_tok(T_RBRACKET, g_line); g_pos++; break;
             case ';': push_tok(T_SEMI,   g_line); g_pos++; break;
             case ',': push_tok(T_COMMA,  g_line); g_pos++; break;
             case '+': push_tok(T_PLUS,   g_line); g_pos++; break;
@@ -376,11 +412,39 @@ static void expect(int k, const char *what) {
 
 /* ---------- AST --------------------------------------------------- */
 
+/* Session 92 — type-kinds for locals + function-param entries.
+ *
+ * The compiler stays untyped at the expression level: gen_expr drops
+ * its result in eax and the caller has to know what shape that is.
+ * But DECLARATIONS need a type tag so we know:
+ *   - how much stack to reserve (4 bytes for int/ptr, 1*N for char[N])
+ *   - what to emit for `a[i]` / `*p` (byte vs word loads/stores)
+ *   - whether to lea-an-address or load-the-value when an array name
+ *     appears in an rvalue context
+ *
+ * LK_INT_PTR is treated identically to LK_INT internally — we only
+ * really distinguish "1-byte-element" from "4-byte-element" pointers
+ * because that's what affects load/store size and `a[i]` scaling.
+ * Same for params. */
+enum {
+    LK_INT       = 0,   /* int x */
+    LK_INT_PTR   = 1,   /* int *p (4-byte loads/stores via *p, scale i by 4) */
+    LK_CHAR_PTR  = 2,   /* char *p (1-byte loads/stores via *p, scale i by 1) */
+    LK_INT_ARR   = 3,   /* int x[N]  — name yields &x[0] (an int*) */
+    LK_CHAR_ARR  = 4,   /* char x[N] — name yields &x[0] (a  char*) */
+};
+
 enum {
     N_NUM, N_NAME, N_STR,
     N_BIN, N_UN, N_CALL,
-    N_VAR_DECL,   /* int NAME [= expr]; */
+    N_VAR_DECL,   /* TYPE NAME [= expr]; */
+    N_ARR_DECL,   /* TYPE NAME[N];      session 92 */
     N_ASSIGN,     /* NAME = expr;       */
+    N_DEREF,      /* *expr              session 92 — unary */
+    N_ADDR_OF,    /* &NAME              session 92 — unary */
+    N_INDEX,      /* base[idx]          session 92 — binary, op=elem_size */
+    N_DEREF_ASSIGN,    /* *p   = expr;  session 92 — store thru pointer */
+    N_INDEX_ASSIGN,    /* a[i] = expr;  session 92 */
     N_RETURN,
     N_IF,
     N_WHILE,
@@ -486,6 +550,21 @@ static struct node *parse_primary(void) {
             expect(T_RPAREN, "')'");
             return call;
         }
+        /* Session 92 — postfix `[idx]` (array/pointer indexing).
+         * Restricted: the base must be a name. `a[i][j]` and
+         * `f()[i]` aren't supported by this parse (multidimensional
+         * indexing isn't supported by codegen either). */
+        if (tk_cur()->kind == T_LBRACKET) {
+            g_tk++;
+            struct node *idx = parse_expr();
+            expect(T_RBRACKET, "']'");
+            struct node *ix = new_node(N_INDEX);
+            int k = 0;
+            while (n->name[k]) { ix->name[k] = n->name[k]; k++; }
+            ix->name[k] = 0;
+            ix->a = idx;
+            return ix;
+        }
         return n;
     }
     if (t->kind == T_LPAREN) { g_tk++; struct node *e = parse_expr(); expect(T_RPAREN, "')'"); return e; }
@@ -507,6 +586,27 @@ static struct node *parse_primary(void) {
         g_tk++;
         struct node *n = new_node(N_UN);
         n->op = T_TILDE;
+        n->a = parse_primary();
+        return n;
+    }
+    /* Session 92 — unary & (address-of) and * (dereference).
+     * `&NAME` is the only addr-of we accept; `*expr` accepts any
+     * primary as the pointee expression (typically a NAME or another
+     * deref). */
+    if (t->kind == T_AMP) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "& must be followed by a local name", 0);
+        struct node *n = new_node(N_ADDR_OF);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;
+        return n;
+    }
+    if (t->kind == T_STAR) {
+        g_tk++;
+        struct node *n = new_node(N_DEREF);
         n->a = parse_primary();
         return n;
     }
@@ -546,15 +646,47 @@ static struct node *parse_block(void) {
 
 static struct node *parse_stmt(void) {
     int t = tk_cur()->kind;
-    if (t == T_INT) {
-        /* int NAME [= expr]; — local declaration */
+    if (t == T_INT || t == T_CHAR) {
+        /* Local declaration. Accepted shapes (session 92):
+         *   int  NAME [= expr];           kind = LK_INT
+         *   char NAME [= expr];           kind = LK_INT (scalar char ≡ int)
+         *   int *NAME [= expr];           kind = LK_INT_PTR
+         *   char *NAME [= expr];          kind = LK_CHAR_PTR
+         *   int  NAME[N];                 kind = LK_INT_ARR,  num=N
+         *   char NAME[N];                 kind = LK_CHAR_ARR, num=N
+         *
+         * The base type drives the kind; `*` upgrades a scalar to a
+         * pointer; `[N]` upgrades to an array (no initializer for
+         * arrays yet — would need brace-init syntax). */
+        int is_char = (t == T_CHAR);
         g_tk++;
-        if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected name after 'int'", 0);
-        struct node *n = new_node(N_VAR_DECL);
+        int is_ptr = accept(T_STAR);
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected name in declaration", 0);
+        char nm[NAME_MAX];
         int i = 0;
-        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
-        n->name[i] = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
         g_tk++;
+        if (accept(T_LBRACKET)) {
+            /* Array declaration. */
+            if (is_ptr) die_at(tk_cur()->line, "ptr-to-array not supported", 0);
+            if (tk_cur()->kind != T_NUM)
+                die_at(tk_cur()->line, "array size must be an integer literal", 0);
+            int sz = tk_cur()->num;
+            if (sz <= 0) die_at(tk_cur()->line, "array size must be positive", 0);
+            g_tk++;
+            expect(T_RBRACKET, "']'");
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_ARR_DECL);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->num = sz;
+            n->op  = is_char ? LK_CHAR_ARR : LK_INT_ARR;
+            return n;
+        }
+        struct node *n = new_node(N_VAR_DECL);
+        for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+        n->op = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
         if (accept(T_ASSIGN)) n->a = parse_expr();
         expect(T_SEMI, "';'");
         return n;
@@ -587,13 +719,53 @@ static struct node *parse_stmt(void) {
     }
     if (t == T_LBRACE) return parse_block();
     /* Expression-stmt or assignment.
-     * `NAME = expr;`  or  `expr;` */
+     * `NAME = expr;`  or  `expr;`
+     * Session 92 also: `*NAME = expr;` and `NAME[idx] = expr;` */
     if (t == T_NAME && tk_peek(1)->kind == T_ASSIGN) {
         struct node *n = new_node(N_ASSIGN);
         int i = 0;
         while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
         n->name[i] = 0;
         g_tk++;
+        g_tk++;     /* skip '=' */
+        n->a = parse_expr();
+        expect(T_SEMI, "';'");
+        return n;
+    }
+    if (t == T_NAME && tk_peek(1)->kind == T_LBRACKET) {
+        /* Could be either `a[i] = expr;` or an indexing expression-stmt
+         * `a[i];`. Peek further: parse the index, then look for '='. */
+        int save_tk = g_tk;
+        char nm[NAME_MAX];
+        int i = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
+        g_tk++;       /* skip name */
+        g_tk++;       /* skip '[' */
+        struct node *idx = parse_expr();
+        expect(T_RBRACKET, "']'");
+        if (tk_cur()->kind == T_ASSIGN) {
+            g_tk++;
+            struct node *val = parse_expr();
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_INDEX_ASSIGN);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->a = idx;
+            n->b = val;
+            return n;
+        }
+        /* No '=' — must be an expression-stmt: a[i];   roll back and
+         * fall through to the generic expression-stmt parse. */
+        g_tk = save_tk;
+    }
+    if (t == T_STAR && tk_peek(1)->kind == T_NAME && tk_peek(2)->kind == T_ASSIGN) {
+        /* `*NAME = expr;` */
+        g_tk++;     /* skip '*' */
+        struct node *n = new_node(N_DEREF_ASSIGN);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;     /* skip NAME */
         g_tk++;     /* skip '=' */
         n->a = parse_expr();
         expect(T_SEMI, "';'");
@@ -607,7 +779,12 @@ static struct node *parse_stmt(void) {
 }
 
 static struct node *parse_func(void) {
-    expect(T_INT, "'int' return type");
+    /* Return type — int or char are both accepted, both yield int
+     * internally. We don't enforce return-type matching on the
+     * actual return value. */
+    if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
+        die_at(tk_cur()->line, "expected 'int' or 'char' (return type)", 0);
+    g_tk++;
     if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected function name", 0);
     struct node *fn = new_node(N_FUNC_DECL);
     int i = 0;
@@ -617,12 +794,20 @@ static struct node *parse_func(void) {
     expect(T_LPAREN, "'('");
     int cap = 0;
     while (tk_cur()->kind != T_RPAREN) {
-        expect(T_INT, "'int' (param type)");
+        /* Param type: int|char, optionally followed by '*' for a pointer. */
+        if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
+            die_at(tk_cur()->line, "expected param type (int/char)", 0);
+        int is_char = (tk_cur()->kind == T_CHAR);
+        g_tk++;
+        int is_ptr = accept(T_STAR);
         if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected param name", 0);
         struct node *p = new_node(N_NAME);
         int j = 0;
         while (tk_cur()->name[j]) { p->name[j] = tk_cur()->name[j]; j++; }
         p->name[j] = 0;
+        /* Stash the param's kind in `op` so codegen can install the
+         * right local_kind when it binds the param at function entry. */
+        p->op = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
         g_tk++;
         node_push(&fn->params, &fn->n_params, &cap, p);
         if (!accept(T_COMMA)) break;
@@ -754,6 +939,35 @@ static void e_store_local(int off_from_ebp) {
         emit_b(0x89); emit_b(0x85); emit_d((unsigned)off_from_ebp);
     }
 }
+
+/* Session 92 — pointer / array helpers. */
+
+/* lea eax, [ebp + disp] — load the ADDRESS of a local. Used for &x
+ * and for array names in rvalue contexts (they decay to &arr[0]). */
+static void e_lea_eax_ebp(int off_from_ebp) {
+    if (off_from_ebp >= -128 && off_from_ebp <= 127) {
+        emit_b(0x8d); emit_b(0x45); emit_b((unsigned char)(off_from_ebp & 0xff));
+    } else {
+        emit_b(0x8d); emit_b(0x85); emit_d((unsigned)off_from_ebp);
+    }
+}
+
+/* mov eax, [eax]  →  8b 00  (dword load through eax) */
+static void e_load_eax_at_eax(void) { emit_b(0x8b); emit_b(0x00); }
+
+/* movzx eax, byte [eax]  →  0f b6 00  (byte load, zero-extended) */
+static void e_loadb_eax_at_eax(void) { emit_b(0x0f); emit_b(0xb6); emit_b(0x00); }
+
+/* mov [ebx], eax  →  89 03  (dword store, addr in ebx) */
+static void e_store_eax_at_ebx(void) { emit_b(0x89); emit_b(0x03); }
+
+/* mov [ebx], al   →  88 03  (byte store, addr in ebx) */
+static void e_storeb_al_at_ebx(void) { emit_b(0x88); emit_b(0x03); }
+
+/* shl eax, imm8   →  c1 e0 imm8.  Used for index scaling. */
+static void e_shl_eax_imm8(int imm) {
+    emit_b(0xc1); emit_b(0xe0); emit_b((unsigned char)(imm & 0xff));
+}
 /* sub esp, imm32  /  add esp, imm32 */
 static void e_sub_esp_imm32(int v) {
     emit_b(0x81); emit_b(0xec); emit_d((unsigned)v);
@@ -812,14 +1026,45 @@ struct fixup {
 static struct fixup g_fixups[MAX_FIXUPS];
 static int          g_n_fixups;
 
+/* Session 92 — type-kinds for locals + function-param entries.
+ *
+ * The compiler stays untyped at the expression level: gen_expr drops
+ * its result in eax and the caller has to know what shape that is.
+ * But DECLARATIONS need a type tag so we know:
+ *   - how much stack to reserve (4 bytes for int/ptr, 1*N for char[N])
+ *   - what to emit for `a[i]` / `*p` (byte vs word loads/stores)
+ *   - whether to lea-an-address or load-the-value when an array name
+ *     appears in an rvalue context
+ *
+ * LK_INT_PTR is treated identically to LK_INT internally — we only
+ * really distinguish "1-byte-element" from "4-byte-element" pointers
+ * because that's what affects load/store size and `a[i]` scaling.
+ * Same for params. */
 /* Per-function local table — reset at the start of each function. */
 struct local_slot {
     char name[NAME_MAX];
     int  ebp_off;       /* negative offset from EBP */
+    int  kind;          /* LK_* — session 92 */
 };
 static struct local_slot g_locals[MAX_LOCALS];
 static int               g_n_locals;
 static int               g_locals_bytes;    /* total bytes of locals in current fn */
+
+/* Returns the size (in bytes) the pointee of this pointer occupies.
+ * Used both for `*p` load/store width and for `a[i]` index scaling.
+ * For non-pointer kinds returns 0 (caller should never ask). */
+static int kind_elem_size(int k) {
+    if (k == LK_CHAR_PTR || k == LK_CHAR_ARR) return 1;
+    if (k == LK_INT_PTR  || k == LK_INT_ARR)  return 4;
+    return 0;
+}
+static int kind_is_array(int k) {
+    return k == LK_INT_ARR || k == LK_CHAR_ARR;
+}
+static int kind_is_pointerlike(int k) {
+    return k == LK_INT_PTR || k == LK_CHAR_PTR
+        || k == LK_INT_ARR || k == LK_CHAR_ARR;
+}
 
 static int func_find(const char *name) {
     for (int i = 0; i < g_n_funcs; i++) {
@@ -852,17 +1097,37 @@ static int local_find(const char *name) {
     }
     return 0;     /* 0 == not found (real locals have negative offsets) */
 }
+/* Companion: return the LK_* kind for a local by name, or -1 if unknown.
+ * Session 92. */
+static int local_kind(const char *name) {
+    for (int i = g_n_locals - 1; i >= 0; i--) {
+        if (my_streq(g_locals[i].name, name)) return g_locals[i].kind;
+    }
+    return -1;
+}
 
-static int local_declare(const char *name) {
+/* `size` is the number of bytes to reserve on the stack for this
+ * local. For int / int* / char* / char that's 4; for arrays it's
+ * elem_size * n. The stack offset is rounded down to a 4-byte boundary
+ * because every other access is dword-sized — i.e. we always reserve
+ * a multiple of 4 even when storing a char[3]. */
+static int local_declare_sized(const char *name, int size, int kind) {
     if (g_n_locals >= MAX_LOCALS) die("too many locals");
-    g_locals_bytes += 4;
+    int padded = (size + 3) & ~3;       /* round up to multiple of 4 */
+    g_locals_bytes += padded;
     int off = -g_locals_bytes;
     int j = 0;
     while (name[j]) { g_locals[g_n_locals].name[j] = name[j]; j++; }
     g_locals[g_n_locals].name[j] = 0;
     g_locals[g_n_locals].ebp_off = off;
+    g_locals[g_n_locals].kind    = kind;
     g_n_locals++;
     return off;
+}
+
+/* Shorthand for the common int-local case. */
+static int local_declare(const char *name) {
+    return local_declare_sized(name, 4, LK_INT);
 }
 
 /* ---------- Codegen ----------------------------------------------- */
@@ -1004,7 +1269,56 @@ static void gen_expr(struct node *n) {
         case N_NAME: {
             int off = local_find(n->name);
             if (off == 0) die_at(n->line, "undefined variable", n->name);
-            e_load_local(off);
+            /* Session 92 — array names decay to the array's address
+             * (i.e. the value of `arr` is `&arr[0]`). Everything else
+             * (int, int*, char*) is a dword load through ebp. */
+            int k = local_kind(n->name);
+            if (kind_is_array(k)) e_lea_eax_ebp(off);
+            else                  e_load_local(off);
+            return;
+        }
+        case N_ADDR_OF: {
+            /* Session 92 — `&NAME`. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "& of undefined variable", n->name);
+            e_lea_eax_ebp(off);
+            return;
+        }
+        case N_DEREF: {
+            /* Session 92 — `*expr`. Evaluate the pointer, then load.
+             * Width depends on the pointer's kind: char* → byte,
+             * everything else (int*, plain int treated as ptr) → dword.
+             * We look at the inner expr to decide. For the common case
+             * `*p` where p is a NAME, that's local_kind(p->name). For
+             * arbitrary expressions we default to dword. */
+            gen_expr(n->a);
+            int k = LK_INT;
+            if (n->a && n->a->kind == N_NAME)
+                k = local_kind(n->a->name);
+            if (k == LK_CHAR_PTR || k == LK_CHAR_ARR) e_loadb_eax_at_eax();
+            else                                       e_load_eax_at_eax();
+            return;
+        }
+        case N_INDEX: {
+            /* Session 92 — `NAME[idx]`. Parser restricts the base to
+             * a NAME, so we can look up its kind cheaply. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "indexing undefined name", n->name);
+            int k = local_kind(n->name);
+            if (!kind_is_pointerlike(k))
+                die_at(n->line, "indexing a non-pointer/non-array", n->name);
+            int elem = kind_elem_size(k);
+            /* base address into eax: array → lea, pointer → load. */
+            if (kind_is_array(k)) e_lea_eax_ebp(off);
+            else                  e_load_local(off);
+            e_push_eax();           /* save base */
+            gen_expr(n->a);         /* index → eax */
+            if (elem == 4) e_shl_eax_imm8(2);   /* scale by 4 */
+            /* pop base into ebx, add eax to it, load thru result. */
+            e_pop_ebx();
+            e_add_eax_ebx();        /* eax = base + idx*elem */
+            if (elem == 1) e_loadb_eax_at_eax();
+            else           e_load_eax_at_eax();
             return;
         }
         case N_CALL: gen_call(n); return;
@@ -1099,7 +1413,9 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_VAR_DECL: {
-            local_declare(n->name);
+            /* Session 92 — kind is in n->op: LK_INT / LK_INT_PTR /
+             * LK_CHAR_PTR. All three reserve 4 bytes. */
+            local_declare_sized(n->name, 4, n->op ? n->op : LK_INT);
             int off = g_locals[g_n_locals - 1].ebp_off;
             if (n->a) {
                 gen_expr(n->a);
@@ -1107,11 +1423,78 @@ static void gen_stmt(struct node *n) {
             }
             return;
         }
+        case N_ARR_DECL: {
+            /* Session 92 — `TYPE NAME[N];`. Reserve elem_size * N
+             * bytes; the local's ebp_off points to the LOW byte of
+             * the array (lowest address = element 0). */
+            int kind = n->op;     /* LK_INT_ARR or LK_CHAR_ARR */
+            int elem = (kind == LK_CHAR_ARR) ? 1 : 4;
+            int bytes = elem * n->num;
+            local_declare_sized(n->name, bytes, kind);
+            /* Adjust ebp_off so a[0] is at [ebp + base]. local_declare_sized
+             * gave us off = -padded_bytes. Array element 0 lives at
+             * [ebp + off] (lowest address of the padded block — that's
+             * the highest -ve offset). The padded block grows toward
+             * more-negative addresses, so element i is at
+             * [ebp + off + i * elem]. */
+            return;
+        }
         case N_ASSIGN: {
             int off = local_find(n->name);
             if (off == 0) die_at(n->line, "undefined variable", n->name);
+            int k = local_kind(n->name);
+            if (kind_is_array(k))
+                die_at(n->line, "can't assign to whole array", n->name);
             gen_expr(n->a);
             e_store_local(off);
+            return;
+        }
+        case N_DEREF_ASSIGN: {
+            /* Session 92 — `*NAME = expr;`. Width depends on NAME's kind. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "* of undefined variable", n->name);
+            int k = local_kind(n->name);
+            if (!kind_is_pointerlike(k))
+                die_at(n->line, "* applied to non-pointer", n->name);
+            int elem = kind_elem_size(k);
+            /* val first → eax → push. */
+            gen_expr(n->a);
+            e_push_eax();
+            /* address: load (pointer) or lea (array). */
+            if (kind_is_array(k)) e_lea_eax_ebp(off);
+            else                  e_load_local(off);
+            /* mov ebx, eax — store helper expects ebx = addr. */
+            e_mov_ebx_eax();
+            e_pop_eax();
+            if (elem == 1) e_storeb_al_at_ebx();
+            else           e_store_eax_at_ebx();
+            return;
+        }
+        case N_INDEX_ASSIGN: {
+            /* Session 92 — `NAME[idx] = val;`. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "indexing undefined name", n->name);
+            int k = local_kind(n->name);
+            if (!kind_is_pointerlike(k))
+                die_at(n->line, "indexing a non-pointer/non-array", n->name);
+            int elem = kind_elem_size(k);
+            /* val first → eax → push (so registers are free for addr calc). */
+            gen_expr(n->b);
+            e_push_eax();
+            /* base address: array → lea, pointer → load. */
+            if (kind_is_array(k)) e_lea_eax_ebp(off);
+            else                  e_load_local(off);
+            e_push_eax();
+            /* index → eax. */
+            gen_expr(n->a);
+            if (elem == 4) e_shl_eax_imm8(2);
+            /* eax = base + idx (via ebx). */
+            e_pop_ebx();
+            e_add_eax_ebx();
+            e_mov_ebx_eax();        /* ebx = final addr */
+            e_pop_eax();            /* eax = val */
+            if (elem == 1) e_storeb_al_at_ebx();
+            else           e_store_eax_at_ebx();
             return;
         }
         case N_RETURN: {
@@ -1172,7 +1555,11 @@ static void gen_func(struct node *fn) {
 
     /* Bind parameters as locals with positive offsets. Use a separate
      * loop to register them without bumping g_locals_bytes (which is
-     * for the NEGATIVE-offset stack-allocated locals). */
+     * for the NEGATIVE-offset stack-allocated locals).
+     *
+     * Session 92: each param node carries its declared kind in `op`
+     * (LK_INT / LK_INT_PTR / LK_CHAR_PTR); preserve it so the body
+     * can emit byte vs dword ops correctly. */
     for (int i = 0; i < fn->n_params; i++) {
         if (g_n_locals >= MAX_LOCALS) die("too many locals");
         int j = 0;
@@ -1180,6 +1567,8 @@ static void gen_func(struct node *fn) {
         while (nm[j]) { g_locals[g_n_locals].name[j] = nm[j]; j++; }
         g_locals[g_n_locals].name[j] = 0;
         g_locals[g_n_locals].ebp_off = 8 + i * 4;
+        g_locals[g_n_locals].kind    = fn->params[i]->op
+                                       ? fn->params[i]->op : LK_INT;
         g_n_locals++;
     }
 
