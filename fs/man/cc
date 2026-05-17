@@ -2,11 +2,15 @@ NAME
     cc - tiny C-subset compiler (AdventOS native)
 
 SYNOPSIS
-    cc FILE.c [-o OUT.elf]
+    cc FILE.c [FILE.c ...] [-o OUT.elf]
 
 DESCRIPTION
-    A from-scratch single-file compiler that reads a C-subset source
-    file and writes a runnable ELF32 binary for AdventOS. NOT a port
+    A from-scratch single-file compiler that reads one or more
+    C-subset source files and writes a single runnable ELF32 binary
+    for AdventOS. Multiple input files (session 100) are preprocessed
+    and lexed in order; the preprocessor state persists across files
+    so a `#ifndef HDR / #define HDR / ... / #endif` header guard
+    works naturally for shared headers. NOT a port
     of TinyCC. Same scope philosophy as lua(1) — pick a useful subset,
     write it directly, ship something that works today.
 
@@ -155,6 +159,9 @@ DELIBERATELY NOT IMPLEMENTED
     - ++/-- on arr[i], *p, or expressions (NAME only)
     - assignment as an expression (a = b is a statement)
     - comma operator
+    - function prototypes (forward function declarations).
+      Cross-file calls work without them because cc resolves
+      `call rel32` via fixups regardless of declaration order.
     - struct value passing/returning (use pointers)
     - struct value assignment (use field-by-field)
     - char-sized struct fields (every field is 4 bytes)
@@ -207,6 +214,9 @@ EXAMPLES
     callback args, and a global dispatch table.
     Sample at /ptrs.c demonstrates sizeof and scaled pointer arith
     (int *p; p++ advances 4 bytes; *(p+i) for arbitrary offsets).
+    Sample at /mmain.c + /mlib.c + /mlib.h demonstrates multi-file
+    compilation: `cc /mmain.c /mlib.c -o /multi.elf`. Header guard in
+    mlib.h prevents struct redefinition.
 
 EXIT STATUS
     0   compile succeeded

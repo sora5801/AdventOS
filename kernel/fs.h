@@ -52,7 +52,12 @@
  * 512-byte header sector, total 4608 bytes — needs 9 sectors, so
  * FS_SUPER_SECTORS also bumped 5 → 9 (with one byte of slack).
  * On-disk layout shifts; old fs.img files are incompatible. Keep
- * this in lockstep with mkfs.py's FS_MAX_FILES / FS_SUPER_SECTORS. */
+ * this in lockstep with mkfs.py's FS_MAX_FILES / FS_SUPER_SECTORS.
+ *
+ * Session 100 considered bumping to 160 for the multi-file cc demo
+ * but the +2 KiB of super-block buffer pushed kernel .bss past the
+ * 0xA0000 VGA RAM boundary. Kept at 128; trimmed older demo source
+ * files from mkfs.py instead. */
 #define FS_SUPER_SECTORS        9u
 #define FS_NAME_MAX             16
 #define FS_MAX_FILES            128

@@ -1380,6 +1380,10 @@ static struct node *parse_func(void) {
     if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
         die_at(tk_cur()->line, "expected 'int' or 'char' (return type)", 0);
     g_tk++;
+    /* Session 100 — allow `int *foo()` / `char *bar()` for pointer
+     * return types. The `*` is consumed but not propagated — cc
+     * doesn't check the actual returned value's type against it. */
+    (void)accept(T_STAR);
     if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected function name", 0);
     struct node *fn = new_node(N_FUNC_DECL);
     int i = 0;
@@ -2964,6 +2968,13 @@ static void gen_stmt(struct node *n) {
 
 static void gen_func(struct node *fn) {
     int idx = func_intern(fn->name, fn->n_params);
+    /* Session 100 — multi-file compilation can produce duplicate
+     * function definitions if a user puts the same function body in
+     * two source files. Catch it here. (For single-file builds this
+     * never triggers because the parser would already have errored
+     * at the second `int foo(...) { ... }`.) */
+    if (g_funcs[idx].defined)
+        die_at(fn->line, "duplicate function definition", fn->name);
     g_funcs[idx].entry_off = g_code_len;
     g_funcs[idx].defined   = 1;
 
@@ -3618,11 +3629,18 @@ static void default_outpath(const char *in, char *out, int cap) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        sys_write(2, "usage: cc FILE.c [-o OUT.elf]\n", 30);
+        sys_write(2, "usage: cc FILE.c [FILE.c ...] [-o OUT.elf]\n", 43);
         return 1;
     }
-    const char *in_path  = 0;
-    char        out_path[80];
+    /* Session 100 — multi-file compilation. Accept any number of input
+     * files; the preprocessor state persists across them so a header
+     * `#ifndef GUARD / #define GUARD / ... / #endif` shared via #include
+     * is included only once. The concatenated preprocessed source is
+     * lexed and parsed as a single translation unit. */
+    #define MAX_INPUTS 16
+    const char *in_paths[MAX_INPUTS];
+    int   n_inputs = 0;
+    char  out_path[80];
     out_path[0] = 0;
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][1] == 'o' && argv[i][2] == 0) {
@@ -3634,24 +3652,27 @@ int main(int argc, char **argv) {
             }
             out_path[j] = 0;
             i++;
-        } else if (!in_path) {
-            in_path = argv[i];
         } else {
-            die("unexpected extra argument");
+            if (n_inputs >= MAX_INPUTS) die("too many input files");
+            in_paths[n_inputs++] = argv[i];
         }
     }
-    if (!in_path) die("missing input file");
-    if (!out_path[0]) default_outpath(in_path, out_path, sizeof(out_path));
+    if (n_inputs == 0) die("missing input file");
+    if (!out_path[0]) default_outpath(in_paths[0], out_path, sizeof(out_path));
 
-    int sz = 0;
-    char *src = slurp(in_path, &sz);
-    if (!src) die_at(0, "cannot read", in_path);
-
-    /* Session 95 — run the preprocessor first; lex the output. */
+    /* Session 95/100 — run the preprocessor over each input file, with
+     * state persisting across them. The result of concatenating each
+     * file's processed bytes ends up in g_pp_buf. Single lex+parse
+     * follows. */
     g_pp_len = 0;
     g_n_macros = 0;
     g_if_depth = 0;
-    pp_process_buf(src, sz, 0);
+    for (int i = 0; i < n_inputs; i++) {
+        int sz = 0;
+        char *src = slurp(in_paths[i], &sz);
+        if (!src) die_at(0, "cannot read", in_paths[i]);
+        pp_process_buf(src, sz, 0);
+    }
     if (g_if_depth != 0) die("unterminated #ifdef/#ifndef");
 
     lex_all(g_pp_buf, g_pp_len);

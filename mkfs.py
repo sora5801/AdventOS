@@ -34,7 +34,7 @@ EHDR_SIZE         = 52
 PHDR_SIZE         = 32
 
 FS_NAME_MAX       = 16
-FS_MAX_FILES      = 128         # bumped 64 -> 128 in session 73 followup; must match kernel/fs.h
+FS_MAX_FILES      = 128         # session 73; must match kernel/fs.h
 FS_ENTRY_SIZE     = 32          # name(16) + start(4) + size(4) + type(1) + parent(1) + 6 reserved
 FS_SUPER_SECTORS  = 9           # 1 header + 8 entry sectors (128 * 32 = 4096B); must match kernel/fs.h
 
@@ -237,12 +237,10 @@ DATA_FILES = [
     ('cc',    'fs/man/cc',    'man'),     # session 90
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
-    # Session 90 — sample C source for the cc compiler.
-    ('hello.c',   'fs/hello.c',   None),
-    # Session 91 — string-literals demo.
-    ('strs.c',    'fs/strs.c',    None),
-    # Session 92 — char/pointer/array demo.
-    ('chars.c',   'fs/chars.c',   None),
+    # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
+    # removed from mkfs in session 100 to free FS_MAX_FILES slots for
+    # the multi-file demo. Their content lives in
+    # docs/77/78/79-*.md.
     # Session 93 — global-variables demo.
     ('globs.c',   'fs/globs.c',   None),
     # Session 94 — printf demo.
@@ -258,6 +256,10 @@ DATA_FILES = [
     ('fnptr.c',   'fs/fnptr.c',   None),
     # Session 99 — scaled pointer arithmetic + sizeof demo.
     ('ptrs.c',    'fs/ptrs.c',    None),
+    # Session 100 — multi-file compilation demo.
+    ('mlib.h',    'fs/mlib.h',    None),
+    ('mlib.c',    'fs/mlib.c',    None),
+    ('mmain.c',   'fs/mmain.c',   None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
