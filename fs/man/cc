@@ -1,0 +1,98 @@
+NAME
+    cc - tiny C-subset compiler (AdventOS native)
+
+SYNOPSIS
+    cc FILE.c [-o OUT.elf]
+
+DESCRIPTION
+    A from-scratch single-file compiler that reads a C-subset source
+    file and writes a runnable ELF32 binary for AdventOS. NOT a port
+    of TinyCC. Same scope philosophy as lua(1) — pick a useful subset,
+    write it directly, ship something that works today.
+
+    Output ELF entry is at VA 0x40000000 (the same VA the kernel
+    loader expects for every user binary). A compiled program can
+    be invoked directly:
+
+      cc hello.c              writes /hello.elf
+      /hello.elf              runs it
+      echo $?                 inspect exit status
+
+IMPLEMENTED
+    Types          int (signed 32-bit). No char/short/long/float.
+
+    Operators      + - * / %    binary
+                   == != < > <= >=    comparison
+                   && ||  !     short-circuit boolean
+                   & | ^ ~ << >>     bitwise
+                   unary -      negation
+                   Assignment is a statement, not an expression.
+
+    Statements     int x;  int x = expr;       local declaration
+                   name = expr;                 assignment
+                   expr;                        expression-statement
+                   if (e) stmt [else stmt]      conditional
+                   while (e) stmt               loop
+                   return [expr];               function return
+                   { stmts }                    block
+
+    Functions      int NAME(int p1, int p2, ...) { body }
+                   Forward references work — codegen patches
+                   call sites after parsing.
+
+    Intrinsics     sys_exit(code)              syscall 3, no return
+                   sys_write(fd, addr, n)      syscall 12
+                   sys_getpid()                syscall 2
+                   print_int(n)                decimal + newline
+
+CODEGEN
+    Stack-based, EAX-as-result. Every expression computes its result
+    into EAX. Multi-operand subexpressions push intermediate values
+    to the stack and pop into EBX. Locals live on the stack at
+    EBP-relative offsets. cdecl: args pushed right-to-left, caller
+    cleans up.
+
+    Not optimized — no constant folding, no register allocation
+    past EAX/EBX, no peephole. Produces correct but bulky code.
+
+DELIBERATELY NOT IMPLEMENTED
+    - char / pointer / array types
+    - string literals (no way to printf "hello world" yet)
+    - global variables
+    - preprocessor: #include, #define
+    - compound assignment (+=, -=, ...)
+    - ++ / --, ternary, comma operator
+    - struct / union / enum / typedef
+    - function pointers
+    - the linker step (multi-file compilation)
+
+EXAMPLES
+    Minimal program:
+      int main() { return 42; }
+
+    Recursion:
+      int fact(int n) {
+          if (n <= 1) return 1;
+          return n * fact(n - 1);
+      }
+      int main() { print_int(fact(10)); return 0; }
+
+    Sample at /hello.c demonstrates fact / sum / gcd.
+
+EXIT STATUS
+    0   compile succeeded
+    1   parse error, lex error, or codegen overflow
+
+SEE ALSO
+    lua(1), sh(1), ed(1)
+
+NOTES
+    The compiler is single-pass with respect to functions: it parses
+    the whole program, then emits code for every function and patches
+    forward call sites in a fixups table. There is no IR — codegen
+    walks the AST directly.
+
+    Token cap is 2048 (NAME_MAX 24); code cap is 32 KiB. A program
+    that exceeds either dies with "code section overflow" or
+    "too many tokens". Bump the constants in user/cc.c if you need
+    headroom — they're chosen to keep cc.bin around 137 KiB.

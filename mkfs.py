@@ -94,6 +94,9 @@ USER_PROGRAMS = [
     ('man.elf',   'user/_obj/man.bin',   None),
     # Session 87: path-D scripting — Lua-syntax subset interpreter.
     ('lua.elf',   'user/_obj/lua.bin',   None),
+    # Session 90: path-B phase 1 — small C-subset compiler that
+    # emits AdventOS-compatible ELF32 binaries (entry at VA 0x40000000).
+    ('cc.elf',    'user/_obj/cc.bin',    None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -231,8 +234,11 @@ DATA_FILES = [
     ('id',    'fs/man/id',    'man'),
     ('sleep', 'fs/man/sleep', 'man'),
     ('lua',   'fs/man/lua',   'man'),     # session 87
+    ('cc',    'fs/man/cc',    'man'),     # session 90
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
+    # Session 90 — sample C source for the cc compiler.
+    ('hello.c',   'fs/hello.c',   None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
