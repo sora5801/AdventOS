@@ -12,34 +12,61 @@ DESCRIPTION
 MODES
     Normal mode (default on start)
     Insert mode (entered via i / I / a / A / o / O)
-    Command-line mode (entered via :)
+    Command-line mode (entered via : / / / ?)
 
 KEYS (normal mode)
     h j k l         cursor left / down / up / right
     w / b           jump word forward / backward
     0 / $           start / end of line
     gg / G          first / last line of file
+    NG              jump to line N (e.g. `42G`)
+
     i / a           enter insert mode (at cursor / after cursor)
     I / A           enter insert mode (start / end of current line)
     o / O           open line below / above + enter insert mode
     x               delete char under cursor
     dd              delete current line
     yy              yank current line to register
-    p               paste register after cursor
-    u               undo last change (limited; sessions 46+ heritage)
-    :               enter command-line mode
+    p / P           paste register after / before cursor
+
+    u               undo last edit (session 86; 32-deep ring)
+
+COUNT PREFIXES (session 86)
+    A leading number repeats the next command:
+      5j           down 5 lines
+      10w          forward 10 words
+      3x           delete 3 chars
+      5dd          delete 5 lines (yanked into register)
+      3yy          yank 3 lines
+      42G          jump to line 42
+    `0` alone is still the "jump to col 0" motion; once a count is
+    nonzero, `0` becomes a regular digit (so `10j` works).
+
+SEARCH
+    /pat          forward search for `pat` (literal substring)
+    ?pat          backward search
+    n             repeat last search in its original direction
+    N             repeat last search FLIPPED (forward becomes
+                  backward and vice versa)
 
 COMMAND-LINE MODE (:)
-    :w [FILE]       write to FILE (default: loaded file)
-    :q              quit (refuses if unsaved)
-    :q!             quit unconditionally
-    :wq             write then quit
-    :N              jump to line N
-    :/pat           search forward for pat
+    :w [FILE]                write to FILE (default: loaded file)
+    :q                       quit (refuses if unsaved)
+    :q!                      quit unconditionally
+    :wq                      write then quit
+    :N                       jump to line N
+    :s/old/new/              replace first match on current line
+    :s/old/new/g             replace ALL matches on current line
+    :%s/old/new/             replace first match on every line
+    :%s/old/new/g            replace every match on every line
 
 EXAMPLES
     vi hello.txt
-    :w   :q
+    /TODO        n    n              # walk through TODO occurrences
+    :%s/foo/bar/g                    # replace foo with bar everywhere
+    5dd                              # delete 5 lines into the register
+    p                                # paste them somewhere else
+    u                                # undo
 
 EXIT STATUS
     0   clean quit
@@ -49,9 +76,14 @@ SEE ALSO
     ed(1), sh(1)
 
 NOTES
-    Cursor positioning uses SYS_TTY_CURSOR, which updates the
-    framebuffer and VGA grid but not the host terminal's idea
-    of cursor over -serial stdio. The QEMU graphical window
-    renders vi correctly; the serial side gets a redraw-only
-    view. Limitation acknowledged; ANSI-CSI emission in fbcon
-    would fix both at once but is a separate session.
+    - Search patterns are LITERAL SUBSTRINGS, not regex (matches the
+      rest of this OS).
+    - :s/old/new/ doesn't support '/' inside `old` or `new` — escape
+      via a different pattern.
+    - Cursor positioning uses SYS_TTY_CURSOR, which updates the
+      framebuffer and VGA grid but not the host terminal's idea
+      of cursor over -serial stdio. The QEMU graphical window
+      renders vi correctly; the serial side gets a redraw-only
+      view. Limitation acknowledged.
+    - Undo is bounded at 32 entries; older changes silently fall
+      off the end of the ring.

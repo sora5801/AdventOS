@@ -30,7 +30,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | In-guest clients: nc, wget, telnet, irc, ssh, httpsget | ✅ |
 | Unix coreutils — ls, cat, cp, mv, rm, mkdir, rmdir, chmod, touch, find, head, tail, grep, sort, uniq, wc, tee, tr, seq, echo, date, ps, kill, pwd, id, man | ✅ |
 | Shells — interactive `sh.elf` with pipes/redirection/jobs/history/tab-completion/env vars/mid-line editing | ✅ |
-| Modal editor — `vi.elf` (limited but real) | ✅ |
+| Modal editor — `vi.elf` (undo, count prefixes, search/replace, motions, modes) | ✅ |
 | Man pages — 26 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
 | ptrace-based debugger — `dbg.elf` | ✅ |
 | Multi-user with `/etc/passwd`-style login | ✅ |
@@ -91,9 +91,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **85 — Usable Unix Phase 3**. See [`docs/72-man-pages.md`](docs/72-man-pages.md) for the latest deep dive (`man` binary + 26 man pages under `/man/`).
+Current session: **86 — Usable Unix Phase 4 (final)**. See [`docs/73-vi-polish.md`](docs/73-vi-polish.md) for the latest deep dive (undo, count prefixes, `:s/old/new/`, backward search). **Path A is complete.**
 
 Recent session deep dives:
+- [Session 86 — vi polish (undo, search/replace, count prefixes, ?pat)](docs/73-vi-polish.md)
 - [Session 85 — Man pages](docs/72-man-pages.md)
 - [Session 84 — Shell mid-line editing](docs/71-shell-mid-line-editing.md)
 - [Session 83 — Usable Unix Phase 1: coreutils gap-fill + selftest reliability](docs/70-usable-unix-coreutils.md)
@@ -108,13 +109,17 @@ The full session index is in `docs/`. Highlights:
 
 AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BIOS that ships with it. Real-hardware boot has worked in the past but isn't continuously tested. The OS is single-architecture (i386), single-FS (AdventFS), single-machine — no clustering, no live migration, no certifications.
 
-The current phase ("Path A — Usable Unix") is closing the gaps that make daily shell use feel broken. As of session 85:
+**Path A — Usable Unix is complete** as of session 86:
 - Phase 1 ✅ — coreutils gap-fill (cp/mv/rm/mkdir/rmdir/chmod/touch/find)
 - Phase 2 ✅ — shell mid-line editing (left/right arrows, Ctrl-A/E/W/U/K)
 - Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
-- Phase 4 (next) — vi polish (search, undo, smoother save/quit)
+- Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
 
-After Phase 4, candidate next paths are self-hosting a C compiler (port `tcc`), a window manager on the VBE framebuffer, more drivers (virtio, AC97 consumer), and a scripting language (probably Lua).
+Candidate next paths:
+- **Path B — Self-hosting.** Port `tcc` so AdventOS can compile its own programs.
+- **Path C — Graphics.** A minimal window manager on the VBE framebuffer.
+- **Path D — Scripting.** Port Lua as both a system scripting language and a REPL.
+- **Path E — Drivers.** virtio (modern QEMU's preferred device family), more USB device classes, sound consumer.
 
 ## License
 

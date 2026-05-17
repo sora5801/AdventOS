@@ -30,13 +30,16 @@
  *
  * Command coverage (intentionally small but recognizable):
  *
- *   Movement   h j k l 0 $ gg G w b
+ *   Movement   h j k l 0 $ gg G w b                  (count-prefixable: 5j, 10w)
  *   Insert     i a I A o O      ESC to leave
- *   Delete     x dd
- *   Yank       yy
- *   Paste      p P
- *   Search     /pat then n / N
+ *   Delete     x dd                                  (count-prefixable: 3x, 5dd)
+ *   Yank       yy                                    (count-prefixable: 3yy)
+ *   Paste      p P                                   (multi-line aware via paste_lines)
+ *   Search     /pat (forward) ?pat (backward) n N    (n repeats, N flips direction)
+ *   Undo       u                                     (session 86: 32-deep ring)
  *   Cmd-line   :w :q :q! :wq :NN (goto line N)
+ *              :s/old/new/[g]    (current line)      (session 86)
+ *              :%s/old/new/[g]   (every line)
  */
 
 #include "libuser.h"
@@ -72,24 +75,58 @@ static int g_mode;
 /* Pending "d" / "g" / "y" prefix for two-key ops (dd, gg, yy). */
 static char g_pending;
 
+/* Session 86 — count prefix. Typing digits in normal mode accumulates
+ * a repeat count: `5j` moves down 5 lines, `3dd` deletes 3, `2yy`
+ * yanks 2. `0` is special — at count=0 it's the "jump to column 0"
+ * motion; once count is nonzero it becomes a regular digit. Reset
+ * to 0 after every executed command (or after ESC). */
+static int  g_count;
+
 /* Status / message at the bottom row. Replaced each redraw. */
 static char g_status[80];
 
-/* `:`/`/` line buffer. */
+/* `:` / `/` / `?` line buffer. */
 static char g_cmd_buf[80];
 static int  g_cmd_len;
-static char g_cmd_lead;          /* ':' or '/' */
+static char g_cmd_lead;          /* ':' or '/' or '?' */
 
 /* Yank register. Holds either a partial line (yank_is_line=0) or
- * a whole line (yank_is_line=1, p/P inserts above/below as a new
- * line rather than into the current one). */
-static char g_yank_buf[MAX_LINE];
+ * one-or-more whole lines (yank_is_line=1, p/P inserts above/below
+ * as new lines rather than into the current line). Multi-line
+ * content from `3yy` is stored as concatenated bytes separated by
+ * '\n'; paste splits on '\n' and creates one new line per piece. */
+#define YANK_MAX 8192               /* ~80 lines × 100 chars; enough for normal use */
+static char g_yank_buf[YANK_MAX];
 static int  g_yank_len;
 static int  g_yank_is_line;
 
-/* Last search pattern, persists across n / N. */
+/* Last search pattern, persists across n / N. g_search_forward
+ * tracks the direction of the last `/` or `?` so `n` repeats it
+ * and `N` flips it. */
 static char g_search_pat[80];
 static int  g_search_len;
+static int  g_search_forward = 1;
+
+/* Session 86 — undo ring. Each entry holds a serialized snapshot
+ * of the buffer (lines joined by '\n') plus the cursor state at
+ * the time of capture. undo_push() runs BEFORE every mutating
+ * top-level command in normal mode (or on entry to insert mode);
+ * `u` in normal mode pops the most recent entry and restores from
+ * it. Bounded ring keeps memory under control — oldest entries
+ * are freed when the ring fills.
+ *
+ * Granularity: one snapshot per top-level command. `3dd` is one
+ * undo step, not three. An entire insert session (i → typing →
+ * ESC) is also one step. This matches vim's behavior and keeps
+ * the typical undo count low. */
+#define UNDO_MAX 32
+struct undo_state {
+    char *data;
+    int   size;
+    int   cr, cc, top_row;
+};
+static struct undo_state g_undo[UNDO_MAX];
+static int g_undo_n;
 
 static int  g_quit;
 
@@ -206,6 +243,101 @@ static void line_join(int idx) {
     for (int i = 0; i < N->len; i++) L->text[L->len + i] = N->text[i];
     L->len += N->len;
     buffer_delete_line(idx + 1);
+}
+
+/* Forward decls so the undo helpers can call into status / cursor
+ * functions defined further down. */
+static void set_status(const char *s);
+static void clamp_cursor(void);
+
+/* ---- Undo (session 86) ----------------------------------------- */
+
+/* Serialize the current buffer into one heap allocation: every line
+ * verbatim, separated by '\n'. Returns the allocation (caller owns)
+ * and writes the size into *out_size. NULL on OOM. */
+static char *serialize_buffer(int *out_size) {
+    int total = 0;
+    for (int i = 0; i < g_n_lines; i++) total += g_lines[i].len + 1;
+    if (total <= 0) total = 1;
+    char *buf = malloc(total);
+    if (!buf) return 0;
+    int o = 0;
+    for (int i = 0; i < g_n_lines; i++) {
+        for (int j = 0; j < g_lines[i].len; j++) buf[o++] = g_lines[i].text[j];
+        if (i < g_n_lines - 1) buf[o++] = '\n';
+    }
+    *out_size = o;
+    return buf;
+}
+
+/* Replace the entire buffer with the contents of `data` (size bytes),
+ * splitting on '\n'. Frees any pre-existing line allocations. */
+static void deserialize_buffer(const char *data, int size) {
+    /* Clear existing buffer first. */
+    for (int i = 0; i < g_n_lines; i++) {
+        if (g_lines[i].text) { free(g_lines[i].text); g_lines[i].text = 0; }
+        g_lines[i].len = 0;
+        g_lines[i].cap = 0;
+    }
+    g_n_lines = 0;
+    /* Walk `data` accumulating each line. */
+    int start = 0;
+    for (int i = 0; i <= size; i++) {
+        if (i == size || data[i] == '\n') {
+            if (g_n_lines >= MAX_LINES) break;
+            int len = i - start;
+            struct line *L = &g_lines[g_n_lines++];
+            int cap = (len < 80) ? 80 : (len + 1);
+            L->text = malloc(cap);
+            L->cap  = cap;
+            L->len  = len;
+            for (int k = 0; k < len; k++) L->text[k] = data[start + k];
+            start = i + 1;
+        }
+    }
+    if (g_n_lines == 0) buffer_init();
+}
+
+/* Capture the current buffer + cursor state into the next undo
+ * slot. Called before any mutating top-level command. On OOM the
+ * snapshot is silently skipped — undo for that step won't work,
+ * but the edit itself still proceeds. */
+static void undo_push(void) {
+    int size = 0;
+    char *data = serialize_buffer(&size);
+    if (!data) return;
+    if (g_undo_n == UNDO_MAX) {
+        /* Ring full — drop the oldest and slide the rest down. */
+        free(g_undo[0].data);
+        for (int i = 0; i < UNDO_MAX - 1; i++) g_undo[i] = g_undo[i + 1];
+        g_undo_n--;
+    }
+    g_undo[g_undo_n].data    = data;
+    g_undo[g_undo_n].size    = size;
+    g_undo[g_undo_n].cr      = g_cr;
+    g_undo[g_undo_n].cc      = g_cc;
+    g_undo[g_undo_n].top_row = g_top_row;
+    g_undo_n++;
+}
+
+/* Pop and restore the most recent undo state. */
+static void undo_pop(void) {
+    if (g_undo_n == 0) {
+        set_status("Already at oldest change");
+        return;
+    }
+    g_undo_n--;
+    struct undo_state *u = &g_undo[g_undo_n];
+    deserialize_buffer(u->data, u->size);
+    g_cr      = u->cr;
+    g_cc      = u->cc;
+    g_top_row = u->top_row;
+    free(u->data);
+    u->data = 0;
+    /* The restore IS itself a mutation visible to the user; mark
+     * modified=1 unconditionally (could be smarter and compare to
+     * the original file, but vim doesn't either). */
+    g_modified = 1;
 }
 
 /* ---- File I/O -------------------------------------------------- */
@@ -402,6 +534,76 @@ static void clamp_cursor(void) {
 
 /* ---- Command handlers ----------------------------------------- */
 
+/* Parse a `:s/old/new/[g]` or `:%s/old/new/[g]` substitution. The
+ * pattern syntax is literal substring (no regex, matching the rest
+ * of this OS). Two forms:
+ *
+ *   s/old/new/      replace first match on CURRENT line
+ *   s/old/new/g     replace ALL matches on CURRENT line
+ *   %s/old/new/     replace first match on EVERY line
+ *   %s/old/new/g    replace ALL matches on EVERY line
+ *
+ * Returns the number of replacements made (or -1 on parse error).
+ * Caller (run_colon_command) is responsible for pushing the undo
+ * snapshot before invoking. */
+static int do_substitute(const char *body, int blen, int all_lines) {
+    /* body looks like "old/new/[g]" — no leading 's' or '%s'. */
+    if (blen < 2) return -1;
+    /* Find the first un-escaped '/' to split old from new. We don't
+     * actually support escapes in this minimal impl — '/' in either
+     * old or new isn't expressible. Documented as a known limit. */
+    int slash1 = -1;
+    for (int i = 0; i < blen; i++) {
+        if (body[i] == '/') { slash1 = i; break; }
+    }
+    if (slash1 <= 0) return -1;             /* empty pattern */
+    int slash2 = -1;
+    for (int i = slash1 + 1; i < blen; i++) {
+        if (body[i] == '/') { slash2 = i; break; }
+    }
+    int global = 0;
+    int new_end = blen;
+    if (slash2 >= 0) {
+        new_end = slash2;
+        /* Flags after slash2 — only 'g' supported. */
+        for (int i = slash2 + 1; i < blen; i++) {
+            if (body[i] == 'g') global = 1;
+            else return -1;
+        }
+    }
+    const char *old_p = body;
+    int old_len = slash1;
+    const char *new_p = body + slash1 + 1;
+    int new_len = new_end - (slash1 + 1);
+
+    int first_line = all_lines ? 0 : g_cr;
+    int last_line  = all_lines ? g_n_lines - 1 : g_cr;
+    int replaced = 0;
+    for (int r = first_line; r <= last_line; r++) {
+        struct line *L = &g_lines[r];
+        int i = 0;
+        while (i + old_len <= L->len) {
+            if (my_memcmp(L->text + i, old_p, old_len) != 0) { i++; continue; }
+            /* Match at [i, i+old_len). Replace with new_p. */
+            int delta = new_len - old_len;
+            if (delta > 0) {
+                line_grow(L, L->len + delta + 1);
+                for (int k = L->len + delta - 1; k >= i + new_len; k--)
+                    L->text[k] = L->text[k - delta];
+            } else if (delta < 0) {
+                for (int k = i + new_len; k < L->len + delta; k++)
+                    L->text[k] = L->text[k - delta];
+            }
+            for (int k = 0; k < new_len; k++) L->text[i + k] = new_p[k];
+            L->len += delta;
+            replaced++;
+            i += new_len;
+            if (!global) break;
+        }
+    }
+    return replaced;
+}
+
 static void run_colon_command(const char *cmd, int len) {
     if (len == 0) return;
     /* :NN — goto line. */
@@ -415,6 +617,43 @@ static void run_colon_command(const char *cmd, int len) {
         if (v > g_n_lines) v = g_n_lines;
         g_cr = v - 1;
         g_cc = 0;
+        return;
+    }
+    /* :s/old/new/[g] or :%s/old/new/[g] — session 86. */
+    int sub_off = -1;
+    int all_lines = 0;
+    if (cmd[0] == 's' && len >= 1) { sub_off = 1; all_lines = 0; }
+    else if (cmd[0] == '%' && len >= 2 && cmd[1] == 's') {
+        sub_off = 2; all_lines = 1;
+    }
+    if (sub_off > 0) {
+        undo_push();
+        int rc = do_substitute(cmd + sub_off, len - sub_off, all_lines);
+        if (rc < 0) {
+            /* Roll back the undo we just pushed — no edit happened. */
+            if (g_undo_n > 0) {
+                g_undo_n--;
+                free(g_undo[g_undo_n].data);
+                g_undo[g_undo_n].data = 0;
+            }
+            set_status("E486: malformed :s command (use s/old/new/[g])");
+            return;
+        }
+        if (rc > 0) g_modified = 1;
+        char tmp[60]; int n = 0;
+        int v = rc;
+        if (v == 0) { const char *m = "no matches"; while (*m) tmp[n++] = *m++; }
+        else {
+            char db[12]; int dn = 0;
+            if (v == 0) db[dn++] = '0';
+            else while (v) { db[dn++] = (char)('0' + v % 10); v /= 10; }
+            while (dn--) tmp[n++] = db[dn];
+            const char *suf = (rc == 1) ? " substitution" : " substitutions";
+            while (*suf) tmp[n++] = *suf++;
+        }
+        tmp[n] = 0;
+        set_status(tmp);
+        clamp_cursor();
         return;
     }
     /* :w / :q / :wq / :q! */
@@ -448,60 +687,136 @@ static void run_colon_command(const char *cmd, int len) {
     }
 }
 
-static void run_search(const char *pat, int len) {
+static void run_search(const char *pat, int len, int forward) {
     if (len == 0) return;
     my_strncpy(g_search_pat, pat, (int)sizeof(g_search_pat));
     g_search_len = len;
-    /* Start searching from one past the cursor. */
-    int sr = g_cr, sc = g_cc + 1;
-    if (sc > g_lines[sr].len) { sc = 0; sr++; if (sr >= g_n_lines) sr = 0; }
-    if (!search_next(sr, sc, 1)) set_status("pattern not found");
+    g_search_forward = forward;
+    /* Start searching from one past the cursor (forward) or one
+     * before (backward). */
+    int sr = g_cr, sc;
+    if (forward) {
+        sc = g_cc + 1;
+        if (sc > g_lines[sr].len) { sc = 0; sr++; if (sr >= g_n_lines) sr = 0; }
+    } else {
+        sc = g_cc - 1;
+        if (sc < 0) {
+            sr--; if (sr < 0) sr = g_n_lines - 1;
+            sc = g_lines[sr].len ? g_lines[sr].len - 1 : 0;
+        }
+    }
+    if (!search_next(sr, sc, forward)) set_status("pattern not found");
 }
 
 /* ---- Mode handlers --------------------------------------------- */
 
+/* Yank N lines starting at row r into the yank register. Stores as
+ * concatenated bytes with '\n' separators between (NOT after) lines.
+ * Used by yy with count prefix and by dd as a side effect. */
+static void yank_lines(int r, int n) {
+    if (r < 0 || r >= g_n_lines) return;
+    if (n < 1) n = 1;
+    if (r + n > g_n_lines) n = g_n_lines - r;
+    int o = 0;
+    for (int i = 0; i < n; i++) {
+        struct line *L = &g_lines[r + i];
+        int copy = L->len;
+        if (o + copy + 1 >= YANK_MAX) { copy = YANK_MAX - o - 2; }
+        if (copy < 0) copy = 0;
+        for (int k = 0; k < copy; k++) g_yank_buf[o + k] = L->text[k];
+        o += copy;
+        if (i < n - 1 && o < YANK_MAX - 1) g_yank_buf[o++] = '\n';
+    }
+    g_yank_len = o;
+    g_yank_is_line = 1;
+}
+
+/* Paste the yank register before (offset=0) or after (offset=1)
+ * the current line. Used by p/P when g_yank_is_line == 1. Splits
+ * the yank buffer on '\n' and inserts one new line per piece. */
+static void paste_lines(int after) {
+    int target = g_cr + (after ? 1 : 0);
+    int start = 0;
+    for (int i = 0; i <= g_yank_len; i++) {
+        if (i == g_yank_len || g_yank_buf[i] == '\n') {
+            int seg_len = i - start;
+            buffer_insert_line(target);
+            struct line *L = &g_lines[target];
+            line_grow(L, seg_len + 1);
+            for (int k = 0; k < seg_len; k++) L->text[k] = g_yank_buf[start + k];
+            L->len = seg_len;
+            target++;
+            start = i + 1;
+        }
+    }
+    g_cr = after ? g_cr + 1 : g_cr;
+    g_cc = 0;
+}
+
 static void handle_normal(int c) {
+    /* Session 86: count prefix. Digits accumulate into g_count while
+     * no command is pending. '0' is the "jump to col 0" motion when
+     * count is zero, but becomes a regular digit once count is
+     * nonzero (so `10j` works). Pending two-key prefixes (d/g/y)
+     * suppress count accumulation. */
+    if (!g_pending && c >= '0' && c <= '9') {
+        if (c == '0' && g_count == 0) {
+            /* fall through to switch — '0' is column-zero motion */
+        } else {
+            g_count = g_count * 10 + (c - '0');
+            return;     /* wait for more digits or a command */
+        }
+    }
+    int n = g_count > 0 ? g_count : 1;     /* repeat count for this command */
+
     /* Two-key sequences: 'd' + 'd' → dd, 'g' + 'g' → gg, 'y' + 'y' → yy. */
     if (g_pending) {
         char p = g_pending;
         g_pending = 0;
         if (p == 'd' && c == 'd') {
-            /* dd — also acts as the yank source. */
-            struct line *L = &g_lines[g_cr];
-            int n = L->len; if (n > MAX_LINE - 1) n = MAX_LINE - 1;
-            for (int i = 0; i < n; i++) g_yank_buf[i] = L->text[i];
-            g_yank_len = n;
-            g_yank_is_line = 1;
-            buffer_delete_line(g_cr);
+            undo_push();
+            /* dd with count — delete N lines, yank them. */
+            yank_lines(g_cr, n);
+            for (int i = 0; i < n && g_n_lines > 0; i++) buffer_delete_line(g_cr);
             if (g_cr >= g_n_lines) g_cr = g_n_lines - 1;
+            if (g_cr < 0) g_cr = 0;
             g_cc = 0;
             g_modified = 1;
+            g_count = 0;
             return;
         }
         if (p == 'g' && c == 'g') {
             g_cr = 0; g_cc = 0;
+            g_count = 0;
             return;
         }
         if (p == 'y' && c == 'y') {
-            struct line *L = &g_lines[g_cr];
-            int n = L->len; if (n > MAX_LINE - 1) n = MAX_LINE - 1;
-            for (int i = 0; i < n; i++) g_yank_buf[i] = L->text[i];
-            g_yank_len = n;
-            g_yank_is_line = 1;
-            set_status("1 line yanked");
+            yank_lines(g_cr, n);
+            char msg[40]; int mo = 0;
+            int v = n;
+            char db[12]; int dn = 0;
+            if (v == 0) db[dn++] = '0';
+            else while (v) { db[dn++] = (char)('0' + v % 10); v /= 10; }
+            while (dn--) msg[mo++] = db[dn];
+            const char *suf = (n == 1) ? " line yanked" : " lines yanked";
+            while (*suf) msg[mo++] = *suf++;
+            msg[mo] = 0;
+            set_status(msg);
+            g_count = 0;
             return;
         }
         /* Unknown two-key seq — fall through and reinterpret c. */
     }
 
     switch (c) {
-        case 'h': g_cc--; break;
-        case 'l': g_cc++; break;
-        case 'j': g_cr++; break;
-        case 'k': g_cr--; break;
+        case 'h': for (int i = 0; i < n; i++) g_cc--; break;
+        case 'l': for (int i = 0; i < n; i++) g_cc++; break;
+        case 'j': for (int i = 0; i < n; i++) g_cr++; break;
+        case 'k': for (int i = 0; i < n; i++) g_cr--; break;
         case '0': g_cc = 0; break;
         case '$': g_cc = g_lines[g_cr].len ? g_lines[g_cr].len - 1 : 0; break;
-        case 'w': {
+        case 'w':
+        for (int rep = 0; rep < n; rep++) {
             /* Skip alphanumerics, then skip whitespace, land on next word. */
             struct line *L = &g_lines[g_cr];
             while (g_cc < L->len &&
@@ -511,9 +826,10 @@ static void handle_normal(int c) {
                     L->text[g_cc] == '_')) g_cc++;
             while (g_cc < L->len && L->text[g_cc] == ' ') g_cc++;
             if (g_cc >= L->len && g_cr < g_n_lines - 1) { g_cr++; g_cc = 0; }
-            break;
         }
-        case 'b': {
+        break;
+        case 'b':
+        for (int rep = 0; rep < n; rep++) {
             struct line *L = &g_lines[g_cr];
             if (g_cc == 0 && g_cr > 0) {
                 g_cr--; g_cc = g_lines[g_cr].len ? g_lines[g_cr].len - 1 : 0;
@@ -526,38 +842,59 @@ static void handle_normal(int c) {
                         (L->text[g_cc-1] >= '0' && L->text[g_cc-1] <= '9') ||
                         L->text[g_cc-1] == '_')) g_cc--;
             }
-            break;
         }
-        case 'G': g_cr = g_n_lines - 1; g_cc = 0; break;
-        case 'g': g_pending = 'g'; break;
-        case 'd': g_pending = 'd'; break;
-        case 'y': g_pending = 'y'; break;
+        break;
+        case 'G':
+            if (g_count > 0) {       /* `42G` — go to line 42 */
+                int v = g_count;
+                if (v < 1) v = 1;
+                if (v > g_n_lines) v = g_n_lines;
+                g_cr = v - 1;
+            } else {
+                g_cr = g_n_lines - 1;
+            }
+            g_cc = 0;
+            break;
+        case 'g': g_pending = 'g'; return;     /* keep count for 5gg etc. */
+        case 'd': g_pending = 'd'; return;
+        case 'y': g_pending = 'y'; return;
         case 'x':
-            line_delete_char(g_cr, g_cc);
+            undo_push();
+            for (int i = 0; i < n; i++) line_delete_char(g_cr, g_cc);
             g_modified = 1;
             break;
+        case 'u':                              /* session 86: undo */
+            undo_pop();
+            clamp_cursor();
+            break;
         case 'i':
+            undo_push();
             g_mode = MODE_INSERT;
             break;
         case 'I':
+            undo_push();
             g_cc = 0;
             g_mode = MODE_INSERT;
             break;
         case 'a':
+            undo_push();
             if (g_cc < g_lines[g_cr].len) g_cc++;
             g_mode = MODE_INSERT;
             break;
         case 'A':
+            undo_push();
             g_cc = g_lines[g_cr].len;
             g_mode = MODE_INSERT;
             break;
         case 'o':
+            undo_push();
             buffer_insert_line(g_cr + 1);
             g_cr++; g_cc = 0;
             g_modified = 1;
             g_mode = MODE_INSERT;
             break;
         case 'O':
+            undo_push();
             buffer_insert_line(g_cr);
             g_cc = 0;
             g_modified = 1;
@@ -566,15 +903,9 @@ static void handle_normal(int c) {
         case 'p':
         case 'P': {
             if (g_yank_len == 0) break;
-            int target = (c == 'p') ? g_cr + 1 : g_cr;
+            undo_push();
             if (g_yank_is_line) {
-                buffer_insert_line(target);
-                struct line *L = &g_lines[target];
-                line_grow(L, g_yank_len + 1);
-                for (int i = 0; i < g_yank_len; i++) L->text[i] = g_yank_buf[i];
-                L->len = g_yank_len;
-                g_cr = target;
-                g_cc = 0;
+                paste_lines(c == 'p');
             } else {
                 /* Inline paste — insert chars at cursor. */
                 for (int i = 0; i < g_yank_len; i++)
@@ -594,28 +925,57 @@ static void handle_normal(int c) {
             g_cmd_lead = '/';
             g_cmd_len = 0;
             break;
+        case '?':                              /* session 86: backward search */
+            g_mode = MODE_COMMAND;
+            g_cmd_lead = '?';
+            g_cmd_len = 0;
+            break;
         case 'n':
             if (g_search_len) {
-                int sc = g_cc + 1;
-                int sr = g_cr;
-                if (sc > g_lines[sr].len) { sc = 0; sr++; if (sr >= g_n_lines) sr = 0; }
-                if (!search_next(sr, sc, 1)) set_status("pattern not found");
+                int forward = g_search_forward;
+                int sc, sr = g_cr;
+                if (forward) {
+                    sc = g_cc + 1;
+                    if (sc > g_lines[sr].len) {
+                        sc = 0; sr++; if (sr >= g_n_lines) sr = 0;
+                    }
+                } else {
+                    sc = g_cc - 1;
+                    if (sc < 0) {
+                        sr--; if (sr < 0) sr = g_n_lines - 1;
+                        sc = g_lines[sr].len ? g_lines[sr].len - 1 : 0;
+                    }
+                }
+                if (!search_next(sr, sc, forward)) set_status("pattern not found");
             }
             break;
         case 'N':
             if (g_search_len) {
-                int sc = g_cc - 1;
-                int sr = g_cr;
-                if (sc < 0) { sr--; if (sr < 0) sr = g_n_lines - 1; sc = g_lines[sr].len - 1; }
-                if (!search_next(sr, sc, 0)) set_status("pattern not found");
+                int forward = !g_search_forward;     /* N flips direction */
+                int sc, sr = g_cr;
+                if (forward) {
+                    sc = g_cc + 1;
+                    if (sc > g_lines[sr].len) {
+                        sc = 0; sr++; if (sr >= g_n_lines) sr = 0;
+                    }
+                } else {
+                    sc = g_cc - 1;
+                    if (sc < 0) {
+                        sr--; if (sr < 0) sr = g_n_lines - 1;
+                        sc = g_lines[sr].len ? g_lines[sr].len - 1 : 0;
+                    }
+                }
+                if (!search_next(sr, sc, forward)) set_status("pattern not found");
             }
             break;
         case 27:    /* ESC */
             g_pending = 0;
+            g_count = 0;
             break;
         default:
             break;
     }
+    g_count = 0;        /* every executed command resets the count */
     clamp_cursor();
 }
 
@@ -662,8 +1022,13 @@ static void handle_command(int c) {
         return;
     }
     if (c == '\n' || c == '\r') {
-        if (g_cmd_lead == ':') run_colon_command(g_cmd_buf, g_cmd_len);
-        else                   run_search(g_cmd_buf, g_cmd_len);
+        if (g_cmd_lead == ':') {
+            run_colon_command(g_cmd_buf, g_cmd_len);
+        } else {
+            /* '/' is forward, '?' is backward. */
+            int forward = (g_cmd_lead != '?');
+            run_search(g_cmd_buf, g_cmd_len, forward);
+        }
         g_mode = MODE_NORMAL;
         g_cmd_len = 0;
         clamp_cursor();
