@@ -100,6 +100,12 @@ IMPLEMENTED
                    references via pointers; no struct-by-value in
                    function params or returns.
 
+    Enum           enum [TAG] { A, B = 5, C, ... };  (session 103)
+                                            named integer constants;
+                                            tag (if present) is ignored.
+                                            Values auto-increment from 0
+                                            (or last explicit value + 1).
+
     Preprocessor   #define NAME body        single-line object macros
                    #undef  NAME             remove a macro
                    #include "FILE"          relative paths resolve to /FILE
@@ -173,7 +179,7 @@ DELIBERATELY NOT IMPLEMENTED
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof on an expression (only sizeof(TYPE) is supported)
-    - union / enum / typedef
+    - union / typedef
     - declared function-pointer types `int (*fp)(int)` syntax
       (function pointers exist; you just spell them `int *fp`)
     - calling a function pointer directly off an expression
@@ -225,6 +231,9 @@ EXAMPLES
     mlib.h prevents struct redefinition.
     Sample at /sarr.c demonstrates array-of-struct + indexed member
     access (pts[i].x, items[i].name = ...).
+    Sample at /enums.c demonstrates tagged + anonymous enums,
+    auto-incrementing and explicit-value enumerators, and using
+    enum constants in conditionals + bitwise expressions.
 
 EXIT STATUS
     0   compile succeeded

@@ -117,6 +117,7 @@ enum {
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
     T_STRUCT,    /* session 97 */
     T_SIZEOF,    /* session 99 */
+    T_ENUM,      /* session 103 */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -248,6 +249,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
     if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
     if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
+    if (my_streq(s, "enum"))   return T_ENUM;     /* session 103 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -835,6 +837,40 @@ static int struct_field_find(int sidx, const char *fname) {
     return -1;
 }
 
+/* Session 103 — enum constants.
+ *
+ * `enum [TAG] { A, B = 5, C, ... };` defines compile-time integer
+ * constants. The tag (if present) is ignored — cc doesn't distinguish
+ * enum types from ints. The constants land in g_enum_consts and are
+ * looked up by name in `parse_primary` (after local/global lookup),
+ * substituting N_NUM nodes for matching identifiers. */
+#define MAX_ENUM_CONSTS 128
+struct enum_const {
+    char name[NAME_MAX];
+    int  value;
+};
+static struct enum_const g_enum_consts[MAX_ENUM_CONSTS];
+static int               g_n_enum_consts;
+
+static int enum_find(const char *name) {
+    for (int i = 0; i < g_n_enum_consts; i++) {
+        if (my_streq(g_enum_consts[i].name, name)) return i;
+    }
+    return -1;
+}
+static void enum_add(const char *name, int value) {
+    if (g_n_enum_consts >= MAX_ENUM_CONSTS) die("too many enum constants");
+    if (enum_find(name) >= 0)
+        die_at(0, "duplicate enum constant", name);
+    int idx = g_n_enum_consts++;
+    int j = 0;
+    while (name[j] && j < NAME_MAX - 1) {
+        g_enum_consts[idx].name[j] = name[j]; j++;
+    }
+    g_enum_consts[idx].name[j] = 0;
+    g_enum_consts[idx].value = value;
+}
+
 enum {
     N_NUM, N_NAME, N_STR,
     N_BIN, N_UN, N_CALL,
@@ -986,6 +1022,21 @@ static struct node *parse_primary(void) {
         return n;
     }
     if (t->kind == T_NAME) {
+        /* Session 103 — enum constants are looked up first. If the
+         * name matches an enum constant AND is not followed by `(`,
+         * substitute its integer value. The `(` check is so a function
+         * accidentally named the same as an enumerator still resolves
+         * as a call. (Currently impossible since enum/func use the
+         * same namespace anyway, but this keeps things explicit.) */
+        if (tk_peek(1)->kind != T_LPAREN) {
+            int ei = enum_find(t->name);
+            if (ei >= 0) {
+                struct node *n = new_node(N_NUM);
+                n->num = g_enum_consts[ei].value;
+                g_tk++;
+                return n;
+            }
+        }
         struct node *n = new_node(N_NAME);
         int i = 0;
         while (t->name[i]) { n->name[i] = t->name[i]; i++; }
@@ -1670,6 +1721,44 @@ static void parse_struct_top(void) {
     global_declare_struct(nm, sz, kind, sidx);
 }
 
+/* Session 103 — parse a top-level enum:
+ *   enum [TAG] { CONST [= NUM] [, CONST [= NUM]]... };
+ *
+ * Tag (if present) is ignored — cc doesn't distinguish enum types
+ * from ints. Values auto-increment from 0 (or from the last explicit
+ * value + 1). Trailing comma allowed. */
+static void parse_enum_top(void) {
+    expect(T_ENUM, "'enum'");
+    /* Optional tag. */
+    if (tk_cur()->kind == T_NAME) g_tk++;
+    expect(T_LBRACE, "'{'");
+    int next_val = 0;
+    while (tk_cur()->kind != T_RBRACE) {
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected enumerator name", 0);
+        char nm[NAME_MAX];
+        int i = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
+        g_tk++;
+        int v = next_val;
+        if (accept(T_ASSIGN)) {
+            int neg = 0;
+            if (accept(T_MINUS)) neg = 1;
+            if (tk_cur()->kind != T_NUM)
+                die_at(tk_cur()->line, "enumerator init must be int literal", 0);
+            v = tk_cur()->num;
+            if (neg) v = -v;
+            g_tk++;
+        }
+        enum_add(nm, v);
+        next_val = v + 1;
+        if (!accept(T_COMMA)) break;
+    }
+    expect(T_RBRACE, "'}'");
+    expect(T_SEMI, "';'");
+}
+
 static struct node *parse_program(void) {
     struct node *p = new_node(N_PROGRAM);
     int cap = 0;
@@ -1679,11 +1768,16 @@ static struct node *parse_program(void) {
             parse_struct_top();
             continue;
         }
+        /* Session 103 — `enum` at top level. */
+        if (tk_cur()->kind == T_ENUM) {
+            parse_enum_top();
+            continue;
+        }
         /* Top-level disambiguation between function and global decl.
          * Both start with `int|char [*] NAME`. After the name we look
          * at the next token: `(` → function; `;`/`=`/`[` → global. */
         if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
-            die_at(tk_cur()->line, "expected 'int', 'char' or 'struct' at top level", 0);
+            die_at(tk_cur()->line, "expected 'int', 'char', 'struct' or 'enum' at top level", 0);
         /* Peek past the type (and optional '*' and name) to find the
          * disambiguator. We don't actually advance g_tk here. */
         int peek = 1;     /* tk_peek(0)==current type kw */

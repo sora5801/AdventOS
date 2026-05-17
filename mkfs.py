@@ -258,6 +258,8 @@ DATA_FILES = [
     ('mmain.c',   'fs/mmain.c',   None),
     # Session 102 — array-of-struct + indexed member access demo.
     ('sarr.c',    'fs/sarr.c',    None),
+    # Session 103 — enum demo.
+    ('enums.c',   'fs/enums.c',   None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
