@@ -65,10 +65,19 @@ IMPLEMENTED
                    { stmts }                    block
 
     Functions      int NAME(int p1, int p2, ...) { body }
-                   Params may be int, char, int*, char*, or
-                   struct T * (session 92, 97).
+                   Params may be int, char, int*, char*, struct T *,
+                   or struct T (by value) — sessions 92, 97, 106.
                    Forward references work — codegen patches
                    call sites after parsing.
+
+    Struct-by-value call (session 106):
+                   int f(struct point p) { return p.x + p.y; }
+                   ...
+                   struct point pp; pp.x = 3; pp.y = 4;
+                   f(pp);          // caller copies struct onto stack
+                   Callee receives a real copy; mutations don't leak
+                   back to the caller. Mixed int + struct + int param
+                   lists work with cumulative ebp offsets.
 
     Function ptrs  int *fp;          a function pointer (stored as int*)
                                                        (session 98)
@@ -194,7 +203,8 @@ DELIBERATELY NOT IMPLEMENTED
     - function prototypes (forward function declarations).
       Cross-file calls work without them because cc resolves
       `call rel32` via fixups regardless of declaration order.
-    - struct value passing/returning (use pointers)
+    - struct value RETURNING (use pointer-out args instead). Passing
+      by value works (session 106).
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof on an expression (only sizeof(TYPE) is supported)
@@ -257,6 +267,9 @@ EXAMPLES
     and struct-pointer typedefs in locals, globals, params, returns.
     Sample at /vararg.c demonstrates user-defined variadic functions
     using va_start / va_arg / va_end.
+    Sample at /sbv.c demonstrates struct-by-value function args:
+    magnitude_sq, reverse_p (verifying caller's copy unchanged),
+    sum_triple (multi-field), between (int + struct + int mixed).
 
 EXIT STATUS
     0   compile succeeded

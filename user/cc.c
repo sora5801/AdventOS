@@ -1642,7 +1642,8 @@ static struct node *parse_func(void) {
             break;
         }
         int kind, struct_idx = 0;
-        /* Session 97 — `struct T *p` parameter. */
+        /* Session 97/106 — `struct T *p` (pointer) or `struct T p`
+         * (by-value) parameter. */
         if (tk_cur()->kind == T_STRUCT) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
@@ -1655,9 +1656,8 @@ static struct node *parse_func(void) {
             struct_idx = struct_find(tag);
             if (struct_idx < 0)
                 die_at(tk_cur()->line, "undefined struct in param", tag);
-            if (!accept(T_STAR))
-                die_at(tk_cur()->line, "struct params must be pointers", tag);
-            kind = LK_STRUCT_PTR;
+            int is_ptr = accept(T_STAR);
+            kind = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
         } else if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
             int is_char = (tk_cur()->kind == T_CHAR);
             g_tk++;
@@ -2253,12 +2253,18 @@ static void e_test_eax_eax(void) {
 #define MAX_LOCALS 64
 #define MAX_FIXUPS 256
 
+#define MAX_PARAMS_PER_FUNC 8
 struct func_info {
     char name[NAME_MAX];
     int  entry_off;     /* byte offset within g_code where the function starts */
     int  n_params;      /* named params (excludes the trailing ...) for variadic */
     int  defined;       /* once codegen-resolved (set when entry_off is real) */
     int  is_variadic;   /* 1 if declared with `...` — session 105 */
+    /* Session 106 — per-param kind & meta (for struct-by-value calls).
+     * Pre-populated by main() before codegen runs so call sites have
+     * full param info regardless of definition order. */
+    int  param_kinds[MAX_PARAMS_PER_FUNC];
+    int  param_metas[MAX_PARAMS_PER_FUNC];
 };
 
 static struct func_info g_funcs[MAX_FUNCS];
@@ -2755,22 +2761,80 @@ static void gen_call(struct node *call) {
         emit_syscall_intrinsic(call->name, call);
         return;
     }
-    /* Push args right-to-left (cdecl). */
     int argc = call->n_list;
+    /* Session 106 — look up the called function's param kinds so we
+     * know which args are struct-by-value (LK_STRUCT). For indirect
+     * calls and not-yet-seen forward refs we default to 4-byte ints. */
+    int callee_idx = -1;
+    int local_off = local_find(call->name);
+    int global_gi = (local_off == 0) ? global_find(call->name) : -1;
+    int is_indirect = (local_off != 0 || global_gi >= 0);
+    if (!is_indirect) callee_idx = func_find(call->name);
+
+    /* Push args right-to-left (cdecl). For each, decide if it's a
+     * struct-by-value or a plain 4-byte arg. */
+    int total_push = 0;
     for (int i = argc - 1; i >= 0; i--) {
-        gen_expr(call->list[i]);
-        e_push_eax();
+        int p_kind = LK_INT;
+        int p_meta = 0;
+        if (callee_idx >= 0 && i < g_funcs[callee_idx].n_params
+                            && i < MAX_PARAMS_PER_FUNC) {
+            p_kind = g_funcs[callee_idx].param_kinds[i];
+            p_meta = g_funcs[callee_idx].param_metas[i];
+        }
+        if (p_kind == LK_STRUCT) {
+            /* Struct-by-value: copy the source struct onto the stack.
+             * Source must be a NAME of LK_STRUCT (same struct type). */
+            struct node *arg = call->list[i];
+            if (!arg || arg->kind != N_NAME)
+                die_at(call->line, "struct-by-value arg must be a NAME", call->name);
+            int arg_off = local_find(arg->name);
+            int arg_k, arg_sidx;
+            if (arg_off != 0) {
+                arg_k = local_kind(arg->name);
+                arg_sidx = local_meta(arg->name);
+            } else {
+                int ggi = global_find(arg->name);
+                if (ggi < 0)
+                    die_at(call->line, "struct-by-value arg: undefined", arg->name);
+                arg_k = g_globals[ggi].kind;
+                arg_sidx = g_globals[ggi].meta;
+                /* Globals not supported for now in struct-by-value
+                 * (would need an additional address-load path here). */
+                die_at(call->line, "struct-by-value from global not yet supported", arg->name);
+            }
+            if (arg_k != LK_STRUCT || arg_sidx != p_meta)
+                die_at(call->line, "struct-by-value arg type mismatch", arg->name);
+
+            int sz = (g_structs[p_meta].size + 3) & ~3;
+            int dwords = sz / 4;
+            /* sub esp, sz */
+            e_sub_esp_imm32(sz);
+            /* push esi; push edi */
+            emit_b(0x56); emit_b(0x57);
+            /* lea edi, [esp + 8]  — dst (skips the 2 pushed regs) */
+            emit_b(0x8d); emit_b(0x7c); emit_b(0x24); emit_b(0x08);
+            /* lea esi, [ebp + arg_off] — src */
+            e_lea_eax_ebp(arg_off);
+            emit_b(0x89); emit_b(0xc6);  /* mov esi, eax */
+            /* mov ecx, dwords */
+            emit_b(0xb9); emit_d((unsigned)dwords);
+            /* rep movsd */
+            emit_b(0xf3); emit_b(0xa5);
+            /* pop edi; pop esi */
+            emit_b(0x5f); emit_b(0x5e);
+            total_push += sz;
+        } else {
+            gen_expr(call->list[i]);
+            e_push_eax();
+            total_push += 4;
+        }
     }
-    /* Session 98 — if `call->name` is a local or global (i.e. a
-     * variable holding a function pointer), generate an indirect
-     * call. The variable's "kind" doesn't matter — we just treat the
-     * value as an address. Otherwise fall through to the direct-call
-     * path with a function fixup. */
-    int off = local_find(call->name);
-    int gi  = (off == 0) ? global_find(call->name) : -1;
-    if (off != 0 || gi >= 0) {
-        if (off != 0) e_load_local(off);
-        else          emit_load_global(gi);
+    /* Session 98 — indirect (variable holds function pointer) or
+     * direct call. */
+    if (is_indirect) {
+        if (local_off != 0) e_load_local(local_off);
+        else                emit_load_global(global_gi);
         /* call eax  →  ff d0 */
         emit_b(0xff); emit_b(0xd0);
     } else {
@@ -2782,7 +2846,7 @@ static void gen_call(struct node *call) {
         g_n_fixups++;
     }
     /* Caller cleans up. */
-    if (argc > 0) e_add_esp_imm32(argc * 4);
+    if (total_push > 0) e_add_esp_imm32(total_push);
 }
 
 /* Session 99 — returns the pointee element size if `n` is a NAME of
@@ -3572,18 +3636,28 @@ static void gen_func(struct node *fn) {
      *
      * Session 92: each param node carries its declared kind in `op`
      * (LK_INT / LK_INT_PTR / LK_CHAR_PTR); preserve it so the body
-     * can emit byte vs dword ops correctly. */
+     * can emit byte vs dword ops correctly.
+     *
+     * Session 106: support struct-by-value params. Each LK_STRUCT
+     * param occupies (struct.size padded to 4) bytes on the stack
+     * rather than the standard 4. Use a cumulative offset. */
+    int cum_off = 8;
     for (int i = 0; i < fn->n_params; i++) {
         if (g_n_locals >= MAX_LOCALS) die("too many locals");
         int j = 0;
         const char *nm = fn->params[i]->name;
         while (nm[j]) { g_locals[g_n_locals].name[j] = nm[j]; j++; }
         g_locals[g_n_locals].name[j] = 0;
-        g_locals[g_n_locals].ebp_off = 8 + i * 4;
-        g_locals[g_n_locals].kind    = fn->params[i]->op
-                                       ? fn->params[i]->op : LK_INT;
-        g_locals[g_n_locals].meta    = fn->params[i]->num;   /* s97 */
+        int kind = fn->params[i]->op ? fn->params[i]->op : LK_INT;
+        int meta = fn->params[i]->num;
+        g_locals[g_n_locals].ebp_off = cum_off;
+        g_locals[g_n_locals].kind    = kind;
+        g_locals[g_n_locals].meta    = meta;
         g_n_locals++;
+        int p_size = 4;
+        if (kind == LK_STRUCT && meta >= 0 && meta < g_n_structs)
+            p_size = (g_structs[meta].size + 3) & ~3;
+        cum_off += p_size;
     }
 
     /* Reserve room for locals — we don't know how many yet; emit a
@@ -4256,6 +4330,26 @@ int main(int argc, char **argv) {
 
     lex_all(g_pp_buf, g_pp_len);
     struct node *prog = parse_program();
+
+    /* Session 106 — pre-populate function param info BEFORE any
+     * codegen runs. This makes per-function param kinds available
+     * to call sites regardless of source order, which is required
+     * for struct-by-value passing (the caller needs to know each
+     * arg's expected kind). For non-struct params this is also
+     * harmless — the existing arg-count / variadic checks see
+     * the same info, just earlier. */
+    for (int i = 0; i < prog->n_list; i++) {
+        struct node *fn = prog->list[i];
+        if (!fn || fn->kind != N_FUNC_DECL) continue;
+        int idx = func_intern(fn->name, fn->n_params);
+        g_funcs[idx].is_variadic = fn->op ? 1 : 0;
+        int np = fn->n_params;
+        if (np > MAX_PARAMS_PER_FUNC) np = MAX_PARAMS_PER_FUNC;
+        for (int j = 0; j < np; j++) {
+            g_funcs[idx].param_kinds[j] = fn->params[j]->op;
+            g_funcs[idx].param_metas[j] = fn->params[j]->num;
+        }
+    }
 
     /* Emit start stub at offset 0 — calls main. We don't know
      * main's entry offset yet; emit a fixup so it gets patched

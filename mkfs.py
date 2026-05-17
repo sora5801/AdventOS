@@ -244,12 +244,10 @@ DATA_FILES = [
     # Sessions 93/94/95 sample sources (globs.c, printf.c, prep.c,
     # colors.h) removed in session 102 to free FS slots for newer
     # demos. Their content lives in docs/80/81/82-*.md.
-    # Session 96 — compound operators demo.
-    ('ops.c',     'fs/ops.c',     None),
+    # Sessions 96/98 sample sources (ops.c, fnptr.c) removed in
+    # session 106 to free FS slots. Their content is in docs/83 and 85.
     # Session 97 — struct demo.
     ('structs.c', 'fs/structs.c', None),
-    # Session 98 — function-pointer demo.
-    ('fnptr.c',   'fs/fnptr.c',   None),
     # Session 99 — scaled pointer arithmetic + sizeof demo.
     ('ptrs.c',    'fs/ptrs.c',    None),
     # Session 100 — multi-file compilation demo.
@@ -264,6 +262,8 @@ DATA_FILES = [
     ('typedefs.c','fs/typedefs.c',None),
     # Session 105 — variadic-functions demo.
     ('vararg.c',  'fs/vararg.c',  None),
+    # Session 106 — struct-by-value demo.
+    ('sbv.c',     'fs/sbv.c',     None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
