@@ -777,6 +777,7 @@ enum {
     LK_CHAR_ARR   = 4,   /* char x[N] — name yields &x[0] (a  char*) */
     LK_STRUCT     = 5,   /* struct T x  — session 97. struct_idx in `meta`. */
     LK_STRUCT_PTR = 6,   /* struct T *p — session 97. struct_idx in `meta`. */
+    LK_STRUCT_ARR = 7,   /* struct T x[N] — session 102. struct_idx in `meta`. */
 };
 
 /* Forward decls — these are referenced from the parser but defined in
@@ -846,10 +847,12 @@ enum {
     N_INDEX,      /* base[idx]          session 92 — binary, op=elem_size */
     N_MEMBER,     /* NAME.field         session 97 — name=base, n->name2-ish stored elsewhere */
     N_ARROW,      /* NAME->field        session 97 */
+    N_INDEX_MEMBER,    /* NAME[i].field       session 102 */
     N_DEREF_ASSIGN,    /* *p   = expr;  session 92 — store thru pointer */
     N_INDEX_ASSIGN,    /* a[i] = expr;  session 92 */
     N_MEMBER_ASSIGN,   /* NAME.field = expr;  session 97 */
     N_ARROW_ASSIGN,    /* NAME->field = expr; session 97 */
+    N_INDEX_MEMBER_ASSIGN, /* NAME[i].field = expr;  session 102 */
     /* Session 96 — compound operators. */
     N_COMPOUND_ASSIGN, /* NAME op= expr;  op stored in n->op (T_PLUS,
                         * T_MINUS, T_STAR, T_SLASH, T_PERCENT) */
@@ -1006,11 +1009,30 @@ static struct node *parse_primary(void) {
         /* Session 92 — postfix `[idx]` (array/pointer indexing).
          * Restricted: the base must be a name. `a[i][j]` and
          * `f()[i]` aren't supported by this parse (multidimensional
-         * indexing isn't supported by codegen either). */
+         * indexing isn't supported by codegen either).
+         *
+         * Session 102 — `NAME[idx].field` for struct arrays: after
+         * the closing `]`, look for `.field` and make an
+         * N_INDEX_MEMBER instead. */
         if (tk_cur()->kind == T_LBRACKET) {
             g_tk++;
             struct node *idx = parse_expr();
             expect(T_RBRACKET, "']'");
+            if (tk_cur()->kind == T_DOT) {
+                g_tk++;
+                if (tk_cur()->kind != T_NAME)
+                    die_at(tk_cur()->line, "expected field name after .", 0);
+                struct node *im = new_node(N_INDEX_MEMBER);
+                int k = 0;
+                while (n->name[k]) { im->name[k] = n->name[k]; k++; }
+                im->name[k] = 0;
+                int f = 0;
+                while (tk_cur()->name[f]) { im->field_name[f] = tk_cur()->name[f]; f++; }
+                im->field_name[f] = 0;
+                im->a = idx;
+                g_tk++;
+                return im;
+            }
             struct node *ix = new_node(N_INDEX);
             int k = 0;
             while (n->name[k]) { ix->name[k] = n->name[k]; k++; }
@@ -1159,11 +1181,11 @@ static struct node *parse_block(void) {
 
 static struct node *parse_stmt(void) {
     int t = tk_cur()->kind;
-    /* Session 97 — local struct declarations.
+    /* Session 97/102 — local struct declarations.
      *   struct TAG NAME;        a struct value
      *   struct TAG *NAME;       a pointer to a struct
-     *   No initializer support (would need brace-init parsing).
-     *   No array-of-struct (e.g. `struct point p[8];`) yet. */
+     *   struct TAG NAME[N];     array of N struct values     (s102)
+     *   No initializer support (would need brace-init parsing). */
     if (t == T_STRUCT) {
         g_tk++;
         if (tk_cur()->kind != T_NAME)
@@ -1179,11 +1201,29 @@ static struct node *parse_stmt(void) {
         int is_ptr = accept(T_STAR);
         if (tk_cur()->kind != T_NAME)
             die_at(tk_cur()->line, "expected variable name", 0);
-        struct node *n = new_node(N_STRUCT_DECL);
+        char nm[NAME_MAX];
         int i = 0;
-        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
-        n->name[i] = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
         g_tk++;
+        /* Array-of-struct: `struct TAG NAME[N];` */
+        if (!is_ptr && accept(T_LBRACKET)) {
+            if (tk_cur()->kind != T_NUM)
+                die_at(tk_cur()->line, "array size must be integer literal", 0);
+            int sz = tk_cur()->num;
+            if (sz <= 0) die_at(tk_cur()->line, "array size must be positive", 0);
+            g_tk++;
+            expect(T_RBRACKET, "']'");
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_STRUCT_DECL);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->op     = LK_STRUCT_ARR;
+            n->num    = sidx;
+            n->n_list = sz;     /* repurposed: array length */
+            return n;
+        }
+        struct node *n = new_node(N_STRUCT_DECL);
+        for (int j = 0; j <= i; j++) n->name[j] = nm[j];
         n->op  = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
         n->num = sidx;
         expect(T_SEMI, "';'");
@@ -1329,7 +1369,11 @@ static struct node *parse_stmt(void) {
     }
     if (t == T_NAME && tk_peek(1)->kind == T_LBRACKET) {
         /* Could be either `a[i] = expr;` or an indexing expression-stmt
-         * `a[i];`. Peek further: parse the index, then look for '='. */
+         * `a[i];`. Peek further: parse the index, then look for '='.
+         *
+         * Session 102 also accepts `NAME[i].field = expr;` for struct
+         * arrays — after the closing `]`, if we see `.NAME`, we
+         * branch into N_INDEX_MEMBER_ASSIGN instead. */
         int save_tk = g_tk;
         char nm[NAME_MAX];
         int i = 0;
@@ -1339,6 +1383,25 @@ static struct node *parse_stmt(void) {
         g_tk++;       /* skip '[' */
         struct node *idx = parse_expr();
         expect(T_RBRACKET, "']'");
+        if (tk_cur()->kind == T_DOT) {
+            g_tk++;
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected field name after .", 0);
+            char fn[NAME_MAX];
+            int f = 0;
+            while (tk_cur()->name[f]) { fn[f] = tk_cur()->name[f]; f++; }
+            fn[f] = 0;
+            g_tk++;     /* skip field name */
+            expect(T_ASSIGN, "'='");
+            struct node *val = parse_expr();
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_INDEX_MEMBER_ASSIGN);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            for (int j = 0; j <= f; j++) n->field_name[j] = fn[j];
+            n->a = idx;
+            n->b = val;
+            return n;
+        }
         if (tk_cur()->kind == T_ASSIGN) {
             g_tk++;
             struct node *val = parse_expr();
@@ -1952,11 +2015,12 @@ static int kind_elem_size(int k) {
     return 0;
 }
 static int kind_is_array(int k) {
-    return k == LK_INT_ARR || k == LK_CHAR_ARR;
+    return k == LK_INT_ARR || k == LK_CHAR_ARR || k == LK_STRUCT_ARR;
 }
 static int kind_is_pointerlike(int k) {
-    return k == LK_INT_PTR || k == LK_CHAR_PTR
-        || k == LK_INT_ARR || k == LK_CHAR_ARR;
+    return k == LK_INT_PTR    || k == LK_CHAR_PTR
+        || k == LK_INT_ARR    || k == LK_CHAR_ARR
+        || k == LK_STRUCT_PTR || k == LK_STRUCT_ARR;
 }
 
 static int func_find(const char *name) {
@@ -2375,7 +2439,7 @@ static int expr_ptr_elem_size(struct node *n) {
     }
     if (k == LK_CHAR_PTR || k == LK_CHAR_ARR) return 1;
     if (k == LK_INT_PTR  || k == LK_INT_ARR)  return 4;
-    if (k == LK_STRUCT_PTR) {
+    if (k == LK_STRUCT_PTR || k == LK_STRUCT_ARR) {
         if (sidx >= 0 && sidx < g_n_structs) return g_structs[sidx].size;
         return 4;
     }
@@ -2547,6 +2611,46 @@ static void gen_expr(struct node *n) {
              * field VALUE is itself a pointer — still 4 bytes). Byte
              * loads only matter for `char field;` someday — not in scope. */
             (void)field_kind;
+            e_load_eax_at_eax();
+            return;
+        }
+        case N_INDEX_MEMBER: {
+            /* Session 102 — `NAME[idx].field` for struct arrays.
+             *   address-of-element = base_va + idx * struct.size
+             *   address-of-field   = address-of-element + field_offset
+             * The base is always a NAME of LK_STRUCT_ARR (we require
+             * that — pointers to struct arrays aren't supported). */
+            int off = local_find(n->name);
+            int is_local = (off != 0);
+            int gi = is_local ? -1 : global_find(n->name);
+            if (off == 0 && gi < 0)
+                die_at(n->line, "indexed-member on undefined", n->name);
+            int k = is_local ? local_kind(n->name) : g_globals[gi].kind;
+            int sidx = is_local ? local_meta(n->name) : g_globals[gi].meta;
+            if (k != LK_STRUCT_ARR)
+                die_at(n->line, "NAME[i].f requires struct array", n->name);
+            int elem = g_structs[sidx].size;
+            int fi = struct_field_find(sidx, n->field_name);
+            if (fi < 0) die_at(n->line, "no such field", n->field_name);
+            int field_off = g_structs[sidx].fields[fi].offset;
+
+            /* base address */
+            if (is_local) e_lea_eax_ebp(off);
+            else          emit_addrof_global(gi);
+            e_push_eax();
+            /* idx → eax, scale by elem */
+            gen_expr(n->a);
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            e_pop_ebx();              /* ebx = base */
+            e_add_eax_ebx();          /* eax = base + idx*elem */
+            if (field_off != 0) {
+                emit_b(0x05); emit_d((unsigned)field_off);  /* add eax, field_off */
+            }
             e_load_eax_at_eax();
             return;
         }
@@ -2780,10 +2884,14 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_STRUCT_DECL: {
-            /* Session 97 — `struct T NAME;` or `struct T *NAME;`. */
-            int kind = n->op;     /* LK_STRUCT or LK_STRUCT_PTR */
+            /* Session 97/102 — `struct T NAME;`, `struct T *NAME;`,
+             * or `struct T NAME[N];`. */
+            int kind = n->op;     /* LK_STRUCT / LK_STRUCT_PTR / LK_STRUCT_ARR */
             int sidx = n->num;
-            int size = (kind == LK_STRUCT_PTR) ? 4 : g_structs[sidx].size;
+            int size;
+            if      (kind == LK_STRUCT_PTR) size = 4;
+            else if (kind == LK_STRUCT_ARR) size = g_structs[sidx].size * n->n_list;
+            else                            size = g_structs[sidx].size;
             if (size <= 0) die_at(n->line, "struct size is zero", n->name);
             local_declare_struct(n->name, size, kind, sidx);
             return;
@@ -2978,6 +3086,47 @@ static void gen_stmt(struct node *n) {
             }
             if (field_off != 0) {
                 emit_b(0x05); emit_d((unsigned)field_off);
+            }
+            e_mov_ebx_eax();
+            e_pop_eax();
+            e_store_eax_at_ebx();
+            return;
+        }
+        case N_INDEX_MEMBER_ASSIGN: {
+            /* Session 102 — `NAME[i].field = expr;` for struct arrays. */
+            int off = local_find(n->name);
+            int is_local = (off != 0);
+            int gi = is_local ? -1 : global_find(n->name);
+            if (off == 0 && gi < 0)
+                die_at(n->line, "indexed-member-assign undefined", n->name);
+            int k = is_local ? local_kind(n->name) : g_globals[gi].kind;
+            int sidx = is_local ? local_meta(n->name) : g_globals[gi].meta;
+            if (k != LK_STRUCT_ARR)
+                die_at(n->line, "NAME[i].f = requires struct array", n->name);
+            int elem = g_structs[sidx].size;
+            int fi = struct_field_find(sidx, n->field_name);
+            if (fi < 0) die_at(n->line, "no such field", n->field_name);
+            int field_off = g_structs[sidx].fields[fi].offset;
+
+            /* rhs → eax → push */
+            gen_expr(n->b);
+            e_push_eax();
+            /* base address → push */
+            if (is_local) e_lea_eax_ebp(off);
+            else          emit_addrof_global(gi);
+            e_push_eax();
+            /* idx → eax, scale by elem */
+            gen_expr(n->a);
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            e_pop_ebx();
+            e_add_eax_ebx();          /* eax = base + idx*elem */
+            if (field_off != 0) {
+                emit_b(0x05); emit_d((unsigned)field_off);  /* add eax, field_off */
             }
             e_mov_ebx_eax();
             e_pop_eax();

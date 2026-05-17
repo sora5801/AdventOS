@@ -241,13 +241,9 @@ DATA_FILES = [
     # removed from mkfs in session 100 to free FS_MAX_FILES slots for
     # the multi-file demo. Their content lives in
     # docs/77/78/79-*.md.
-    # Session 93 — global-variables demo.
-    ('globs.c',   'fs/globs.c',   None),
-    # Session 94 — printf demo.
-    ('printf.c',  'fs/printf.c',  None),
-    # Session 95 — preprocessor demo (+ header).
-    ('prep.c',    'fs/prep.c',    None),
-    ('colors.h',  'fs/colors.h',  None),
+    # Sessions 93/94/95 sample sources (globs.c, printf.c, prep.c,
+    # colors.h) removed in session 102 to free FS slots for newer
+    # demos. Their content lives in docs/80/81/82-*.md.
     # Session 96 — compound operators demo.
     ('ops.c',     'fs/ops.c',     None),
     # Session 97 — struct demo.
@@ -260,6 +256,8 @@ DATA_FILES = [
     ('mlib.h',    'fs/mlib.h',    None),
     ('mlib.c',    'fs/mlib.c',    None),
     ('mmain.c',   'fs/mmain.c',   None),
+    # Session 102 — array-of-struct + indexed member access demo.
+    ('sarr.c',    'fs/sarr.c',    None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

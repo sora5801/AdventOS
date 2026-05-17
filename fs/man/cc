@@ -83,9 +83,12 @@ IMPLEMENTED
                                                  (session 97)
                    struct TAG var;               struct value (local/global)
                    struct TAG *p;                pointer to struct
+                   struct TAG arr[N];            array of struct (session 102)
                    var.field = expr;             member assign
                    p->field   = expr;            arrow assign
+                   arr[i].field = expr;          indexed member assign (s102)
                    var.field, p->field           member reads (rvalue)
+                   arr[i].field                  indexed member rvalue (s102)
                    &var                          address-of (yields T*)
                    lhs = rhs;                    struct value copy via
                                                   rep movsd (session 101).
@@ -220,6 +223,8 @@ EXAMPLES
     Sample at /mmain.c + /mlib.c + /mlib.h demonstrates multi-file
     compilation: `cc /mmain.c /mlib.c -o /multi.elf`. Header guard in
     mlib.h prevents struct redefinition.
+    Sample at /sarr.c demonstrates array-of-struct + indexed member
+    access (pts[i].x, items[i].name = ...).
 
 EXIT STATUS
     0   compile succeeded
