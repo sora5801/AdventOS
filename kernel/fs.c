@@ -651,6 +651,48 @@ int fs_unlink(const char *path) {
     return fs_write_super_inst(g_root_inst);
 }
 
+/* Session 83 (path-A coreutils): remove an EMPTY directory by path.
+ *
+ * Mirrors fs_unlink for files, with the extra "is empty" check that
+ * walks the slot table looking for any non-FREE entry whose parent_dir
+ * points at the dir we're trying to remove. POSIX rmdir(2) returns
+ * ENOTEMPTY when the dir has children; we just return -1.
+ *
+ * Same permission model as fs_unlink: write permission on the entry
+ * itself (owner or root). Refuses to remove the root dir (FS_DIR_ROOT
+ * isn't a real slot — it's the sentinel 0xFF — but defensive checks
+ * stay regardless). Directories carry no data blocks, so there's no
+ * bitmap free needed.
+ *
+ * Returns 0 on success, -1 on failure (not found, not a dir, not
+ * empty, no permission, or persist failure). */
+int fs_rmdir(const char *path) {
+    if (!path || !g_root_inst || !g_root_inst->initialized) return -1;
+
+    int idx = fs_iopen_inst(g_root_inst, path, /*from_root=*/1);
+    if (idx < 0) return -1;
+
+    struct fs_entry *e = &g_root_inst->super.files[idx];
+    if (e->type != FS_TYPE_DIR) return -1;           /* refuse file / free */
+
+    if (fs_check_perm(idx, FS_PERM_W) <= 0) return -1;
+
+    /* Empty-dir check: scan ALL slots for any entry whose parent_dir
+     * is this idx. If found, refuse — ENOTEMPTY analog. */
+    for (uint32_t i = 0; i < g_root_inst->super.file_count; i++) {
+        if ((int)i == idx)                                  continue;
+        const struct fs_entry *child = &g_root_inst->super.files[i];
+        if (child->type == FS_TYPE_FREE)                    continue;
+        if (child->parent_dir == (uint8_t)idx)              return -1;
+    }
+
+    /* Zero the entry — same defensive memset as fs_unlink. */
+    for (int i = 0; i < (int)sizeof(*e); i++) ((uint8_t *)e)[i] = 0;
+    e->type = FS_TYPE_FREE;
+
+    return fs_write_super_inst(g_root_inst);
+}
+
 uint32_t fs_free_sectors(void) {
     if (!g_root_inst || !g_root_inst->initialized) return 0;
     uint32_t free = 0;

@@ -551,6 +551,15 @@ int sys_unlink(const char *path) {
     return ret;
 }
 
+int sys_rmdir(const char *path) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_RMDIR), "b"(path)
+                      : "memory");
+    return ret;
+}
+
 /* Path-component validators. Both deliberately strict; we'd rather
  * reject a borderline-valid name than ship a path-traversal hole.
  * Returns 1 if valid, 0 if not.  No errno, no diagnostics — the

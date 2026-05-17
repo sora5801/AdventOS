@@ -179,6 +179,7 @@ const char *syscall_name(unsigned num) {
         case SYS_SANDBOX_INSTALL: return "SYS_SANDBOX_INSTALL";
         case SYS_SETLIMIT:        return "SYS_SETLIMIT";
         case SYS_UNLINK:          return "SYS_UNLINK";
+        case SYS_RMDIR:           return "SYS_RMDIR";
         default:                  return "SYS_???";
     }
 }
@@ -699,6 +700,21 @@ void syscall_dispatch(struct registers *r) {
             }
             path[i] = 0;
             ret = fs_unlink(path);
+            break;
+        }
+        case SYS_RMDIR: {
+            /* Session 83: remove an empty directory. Same path-copy
+             * defense as SYS_UNLINK above. fs_rmdir checks emptiness
+             * and permissions; returns -1 on any failure. */
+            const char *upath = (const char *)(uintptr_t)a;
+            if (!upath) { ret = -1; break; }
+            char path[128];
+            int  i;
+            for (i = 0; i < (int)sizeof(path) - 1 && upath[i]; i++) {
+                path[i] = upath[i];
+            }
+            path[i] = 0;
+            ret = fs_rmdir(path);
             break;
         }
         case SYS_PIPE: {

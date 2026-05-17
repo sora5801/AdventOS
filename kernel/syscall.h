@@ -253,6 +253,14 @@ struct sys_limits {
                                 * isn't a regular file. Used by ls's JSONL
                                 * mode to emit a `size` field per entry. */
 
+/* ---- Session 83 (path-A coreutils): rmdir for empty directories ---- */
+#define SYS_RMDIR         86   /* (eax=86, ebx=const char *path) -> 0 / -1.
+                                * Mirrors SYS_UNLINK but for FS_TYPE_DIR
+                                * entries; refuses non-empty dirs (any
+                                * child entry with parent_dir == this idx
+                                * blocks removal — POSIX ENOTEMPTY analog).
+                                * Same owner-or-root permission model. */
+
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */
 struct sys_block_info {

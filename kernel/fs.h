@@ -185,6 +185,11 @@ int         fs_chown_idx(int idx, uint16_t uid, uint16_t gid);
  * or root). Returns 0 on success, -1 on any failure. */
 int         fs_unlink(const char *path);
 
+/* Session 83: remove an empty directory. Mirrors fs_unlink with an
+ * added empty-check (refuses if any entry's parent_dir == this idx).
+ * Same owner-or-root permission model. Returns 0 / -1. */
+int         fs_rmdir(const char *path);
+
 /* Whole-file write. Path semantics same as fs_open. Creates the file
  * if absent. Allocates a fresh contiguous sector run from the bitmap;
  * old sectors are returned to the free pool on success. */

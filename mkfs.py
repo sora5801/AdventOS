@@ -80,6 +80,15 @@ USER_PROGRAMS = [
     ('kill.elf',  'user/_obj/kill.bin',  None),
     ('ls.elf',    'user/_obj/ls.bin',    None),
     ('pwd.elf',   'user/_obj/pwd.bin',   None),
+    # Session 83: path-A "usable Unix" coreutils gap-fill.
+    ('cp.elf',    'user/_obj/cp.bin',    None),
+    ('mv.elf',    'user/_obj/mv.bin',    None),
+    ('rm.elf',    'user/_obj/rm.bin',    None),
+    ('mkdir.elf', 'user/_obj/mkdir.bin', None),
+    ('rmdir.elf', 'user/_obj/rmdir.bin', None),
+    ('chmod.elf', 'user/_obj/chmod.bin', None),
+    ('touch.elf', 'user/_obj/touch.bin', None),
+    ('find.elf',  'user/_obj/find.bin',  None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.

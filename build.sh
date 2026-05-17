@@ -142,12 +142,15 @@ echo "[5/7] build user programs"
 
 # Basic programs — no libjson, no libcrypto. The smallest binaries.
 # Session 78 additions: sleep (for cancel tests), selftest (meta runner).
+# Session 83 additions: cp, mv, rm, mkdir, rmdir, chmod, touch, find —
+# path-A "usable Unix" coreutils gap-fill.
 USER_PROGS=(hello sh echo httpd ed init
             head tail tee tr seq kill pwd
             nc wget telnet irc ircd beep usbtest vi id
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
-            smp-hammer)
+            smp-hammer
+            cp mv rm mkdir rmdir chmod touch find)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.

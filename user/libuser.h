@@ -118,6 +118,7 @@ typedef unsigned int   size_t;
 #define SYS_SETLIMIT       83
 #define SYS_UNLINK         84
 #define SYS_FS_SIZE        85    /* session 81: file size in bytes */
+#define SYS_RMDIR          86    /* session 83: remove empty dir */
 
 /* Session 70: syscall sandbox.
  *
@@ -183,6 +184,7 @@ void limits_default(struct sys_limits *l);   /* all-zeros = "no change" */
  * Functions returning int: 0 / >0 on success, -1 on validation or
  * FS failure. kv_list iterates via *iter (caller seeds to 0). */
 int sys_unlink(const char *path);
+int sys_rmdir(const char *path);
 
 int kv_get (const char *ns, const char *key, void *buf, int cap);
 int kv_put (const char *ns, const char *key, const void *buf, int len);
