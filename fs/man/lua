@@ -22,10 +22,18 @@ IMPLEMENTED
                    indexing t[k] / t.k, table constructors
                    {1,2,3} or {x=1, [k]=v}, function literals
     Built-ins      print, type, tostring, tonumber, ipairs,
-                   string.len/sub/upper/lower/rep,
+                   pcall, error, last_error, collectgarbage,
+                   string.len/sub/upper/lower/rep/find/byte/char,
                    table.insert/concat,
                    io.read/write,
                    os.time/exit
+    Error handling pcall/error via __builtin_setjmp; the REPL recovers
+                   from errors automatically. (session 88)
+    Closures       Inner functions capture outer locals at creation
+                   time (capture-by-value semantics). (session 88)
+    GC             Mark-sweep, triggered after every N allocations
+                   (threshold grows geometrically). Manual trigger
+                   via collectgarbage(). (session 88)
 
 NUMBERS ARE INT32
     Real Lua's numbers are doubles (or int64 in 5.3+). AdventOS user
@@ -44,14 +52,15 @@ NUMBERS ARE INT32
 DELIBERATELY NOT IMPLEMENTED
     - Metatables and __index / __newindex
     - Coroutines
-    - pcall / xpcall / error (any runtime error aborts the process;
-      the REPL has no fork-per-line so an error ends the session)
-    - Multiple return values
-    - Closures with upvalues (functions see globals + their own
-      locals — a nested function can't capture an outer local)
+    - Multiple return values (pcall returns false-on-error rather
+      than (false, msg); use last_error() for the message)
+    - Capture-by-reference closures (we do capture-by-value: a
+      change to the outer local AFTER the inner function is
+      created isn't visible to the inner. Differs from real Lua.)
     - require / packages
-    - String patterns / gmatch (string.find isn't included)
-    - math.* (no math library)
+    - String patterns / gmatch (string.find is plain substring;
+      no %a %d %s character classes, no captures)
+    - math.* (no math library — int32 numbers, no FPU)
 
 EXAMPLES
     lua -e "print('hello, world')"

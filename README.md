@@ -92,9 +92,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **87 — Path D begins: Lua-syntax scripting**. See [`docs/74-tinylua.md`](docs/74-tinylua.md) for the latest deep dive (single-file tree-walking interpreter for a useful subset of Lua syntax; int32 numbers; ~1100 LOC).
+Current session: **88 — Path D continues: error handling, closures, GC**. See [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) for the latest deep dive (`pcall` + `error` via `__builtin_setjmp`, capture-by-value closures, mark-sweep GC, `string.find`/`byte`/`char`).
 
 Recent session deep dives:
+- [Session 88 — Lua: error handling, closures, GC](docs/75-lua-error-handling-and-gc.md)
 - [Session 87 — Lua-syntax interpreter](docs/74-tinylua.md)
 - [Session 86 — vi polish (undo, search/replace, count prefixes, ?pat)](docs/73-vi-polish.md)
 - [Session 85 — Man pages](docs/72-man-pages.md)
@@ -117,7 +118,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 - Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
 - Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
 
-**Path D — Scripting** kicked off in session 87 with a fresh single-file Lua-syntax interpreter (`lua`). Real-Lua-source compatibility is a separate effort blocked by FPU support; the subset interpreter covers most daily scripting needs. See [`docs/74-tinylua.md`](docs/74-tinylua.md).
+**Path D — Scripting** kicked off in session 87 with a fresh single-file Lua-syntax interpreter (`lua`). Session 88 added `pcall`/`error` (REPL recovers from errors), capture-by-value closures, mark-sweep GC, and more string built-ins. Multi-return values + generic `for k,v in pairs(t)` are the remaining gap, planned for session 89. See [`docs/74-tinylua.md`](docs/74-tinylua.md) for the original design and [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) for the session-88 additions.
 
 Remaining candidate paths:
 - **Path B — Self-hosting.** Port `tcc` so AdventOS can compile its own programs.

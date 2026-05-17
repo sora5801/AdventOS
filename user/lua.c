@@ -80,6 +80,37 @@ static void  die(const char *fmt, ...);
 static void  out_str(const char *s);
 static void  out_chr(char c);
 
+/* Forward decl so pcall can reference globals without extern (which
+ * conflicts with the file-static definition further down). */
+struct table;
+static struct table *g_globals;
+static void gc_maybe_collect(void);
+
+/* ---------- Error frame stack (session 88: pcall/error) ----------
+ *
+ * Each pcall pushes a `struct err_frame` onto g_err_stack and records
+ * a __builtin_setjmp buffer. If die() fires while a frame is on the
+ * stack, it longjmps to the topmost frame instead of sys_exit'ing.
+ * The frame carries a heap-allocated error message that the pcall
+ * built-in returns to the caller as the second value.
+ *
+ * __builtin_setjmp on i386 saves EBP, EBX, ESI, EDI, ESP, and the
+ * return address. No signal-mask handling (we don't have signals at
+ * the user-program level). Buffer is 5 void*.
+ *
+ * Limitation: heap allocations made between setjmp and longjmp leak.
+ * The mark-sweep GC (separate piece of session 88) will reclaim them
+ * on the next collection. */
+
+#define ERR_MSG_MAX 240
+struct err_frame {
+    void              *jmp[5];
+    char               msg[ERR_MSG_MAX];
+    int                msg_len;
+    struct err_frame  *prev;
+};
+static struct err_frame *g_err_stack = 0;
+
 /* ---------- Small utilities the libc/libuser surface lacks ------ */
 
 static int  s_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
@@ -145,8 +176,13 @@ struct value {
 };
 
 struct string {
-    int   len;
-    char  data[1];       /* flexible: malloc'd as sizeof(string) + len */
+    /* Session 88 GC tracking. Each allocated string is linked into
+     * g_all_strings; mark is set during the mark phase, cleared at
+     * the start of the next collection. */
+    struct string *gc_next;
+    int            gc_mark;
+    int            len;
+    char           data[1];   /* flexible: malloc'd as sizeof(string) + len */
 };
 
 #define TABLE_INIT_CAP  8
@@ -157,17 +193,75 @@ struct tk_pair {
 };
 
 struct table {
+    struct table   *gc_next;
+    int             gc_mark;
     int             count;
     int             cap;
     struct tk_pair *kv;
 };
 
 struct func {
+    struct func    *gc_next;
+    int             gc_mark;
     struct node    *body;            /* the block node */
     struct node   **params;          /* parameter name nodes (NAME) */
     int             n_params;
-    struct env     *closure_env;     /* for top-level fns, the global env */
+    struct env     *closure_env;     /* unused — kept for ABI symmetry */
+
+    /* Session 88: capture-by-value closure. At function-literal
+     * creation time, every outer-local name visible from the body
+     * gets snapshotted into the upvalue array. Lookups inside the
+     * function check upvals first, then params/locals (via the
+     * call's fresh env), then globals.
+     *
+     * Why capture-by-value vs Lua's capture-by-reference: capturing
+     * by reference would require heap-allocating each captured slot
+     * (an "upvalue box") so the inner function and the enclosing
+     * function's local both see writes to the shared box. That's
+     * doable but ~200 more lines of plumbing. Capture-by-value
+     * covers every closure idiom where the outer locals don't
+     * change after the inner function is created — which is the
+     * common factory-pattern case. Documented limit. */
+    struct string **upval_names;
+    struct value   *upvals;
+    int             n_upvals;
 };
+
+/* ---------- GC tracking (session 88) ----------------------------
+ *
+ * Three singly-linked tracking lists, one per heap-allocated value
+ * kind (string, table, func). Every allocation pushes itself onto
+ * the head of its list. Marking walks roots — globals, the active
+ * env chain, error frame messages — and sets gc_mark=1 on every
+ * reachable object. Sweeping walks each list, frees entries with
+ * gc_mark==0, clears mark==1 on survivors.
+ *
+ * Trigger policy: after every g_gc_threshold allocations. Threshold
+ * grows geometrically (start 256, doubles) up to a cap so steady-
+ * state allocation rate doesn't keep retriggering. */
+
+static struct string *g_all_strings = 0;
+static struct table  *g_all_tables  = 0;
+static struct func   *g_all_funcs   = 0;
+static struct env    *g_env_top     = 0;   /* head of active env chain */
+static int            g_alloc_count = 0;
+static int            g_gc_threshold = 256;
+
+static void gc_register_string(struct string *s) {
+    s->gc_next = g_all_strings;
+    s->gc_mark = 0;
+    g_all_strings = s;
+}
+static void gc_register_table(struct table *t) {
+    t->gc_next = g_all_tables;
+    t->gc_mark = 0;
+    g_all_tables = t;
+}
+static void gc_register_func(struct func *f) {
+    f->gc_next = g_all_funcs;
+    f->gc_mark = 0;
+    g_all_funcs = f;
+}
 
 static struct value v_nil(void)      { struct value v; v.kind = V_NIL; return v; }
 static struct value v_bool(int b)    { struct value v; v.kind = V_BOOL; v.as.b = b ? 1 : 0; return v; }
@@ -178,6 +272,8 @@ static struct string *make_string(const char *p, int n) {
     s->len = n;
     for (int i = 0; i < n; i++) s->data[i] = p[i];
     s->data[n] = 0;
+    gc_register_string(s);
+    g_alloc_count++;
     return s;
 }
 
@@ -242,6 +338,8 @@ static struct table *table_new(void) {
     t->cap   = TABLE_INIT_CAP;
     t->kv    = (struct tk_pair *)malloc(sizeof(struct tk_pair) * t->cap);
     for (int i = 0; i < t->cap; i++) t->kv[i].k = v_nil();
+    gc_register_table(t);
+    g_alloc_count++;
     return t;
 }
 
@@ -955,13 +1053,37 @@ struct env {
     struct table     *globals;       /* shared across calls */
     struct local_slot locals[LOCALS_MAX];
     int               n_locals;
+    /* Session 88: when this env was set up for a user-function call,
+     * `host_fn` points at the function whose body we're executing.
+     * Name lookups that miss in locals consult host_fn->upvals
+     * before falling through to globals. NULL for the REPL/file
+     * top-level env, which has no closure context. */
+    struct func      *host_fn;
+    /* Session 88: GC needs to walk every active env to mark
+     * reachable values in locals. Chain envs at construction. */
+    struct env       *prev;
 };
 
 static struct env *make_env(struct table *globals) {
     struct env *e = (struct env *)malloc(sizeof(*e));
     e->globals = globals;
     e->n_locals = 0;
+    e->host_fn  = 0;
+    e->prev     = g_env_top;
+    g_env_top   = e;
     return e;
+}
+
+static void free_env(struct env *e) {
+    /* Unchain. Tolerant of non-LIFO frees (the REPL does one make_env
+     * up top and never frees it). */
+    if (g_env_top == e) g_env_top = e->prev;
+    else {
+        struct env *p = g_env_top;
+        while (p && p->prev != e) p = p->prev;
+        if (p) p->prev = e->prev;
+    }
+    free(e);
 }
 
 static int local_find(struct env *e, struct string *name) {
@@ -980,12 +1102,29 @@ static int local_find(struct env *e, struct string *name) {
 static struct value var_get(struct env *e, struct string *name) {
     int i = local_find(e, name);
     if (i >= 0) return e->locals[i].value;
+    /* Session 88: closure upvalues. Looked up by name (no slot
+     * resolution at parse time — fine for a tree-walker). */
+    if (e->host_fn) {
+        for (int j = 0; j < e->host_fn->n_upvals; j++) {
+            struct string *un = e->host_fn->upval_names[j];
+            if (un->len != name->len) continue;
+            int eq = 1;
+            for (int k = 0; k < un->len; k++)
+                if (un->data[k] != name->data[k]) { eq = 0; break; }
+            if (eq) return e->host_fn->upvals[j];
+        }
+    }
     return table_get(e->globals, v_strz(name->data));
 }
 
 static void var_set(struct env *e, struct string *name, struct value v) {
     int i = local_find(e, name);
     if (i >= 0) { e->locals[i].value = v; return; }
+    /* Note: we DON'T write through to upvalues. Capture-by-value
+     * semantics mean closures see a snapshot, not a live reference.
+     * A write to a name that shadows an upvalue creates/updates a
+     * global (Lua's "implicit global" assignment behavior). Real Lua
+     * would write through the upvalue; ours doesn't. Documented. */
     table_set(e->globals, v_strz(name->data), v);
 }
 
@@ -1128,10 +1267,29 @@ static struct value eval_expr(struct env *e, struct node *n) {
         }
         case N_FUNC: {
             struct func *f = (struct func *)malloc(sizeof(*f));
+            gc_register_func(f);
+            g_alloc_count++;
             f->body = n->body;
             f->params = n->params;
             f->n_params = n->n_params;
-            f->closure_env = e;     /* unused — no upvalues — but reserved */
+            f->closure_env = e;
+            /* Session 88: capture every local currently visible in
+             * the enclosing env. Snapshot by value — copies of the
+             * (name, value) pairs. The inner function looks these up
+             * by name in its var_get fallback. */
+            f->n_upvals = e->n_locals;
+            f->upval_names = 0;
+            f->upvals      = 0;
+            if (f->n_upvals > 0) {
+                f->upval_names = (struct string **)
+                    malloc(sizeof(struct string *) * f->n_upvals);
+                f->upvals = (struct value *)
+                    malloc(sizeof(struct value) * f->n_upvals);
+                for (int i = 0; i < f->n_upvals; i++) {
+                    f->upval_names[i] = e->locals[i].name;
+                    f->upvals[i]      = e->locals[i].value;
+                }
+            }
             return v_fn(f);
         }
         case N_CALL: return eval_call(e, n);
@@ -1150,6 +1308,7 @@ static struct value eval_call(struct env *outer, struct node *call) {
     if (callee.kind != V_FN)      die("attempt to call non-function (line %d)", call->line);
     struct func *f = callee.as.fn;
     struct env *child = make_env(outer->globals);
+    child->host_fn = f;     /* session 88: enable upvalue lookup */
     int n = f->n_params < argc ? f->n_params : argc;
     for (int i = 0; i < n; i++) {
         local_declare(child, f->params[i]->str, args[i]);
@@ -1159,7 +1318,7 @@ static struct value eval_call(struct env *outer, struct node *call) {
         local_declare(child, f->params[i]->str, v_nil());
     }
     struct ret r = eval_block(child, f->body);
-    free(child);
+    free_env(child);
     if (r.f == FL_RETURN) return r.v;
     return v_nil();
 }
@@ -1168,6 +1327,10 @@ static struct ret eval_block(struct env *e, struct node *blk) {
     struct ret r; r.f = FL_NORMAL; r.v = v_nil();
     int saved_locals = e->n_locals;
     for (int i = 0; i < blk->n_list; i++) {
+        /* Session 88: try GC between statements. Safe because no
+         * temp values are live on the C stack here — the previous
+         * statement returned, the next hasn't started. */
+        gc_maybe_collect();
         struct node *s = blk->list[i];
         switch (s->kind) {
             case N_LOCAL: {
@@ -1472,14 +1635,229 @@ static struct value bi_os_exit(int argc, struct value *argv) {
     return v_nil();     /* unreachable */
 }
 
+/* Session 88: pcall(f, args...) — call f protected. On success
+ * returns the result. On error, returns nil (in a real Lua you'd
+ * get (false, errmsg); we'd need multi-return for that, and we
+ * don't have multi-return in this session. As a compromise we
+ * return false on error AND stash the message in `last_error()`).
+ *
+ * Note: this is intentionally a thin shim around __builtin_setjmp.
+ * The "real" Lua semantics need multi-return; a follow-on session
+ * with multi-return values can clean this up. */
+static struct string *g_last_error;
+
+static struct value bi_last_error(int argc, struct value *argv) {
+    (void)argc; (void)argv;
+    if (!g_last_error) return v_strz("");
+    return v_str_take(g_last_error);
+}
+
+static struct value bi_pcall(int argc, struct value *argv) {
+    if (argc < 1) return v_bool(0);
+    struct value callee = argv[0];
+    if (callee.kind != V_FN && callee.kind != V_BUILTIN) return v_bool(0);
+
+    struct err_frame frame;
+    frame.msg[0] = 0;
+    frame.msg_len = 0;
+    frame.prev = g_err_stack;
+    g_err_stack = &frame;
+
+    if (__builtin_setjmp(frame.jmp) == 0) {
+        struct value r;
+        if (callee.kind == V_BUILTIN) {
+            r = callee.as.bi(argc - 1, argv + 1);
+        } else {
+            /* User function — need to set up a call. Without access
+             * to the outer env at this point, build a minimal one
+             * pointing at globals. The function body sees its
+             * params + globals (no captured locals — closures cover
+             * that path separately if/when they land). */
+            struct func *f = callee.as.fn;
+            struct env *child = make_env(g_globals);
+            child->host_fn = f;     /* session 88: closure context */
+            int n = f->n_params < (argc - 1) ? f->n_params : (argc - 1);
+            for (int i = 0; i < n; i++) {
+                local_declare(child, f->params[i]->str, argv[1 + i]);
+            }
+            for (int i = n; i < f->n_params; i++) {
+                local_declare(child, f->params[i]->str, v_nil());
+            }
+            struct ret ret = eval_block(child, f->body);
+            free_env(child);
+            r = (ret.f == FL_RETURN) ? ret.v : v_nil();
+        }
+        g_err_stack = frame.prev;
+        g_last_error = 0;
+        return r;
+    }
+    /* Caught an error. */
+    g_err_stack = frame.prev;
+    g_last_error = make_string(frame.msg, frame.msg_len);
+    return v_bool(0);
+}
+
+/* error(msg) — raise an error. Without pcall on the stack, the
+ * interpreter exits. With pcall, the longjmp in die() catches.   */
+static struct value bi_error(int argc, struct value *argv) {
+    if (argc < 1) die("error called");
+    struct string *s = to_str(argv[0]);
+    die("%s", s->data);
+    return v_nil();     /* unreachable */
+}
+
+/* string.find(s, pattern, [init], [plain])
+ *   Plain-substring search only — no Lua patterns yet. The 4th
+ *   "plain" arg is ignored (we're always plain). Returns the
+ *   1-indexed start position of the first match, or nil if no
+ *   match. (Real Lua returns start AND end; we don't have
+ *   multi-return yet, so the caller computes end as start +
+ *   #pattern - 1 if needed.) */
+static struct value bi_string_find(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_STR || argv[1].kind != V_STR) return v_nil();
+    struct string *s = argv[0].as.s;
+    struct string *p = argv[1].as.s;
+    int start = (argc >= 3) ? to_num(argv[2], "string.find init") : 1;
+    if (start < 1) start = 1;
+    if (p->len == 0) return v_num(start);
+    int last = s->len - p->len;
+    for (int i = start - 1; i <= last; i++) {
+        int ok = 1;
+        for (int j = 0; j < p->len; j++) {
+            if (s->data[i + j] != p->data[j]) { ok = 0; break; }
+        }
+        if (ok) return v_num(i + 1);
+    }
+    return v_nil();
+}
+
+/* string.byte(s, [i]) — returns the byte value at position i (1-indexed,
+ * default 1). Useful for low-level string inspection. */
+static struct value bi_string_byte(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_STR) return v_nil();
+    struct string *s = argv[0].as.s;
+    int i = (argc >= 2) ? to_num(argv[1], "string.byte i") : 1;
+    if (i < 1 || i > s->len) return v_nil();
+    return v_num((unsigned char)s->data[i - 1]);
+}
+
+/* string.char(n1, n2, ...) — builds a string from byte values. */
+static struct value bi_string_char(int argc, struct value *argv) {
+    struct string *r = (struct string *)malloc(sizeof(*r) + argc + 1);
+    r->len = argc;
+    for (int i = 0; i < argc; i++) {
+        int b = to_num(argv[i], "string.char");
+        r->data[i] = (char)b;
+    }
+    r->data[argc] = 0;
+    return v_str_take(r);
+}
+
+/* ---------- Mark-sweep GC (session 88) --------------------------- */
+
+static void mark_value(struct value v);
+
+static void mark_table(struct table *t) {
+    if (!t || t->gc_mark) return;
+    t->gc_mark = 1;
+    for (int i = 0; i < t->count; i++) {
+        mark_value(t->kv[i].k);
+        mark_value(t->kv[i].v);
+    }
+}
+
+static void mark_func(struct func *f) {
+    if (!f || f->gc_mark) return;
+    f->gc_mark = 1;
+    for (int i = 0; i < f->n_upvals; i++) {
+        /* upval_names are strings — mark them too. */
+        if (f->upval_names[i]) f->upval_names[i]->gc_mark = 1;
+        mark_value(f->upvals[i]);
+    }
+}
+
+static void mark_value(struct value v) {
+    if (v.kind == V_STR && v.as.s)   v.as.s->gc_mark = 1;
+    else if (v.kind == V_TABLE)      mark_table(v.as.t);
+    else if (v.kind == V_FN)         mark_func (v.as.fn);
+    /* V_BUILTIN is a function-pointer — not GC-tracked. */
+}
+
+static void gc_collect(void) {
+    /* Mark phase — roots: globals, every active env's locals, every
+     * env's host_fn upvals (recursive via mark_func), last_error. */
+    mark_table(g_globals);
+    for (struct env *e = g_env_top; e; e = e->prev) {
+        if (e->host_fn) mark_func(e->host_fn);
+        for (int i = 0; i < e->n_locals; i++) {
+            if (e->locals[i].name) e->locals[i].name->gc_mark = 1;
+            mark_value(e->locals[i].value);
+        }
+    }
+    if (g_last_error) g_last_error->gc_mark = 1;
+
+    /* Sweep strings. */
+    struct string **sp = &g_all_strings;
+    while (*sp) {
+        if ((*sp)->gc_mark) { (*sp)->gc_mark = 0; sp = &(*sp)->gc_next; }
+        else { struct string *dead = *sp; *sp = dead->gc_next; free(dead); }
+    }
+    /* Sweep tables (free kv arrays too). */
+    struct table **tp = &g_all_tables;
+    while (*tp) {
+        if ((*tp)->gc_mark) { (*tp)->gc_mark = 0; tp = &(*tp)->gc_next; }
+        else {
+            struct table *dead = *tp;
+            *tp = dead->gc_next;
+            if (dead->kv) free(dead->kv);
+            free(dead);
+        }
+    }
+    /* Sweep funcs. */
+    struct func **fp = &g_all_funcs;
+    while (*fp) {
+        if ((*fp)->gc_mark) { (*fp)->gc_mark = 0; fp = &(*fp)->gc_next; }
+        else {
+            struct func *dead = *fp;
+            *fp = dead->gc_next;
+            if (dead->upvals)      free(dead->upvals);
+            if (dead->upval_names) free(dead->upval_names);
+            free(dead);
+        }
+    }
+
+    /* Reset trigger; grow threshold so steady-state allocation
+     * doesn't keep retriggering. Capped to avoid unbounded growth. */
+    g_alloc_count = 0;
+    g_gc_threshold *= 2;
+    if (g_gc_threshold > 8192) g_gc_threshold = 8192;
+}
+
+/* Check whether it's time to collect. Called between statements
+ * where no temp values are live on the C stack. */
+static void gc_maybe_collect(void) {
+    if (g_alloc_count >= g_gc_threshold) gc_collect();
+}
+
+/* Lua: collectgarbage("collect") forces a collection. */
+static struct value bi_collectgarbage(int argc, struct value *argv) {
+    (void)argc; (void)argv;
+    gc_collect();
+    return v_nil();
+}
+
 /* Wire up the standard library — fill the globals table with sub-
  * tables for `string`, `table`, `io`, `os` etc. */
 static void install_stdlib(struct table *g) {
-    table_set(g, v_strz("print"),     v_builtin(bi_print));
-    table_set(g, v_strz("type"),      v_builtin(bi_type));
-    table_set(g, v_strz("tostring"),  v_builtin(bi_tostring));
-    table_set(g, v_strz("tonumber"),  v_builtin(bi_tonumber));
-    table_set(g, v_strz("ipairs"),    v_builtin(bi_ipairs));
+    table_set(g, v_strz("print"),       v_builtin(bi_print));
+    table_set(g, v_strz("type"),        v_builtin(bi_type));
+    table_set(g, v_strz("tostring"),    v_builtin(bi_tostring));
+    table_set(g, v_strz("tonumber"),    v_builtin(bi_tonumber));
+    table_set(g, v_strz("ipairs"),      v_builtin(bi_ipairs));
+    table_set(g, v_strz("pcall"),       v_builtin(bi_pcall));
+    table_set(g, v_strz("error"),       v_builtin(bi_error));
+    table_set(g, v_strz("last_error"),  v_builtin(bi_last_error));
+    table_set(g, v_strz("collectgarbage"), v_builtin(bi_collectgarbage));
 
     struct table *str = table_new();
     table_set(str, v_strz("len"),    v_builtin(bi_string_len));
@@ -1487,6 +1865,9 @@ static void install_stdlib(struct table *g) {
     table_set(str, v_strz("upper"),  v_builtin(bi_string_upper));
     table_set(str, v_strz("lower"),  v_builtin(bi_string_lower));
     table_set(str, v_strz("rep"),    v_builtin(bi_string_rep));
+    table_set(str, v_strz("find"),   v_builtin(bi_string_find));
+    table_set(str, v_strz("byte"),   v_builtin(bi_string_byte));
+    table_set(str, v_strz("char"),   v_builtin(bi_string_char));
     table_set(g, v_strz("string"), v_table(str));
 
     struct table *tab = table_new();
@@ -1507,20 +1888,17 @@ static void install_stdlib(struct table *g) {
 
 /* ---------- Error handling --------------------------------------- */
 
-static void die(const char *fmt, ...) {
-    /* Minimal printf-style formatter for error messages. The libuser
-     * printf goes to stdout; we go to stderr explicitly. */
-    char buf[256];
+/* Minimal printf-style formatter shared by die() and the error()
+ * built-in. Writes into `out` (cap bytes), returns bytes written. */
+static int format_msg(char *out, int cap, const char *fmt, va_list ap) {
     int o = 0;
-    va_list ap;
-    va_start(ap, fmt);
-    for (int i = 0; fmt[i] && o < (int)sizeof(buf) - 1; i++) {
+    for (int i = 0; fmt[i] && o < cap - 1; i++) {
         if (fmt[i] == '%' && fmt[i + 1]) {
             i++;
             char c = fmt[i];
             if (c == 's') {
                 const char *s = va_arg(ap, const char *);
-                while (*s && o < (int)sizeof(buf) - 1) buf[o++] = *s++;
+                while (*s && o < cap - 1) out[o++] = *s++;
             } else if (c == 'd') {
                 int v = va_arg(ap, int);
                 int neg = 0;
@@ -1528,11 +1906,11 @@ static void die(const char *fmt, ...) {
                 char tmp[16]; int tn = 0;
                 if (v == 0) tmp[tn++] = '0';
                 else while (v) { tmp[tn++] = (char)('0' + v % 10); v /= 10; }
-                if (neg && o < (int)sizeof(buf) - 1) buf[o++] = '-';
-                while (tn-- > 0 && o < (int)sizeof(buf) - 1) buf[o++] = tmp[tn];
+                if (neg && o < cap - 1) out[o++] = '-';
+                while (tn-- > 0 && o < cap - 1) out[o++] = tmp[tn];
             } else if (c == 'c') {
                 int ch = va_arg(ap, int);
-                if (o < (int)sizeof(buf) - 1) buf[o++] = (char)ch;
+                if (o < cap - 1) out[o++] = (char)ch;
             } else if (c == 'x') {
                 unsigned v = va_arg(ap, unsigned);
                 char tmp[16]; int tn = 0;
@@ -1542,18 +1920,38 @@ static void die(const char *fmt, ...) {
                     tmp[tn++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
                     v >>= 4;
                 }
-                while (tn-- > 0 && o < (int)sizeof(buf) - 1) buf[o++] = tmp[tn];
+                while (tn-- > 0 && o < cap - 1) out[o++] = tmp[tn];
             } else {
-                buf[o++] = '%'; if (o < (int)sizeof(buf) - 1) buf[o++] = c;
+                out[o++] = '%'; if (o < cap - 1) out[o++] = c;
             }
         } else {
-            buf[o++] = fmt[i];
+            out[o++] = fmt[i];
         }
     }
-    buf[o] = 0;
+    out[o] = 0;
+    return o;
+}
+
+static void die(const char *fmt, ...) {
+    char buf[ERR_MSG_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = format_msg(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+
+    if (g_err_stack) {
+        /* Inside a pcall — pack the message into the current frame
+         * and longjmp. */
+        struct err_frame *f = g_err_stack;
+        int copy = n < ERR_MSG_MAX - 1 ? n : ERR_MSG_MAX - 1;
+        for (int i = 0; i < copy; i++) f->msg[i] = buf[i];
+        f->msg[copy] = 0;
+        f->msg_len = copy;
+        __builtin_longjmp(f->jmp, 1);
+    }
+    /* No pcall on the stack — fatal. */
     sys_write(2, "lua: ", 5);
-    sys_write(2, buf, o);
+    sys_write(2, buf, n);
     sys_write(2, "\n", 1);
     sys_exit(1);
 }
@@ -1582,8 +1980,6 @@ static char *slurp(const char *path, int *out_size) {
     return buf;
 }
 
-static struct table *g_globals;
-
 static void run_source(const char *src, int len) {
     lex_all(src, len);
     g_tk = 0;
@@ -1591,11 +1987,11 @@ static void run_source(const char *src, int len) {
     if (tk_cur()->kind != T_END) die("parse: extra tokens at line %d", tk_cur()->line);
     struct env *e = make_env(g_globals);
     eval_block(e, prog);
-    free(e);
+    free_env(e);
 }
 
 static void repl(void) {
-    out_str("lua subset — type a statement, or 'exit()' to quit.\n");
+    out_str("lua subset — type a statement, or 'exit()' or Ctrl-D to quit.\n");
     char line[1024];
     for (;;) {
         out_str("> ");
@@ -1604,10 +2000,25 @@ static void repl(void) {
         /* Strip trailing newline. */
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
         if (n == 0) continue;
-        /* Single-process REPL — any error from die() will sys_exit
-         * the whole process. Document this; fork-per-line could
-         * recover but adds latency. */
-        run_source(line, n);
+
+        /* Session 88: wrap the eval in an error frame so a runtime
+         * error reports to the user instead of killing the REPL.
+         * This is the same shape as pcall but inlined at the
+         * top-level so we don't need to construct a function value
+         * around every line. */
+        struct err_frame frame;
+        frame.msg[0] = 0;
+        frame.msg_len = 0;
+        frame.prev = g_err_stack;
+        g_err_stack = &frame;
+        if (__builtin_setjmp(frame.jmp) == 0) {
+            run_source(line, n);
+        } else {
+            sys_write(2, "lua: ", 5);
+            sys_write(2, frame.msg, frame.msg_len);
+            sys_write(2, "\n", 1);
+        }
+        g_err_stack = frame.prev;
     }
 }
 
