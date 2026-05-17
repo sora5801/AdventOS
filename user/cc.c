@@ -122,6 +122,10 @@ enum {
     T_EQ, T_NEQ, T_LT, T_GT, T_LE, T_GE,
     T_AMP_AMP, T_PIPE_PIPE, T_BANG,
     T_AMP, T_PIPE, T_CARET, T_TILDE, T_LSHIFT, T_RSHIFT,
+    /* Session 96 — compound operators. */
+    T_PLUS_EQ, T_MINUS_EQ, T_STAR_EQ, T_SLASH_EQ, T_PERCENT_EQ,
+    T_INC, T_DEC,
+    T_QUESTION, T_COLON,
 };
 
 #define NAME_MAX 24
@@ -656,11 +660,37 @@ static void lex_all(const char *src, int len) {
             case ']': push_tok(T_RBRACKET, g_line); g_pos++; break;
             case ';': push_tok(T_SEMI,   g_line); g_pos++; break;
             case ',': push_tok(T_COMMA,  g_line); g_pos++; break;
-            case '+': push_tok(T_PLUS,   g_line); g_pos++; break;
-            case '-': push_tok(T_MINUS,  g_line); g_pos++; break;
-            case '*': push_tok(T_STAR,   g_line); g_pos++; break;
-            case '/': push_tok(T_SLASH,  g_line); g_pos++; break;
-            case '%': push_tok(T_PERCENT,g_line); g_pos++; break;
+            case '+':
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '+') {
+                    push_tok(T_INC, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_PLUS_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_PLUS, g_line); g_pos++; }
+                break;
+            case '-':
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '-') {
+                    push_tok(T_DEC, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_MINUS_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_MINUS, g_line); g_pos++; }
+                break;
+            case '*':
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_STAR_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_STAR, g_line); g_pos++; }
+                break;
+            case '/':
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_SLASH_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_SLASH, g_line); g_pos++; }
+                break;
+            case '%':
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_PERCENT_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_PERCENT, g_line); g_pos++; }
+                break;
+            case '?': push_tok(T_QUESTION, g_line); g_pos++; break;
+            case ':': push_tok(T_COLON,    g_line); g_pos++; break;
             case '~': push_tok(T_TILDE,  g_line); g_pos++; break;
             case '^': push_tok(T_CARET,  g_line); g_pos++; break;
             case '=':
@@ -756,6 +786,12 @@ enum {
     N_INDEX,      /* base[idx]          session 92 — binary, op=elem_size */
     N_DEREF_ASSIGN,    /* *p   = expr;  session 92 — store thru pointer */
     N_INDEX_ASSIGN,    /* a[i] = expr;  session 92 */
+    /* Session 96 — compound operators. */
+    N_COMPOUND_ASSIGN, /* NAME op= expr;  op stored in n->op (T_PLUS,
+                        * T_MINUS, T_STAR, T_SLASH, T_PERCENT) */
+    N_INC_DEC,         /* ++x / --x / x++ / x-- — op = T_INC|T_DEC,
+                        * num = 1 for prefix, 0 for postfix */
+    N_TERNARY,         /* c ? a : b — a=cond, b=then, c=else */
     N_RETURN,
     N_IF,
     N_WHILE,
@@ -876,6 +912,18 @@ static struct node *parse_primary(void) {
             ix->a = idx;
             return ix;
         }
+        /* Session 96 — postfix `NAME++` / `NAME--`. */
+        if (tk_cur()->kind == T_INC || tk_cur()->kind == T_DEC) {
+            int op = tk_cur()->kind;
+            g_tk++;
+            struct node *id = new_node(N_INC_DEC);
+            int k = 0;
+            while (n->name[k]) { id->name[k] = n->name[k]; k++; }
+            id->name[k] = 0;
+            id->op  = op;
+            id->num = 0;    /* 0 = postfix */
+            return id;
+        }
         return n;
     }
     if (t->kind == T_LPAREN) { g_tk++; struct node *e = parse_expr(); expect(T_RPAREN, "')'"); return e; }
@@ -921,6 +969,22 @@ static struct node *parse_primary(void) {
         n->a = parse_primary();
         return n;
     }
+    /* Session 96 — prefix ++NAME / --NAME. Only NAMES are supported
+     * as the target; `++arr[i]` and `++*p` aren't in scope. */
+    if (t->kind == T_INC || t->kind == T_DEC) {
+        int op = t->kind;
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "++/-- must target a local name", 0);
+        struct node *n = new_node(N_INC_DEC);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        n->op  = op;
+        n->num = 1;     /* 1 = prefix */
+        g_tk++;
+        return n;
+    }
     die_at(t->line, "unexpected token in expression", 0);
     return 0;
 }
@@ -941,7 +1005,22 @@ static struct node *parse_binop_rhs(int min_prec, struct node *lhs) {
 }
 
 static struct node *parse_expr(void) {
-    return parse_binop_rhs(1, parse_primary());
+    struct node *lhs = parse_binop_rhs(1, parse_primary());
+    /* Session 96 — ternary `c ? a : b` lives at the lowest precedence
+     * above assignment. We don't have assignment-as-expression, so
+     * this is effectively the lowest precedence in cc. */
+    if (tk_cur()->kind == T_QUESTION) {
+        g_tk++;
+        struct node *t = parse_expr();
+        expect(T_COLON, "':' in ternary");
+        struct node *e = parse_expr();
+        struct node *n = new_node(N_TERNARY);
+        n->a = lhs;
+        n->b = t;
+        n->c = e;
+        return n;
+    }
+    return lhs;
 }
 
 static struct node *parse_block(void) {
@@ -1031,7 +1110,40 @@ static struct node *parse_stmt(void) {
     if (t == T_LBRACE) return parse_block();
     /* Expression-stmt or assignment.
      * `NAME = expr;`  or  `expr;`
-     * Session 92 also: `*NAME = expr;` and `NAME[idx] = expr;` */
+     * Session 92 also: `*NAME = expr;` and `NAME[idx] = expr;`
+     * Session 96 also: `NAME op= expr;` */
+    if (t == T_NAME) {
+        int nx = tk_peek(1)->kind;
+        int op = 0;
+        if (nx == T_PLUS_EQ)         op = T_PLUS;
+        else if (nx == T_MINUS_EQ)   op = T_MINUS;
+        else if (nx == T_STAR_EQ)    op = T_STAR;
+        else if (nx == T_SLASH_EQ)   op = T_SLASH;
+        else if (nx == T_PERCENT_EQ) op = T_PERCENT;
+        if (op) {
+            /* Session 96 — rewrite `x op= expr` as `x = x op expr` so
+             * we don't need a separate codegen path. Safe because
+             * NAME is a pure reference (no side-effects per re-read). */
+            char nm[NAME_MAX];
+            int i = 0;
+            while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+            nm[i] = 0;
+            g_tk++;       /* skip name */
+            g_tk++;       /* skip op= */
+            struct node *rhs = parse_expr();
+            expect(T_SEMI, "';'");
+            struct node *left = new_node(N_NAME);
+            for (int j = 0; j <= i; j++) left->name[j] = nm[j];
+            struct node *bin = new_node(N_BIN);
+            bin->op = op;
+            bin->a  = left;
+            bin->b  = rhs;
+            struct node *n = new_node(N_ASSIGN);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->a = bin;
+            return n;
+        }
+    }
     if (t == T_NAME && tk_peek(1)->kind == T_ASSIGN) {
         struct node *n = new_node(N_ASSIGN);
         int i = 0;
@@ -1955,6 +2067,51 @@ static void gen_expr(struct node *n) {
             return;
         }
         case N_CALL: gen_call(n); return;
+        case N_INC_DEC: {
+            /* Session 96 — ++x / --x / x++ / x--. Restriction: target
+             * is a NAME (local or global), int-sized.
+             *
+             *   prefix:  x += d; result = x
+             *   postfix: save_old = x; x += d; result = save_old
+             *
+             * Encoded by op=T_INC|T_DEC and num=1 (pre) / 0 (post). */
+            int off = local_find(n->name);
+            int gi  = (off == 0) ? global_find(n->name) : -1;
+            if (off == 0 && gi < 0)
+                die_at(n->line, "++/-- of undefined", n->name);
+            int is_local = (off != 0);
+            int delta_byte = (n->op == T_INC) ? 0x40 : 0x48;  /* inc/dec eax */
+            /* Load current value. */
+            if (is_local) e_load_local(off);
+            else          emit_load_global(gi);
+            if (n->num) {
+                /* Prefix: modify, store, result = new value (already in eax). */
+                emit_b((unsigned char)delta_byte);
+                if (is_local) e_store_local(off);
+                else          emit_store_global(gi);
+            } else {
+                /* Postfix: save old, modify, store, result = old. */
+                e_push_eax();
+                emit_b((unsigned char)delta_byte);
+                if (is_local) e_store_local(off);
+                else          emit_store_global(gi);
+                e_pop_eax();
+            }
+            return;
+        }
+        case N_TERNARY: {
+            /* Session 96 — c ? a : b. Branch around the unused arm so
+             * side-effects only occur for the chosen branch. */
+            gen_expr(n->a);
+            e_test_eax_eax();
+            int jz = e_jz_rel32();
+            gen_expr(n->b);
+            int jend = e_jmp_rel32();
+            patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
+            gen_expr(n->c);
+            patch_d(jend, (unsigned)(g_code_len - (jend + 4)));
+            return;
+        }
         case N_UN: {
             gen_expr(n->a);
             switch (n->op) {

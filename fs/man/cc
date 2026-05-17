@@ -34,6 +34,10 @@ IMPLEMENTED
                    unary *      dereference                       (session 92)
                    a[i]         array/pointer indexing            (session 92)
                    'X' '\n'     char literal — lexes as T_NUM     (session 92)
+                   c ? a : b    ternary                           (session 96)
+                   += -= *= /= %=   compound assignment           (session 96)
+                   ++name --name    prefix increment/decrement    (session 96)
+                   name++ name--    postfix increment/decrement   (session 96)
                    Assignment is a statement, not an expression.
 
     Statements     int x;  int x = expr;       local declaration
@@ -41,6 +45,10 @@ IMPLEMENTED
                    int *p;  char *p;           pointer declaration (session 92)
                    int a[N];  char a[N];       array declaration  (session 92)
                    name = expr;                 assignment
+                   name op= expr;               compound assignment (session 96)
+                                                  op is + - * / %
+                   ++name;  name++;             increment statements (session 96)
+                   --name;  name--;             decrement statements (session 96)
                    *p   = expr;                 store thru pointer (session 92)
                    a[i] = expr;                 store thru index   (session 92)
                    expr;                        expression-statement
@@ -117,6 +125,13 @@ DELIBERATELY NOT IMPLEMENTED
     - function-like macros: #define ADD(a,b) ((a)+(b))
     - #if with arithmetic expressions (#ifdef / #ifndef only)
     - multi-line macro bodies (backslash continuation)
+    - bitwise compound assignments (&=, |=, ^=, <<=, >>=)
+    - ++/-- on arr[i], *p, or expressions (NAME only)
+    - assignment as an expression (a = b is a statement)
+    - comma operator
+    - struct / union / enum / typedef
+    - function pointers
+    - multi-file compilation (linker)
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
     - struct / union / enum / typedef
@@ -149,6 +164,7 @@ EXAMPLES
     Sample at /printf.c demonstrates %d %s %c %x %% formatting.
     Sample at /prep.c + /colors.h demonstrates #include + #define +
     #ifdef + #ifndef + #else + #endif + #undef.
+    Sample at /ops.c demonstrates += -= *= /= %= ++ -- and ternary.
 
 EXIT STATUS
     0   compile succeeded
