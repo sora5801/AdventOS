@@ -1923,7 +1923,14 @@ static int func_find(const char *name) {
 static int func_intern(const char *name, int n_params) {
     int i = func_find(name);
     if (i >= 0) {
-        if (g_funcs[i].n_params != n_params)
+        /* Session 98 — accept a sentinel n_params of -1 in the table
+         * (created by address-of-function before the real decl/call).
+         * The first non-sentinel value wins. */
+        if (g_funcs[i].n_params == -1) {
+            g_funcs[i].n_params = n_params;
+            return i;
+        }
+        if (n_params >= 0 && g_funcs[i].n_params != n_params)
             die_at(0, "arg-count mismatch for", name);
         return i;
     }
@@ -1936,6 +1943,27 @@ static int func_intern(const char *name, int n_params) {
     g_funcs[idx].n_params  = n_params;
     g_funcs[idx].defined   = 0;
     return idx;
+}
+
+/* Session 98 — address-fixup table.
+ *
+ * Used when codegen emits a function's address (for `fp = my_func;`
+ * or `&my_func`). The imm32 in `mov eax, imm32` is filled with the
+ * absolute VA (ENTRY_VA + g_funcs[i].entry_off) once codegen for
+ * every function is done. */
+#define MAX_ADDR_FIXUPS 128
+struct addr_fixup {
+    int imm_off;
+    int func_idx;
+};
+static struct addr_fixup g_addr_fixups[MAX_ADDR_FIXUPS];
+static int               g_n_addr_fixups;
+
+static void record_addr_fixup(int imm_off, int func_idx) {
+    if (g_n_addr_fixups >= MAX_ADDR_FIXUPS) die("too many addr fixups");
+    g_addr_fixups[g_n_addr_fixups].imm_off  = imm_off;
+    g_addr_fixups[g_n_addr_fixups].func_idx = func_idx;
+    g_n_addr_fixups++;
 }
 
 static int local_find(const char *name) {
@@ -2252,18 +2280,32 @@ static void gen_call(struct node *call) {
         emit_syscall_intrinsic(call->name, call);
         return;
     }
-    /* User function call. Push args right-to-left. */
+    /* Push args right-to-left (cdecl). */
     int argc = call->n_list;
     for (int i = argc - 1; i >= 0; i--) {
         gen_expr(call->list[i]);
         e_push_eax();
     }
-    int idx = func_intern(call->name, argc);
-    int disp_off = e_call_rel32();
-    if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
-    g_fixups[g_n_fixups].call_disp_off = disp_off;
-    g_fixups[g_n_fixups].func_idx = idx;
-    g_n_fixups++;
+    /* Session 98 — if `call->name` is a local or global (i.e. a
+     * variable holding a function pointer), generate an indirect
+     * call. The variable's "kind" doesn't matter — we just treat the
+     * value as an address. Otherwise fall through to the direct-call
+     * path with a function fixup. */
+    int off = local_find(call->name);
+    int gi  = (off == 0) ? global_find(call->name) : -1;
+    if (off != 0 || gi >= 0) {
+        if (off != 0) e_load_local(off);
+        else          emit_load_global(gi);
+        /* call eax  →  ff d0 */
+        emit_b(0xff); emit_b(0xd0);
+    } else {
+        int idx = func_intern(call->name, argc);
+        int disp_off = e_call_rel32();
+        if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+        g_fixups[g_n_fixups].call_disp_off = disp_off;
+        g_fixups[g_n_fixups].func_idx = idx;
+        g_n_fixups++;
+    }
     /* Caller cleans up. */
     if (argc > 0) e_add_esp_imm32(argc * 4);
 }
@@ -2297,8 +2339,17 @@ static void gen_expr(struct node *n) {
             }
             /* Session 93 — fall through to globals. */
             int gi = global_find(n->name);
-            if (gi < 0) die_at(n->line, "undefined variable", n->name);
-            emit_load_global(gi);
+            if (gi >= 0) { emit_load_global(gi); return; }
+            /* Session 98 — function name as rvalue. Decays to the
+             * function's absolute VA (an address). Use a sentinel
+             * n_params of -1 if we haven't seen this function yet —
+             * a later definition or call site fills it in. */
+            int fi = func_find(n->name);
+            if (fi < 0) fi = func_intern(n->name, -1);
+            emit_b(0xb8);
+            int imm_off = g_code_len;
+            emit_d(0);
+            record_addr_fixup(imm_off, fi);
             return;
         }
         case N_ADDR_OF: {
@@ -2306,8 +2357,15 @@ static void gen_expr(struct node *n) {
             int off = local_find(n->name);
             if (off != 0) { e_lea_eax_ebp(off); return; }
             int gi = global_find(n->name);
-            if (gi < 0) die_at(n->line, "& of undefined variable", n->name);
-            emit_addrof_global(gi);
+            if (gi >= 0) { emit_addrof_global(gi); return; }
+            /* Session 98 — `&func_name` also yields the function's
+             * VA; identical behavior to bare name. */
+            int fi = func_find(n->name);
+            if (fi < 0) fi = func_intern(n->name, -1);
+            emit_b(0xb8);
+            int imm_off = g_code_len;
+            emit_d(0);
+            record_addr_fixup(imm_off, fi);
             return;
         }
         case N_DEREF: {
@@ -3509,6 +3567,18 @@ int main(int argc, char **argv) {
     if (!g_funcs[main_idx].defined) die("'main' function not found");
 
     resolve_fixups();
+
+    /* Session 98 — patch address-of-function fixups. Each emits a
+     * `mov eax, imm32` placeholder; the imm becomes ENTRY_VA + the
+     * target function's entry offset. Functions referenced by address
+     * but never defined are caught here. */
+    for (int i = 0; i < g_n_addr_fixups; i++) {
+        int fi = g_addr_fixups[i].func_idx;
+        if (g_funcs[fi].entry_off < 0)
+            die_at(0, "address-of undefined function", g_funcs[fi].name);
+        unsigned int va = (unsigned int)ENTRY_VA + (unsigned int)g_funcs[fi].entry_off;
+        patch_d(g_addr_fixups[i].imm_off, va);
+    }
 
     /* Session 91 — append the string pool right after the last code
      * byte (no padding). Each string's VA is ENTRY_VA + (its offset

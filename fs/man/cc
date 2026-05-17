@@ -63,6 +63,15 @@ IMPLEMENTED
                    Forward references work — codegen patches
                    call sites after parsing.
 
+    Function ptrs  int *fp;          a function pointer (stored as int*)
+                                                       (session 98)
+                   fp = my_func;     bare name decays to function VA
+                   fp = &my_func;    explicit address-of (same value)
+                   fp(args);         indirect call via the variable
+                   No separate function-pointer type syntax — just int*.
+                   Function names in any rvalue context yield their VA;
+                   calls follow that pointer.
+
     Structs        struct TAG { int x; char *s; struct TAG *next; };
                                                  (session 97)
                    struct TAG var;               struct value (local/global)
@@ -149,8 +158,13 @@ DELIBERATELY NOT IMPLEMENTED
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof
     - union / enum / typedef
-    - function pointers
+    - declared function-pointer types `int (*fp)(int)` syntax
+      (function pointers exist; you just spell them `int *fp`)
+    - calling a function pointer directly off an expression
+      (e.g. `arr[i](5)` — load into a local first, then call)
     - multi-file compilation (linker)
+    - array-of-pointers global declarations like `int *table[N];`
+      (use `int table[N];` and treat values as addresses)
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
     - struct / union / enum / typedef
@@ -186,6 +200,8 @@ EXAMPLES
     Sample at /ops.c demonstrates += -= *= /= %= ++ -- and ternary.
     Sample at /structs.c demonstrates struct point + a linked-list
     walk via struct node { int val; struct node *next; }.
+    Sample at /fnptr.c demonstrates function pointers, indirect call,
+    callback args, and a global dispatch table.
 
 EXIT STATUS
     0   compile succeeded

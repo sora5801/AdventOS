@@ -254,6 +254,8 @@ DATA_FILES = [
     ('ops.c',     'fs/ops.c',     None),
     # Session 97 — struct demo.
     ('structs.c', 'fs/structs.c', None),
+    # Session 98 — function-pointer demo.
+    ('fnptr.c',   'fs/fnptr.c',   None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

@@ -33,7 +33,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Modal editor — `vi.elf` (undo, count prefixes, search/replace, motions, modes) | ✅ |
 | Man pages — 27 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
 | Scripting — `lua` (Lua-syntax subset, int32 numbers, tree-walking interpreter) | ✅ |
-| Native compiler — `cc` (C-subset: int, char, pointers, arrays, strings, globals, `printf`, preprocessor, compound ops, structs; emits ELF32) | ✅ |
+| Native compiler — `cc` (C-subset: int, char, pointers, arrays, strings, globals, `printf`, preprocessor, compound ops, structs, function pointers; emits ELF32) | ✅ |
 | ptrace-based debugger — `dbg.elf` | ✅ |
 | Multi-user with `/etc/passwd`-style login | ✅ |
 | JSON-RPC daemon (`agentd`) exposing the OS surface over loopback | ✅ |
@@ -93,9 +93,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **97 — cc Phase 3 part 1: structs**. See [`docs/84-cc-structs.md`](docs/84-cc-structs.md) for the deep dive (struct registry + field offsets, dot vs arrow access, self-referential pointer fields, struct pointer params). The smoke test walks a linked list built from three stack-allocated `struct node { int val; struct node *next; }` cells.
+Current session: **98 — cc Phase 3 part 2: function pointers**. See [`docs/85-cc-function-pointers.md`](docs/85-cc-function-pointers.md) for the deep dive (address-fixup table, function names decay to addresses, indirect `call eax` through any variable, global dispatch tables stored as `int table[N]`). The smoke test dispatches through a 4-entry table of unary int functions.
 
 Recent session deep dives:
+- [Session 98 — cc Phase 3 part 2: function pointers](docs/85-cc-function-pointers.md)
 - [Session 97 — cc Phase 3 part 1: structs](docs/84-cc-structs.md)
 - [Session 96 — cc Phase 2 part 6: compound operators](docs/83-cc-compound-ops.md)
 - [Session 95 — cc Phase 2 part 5: preprocessor](docs/82-cc-preprocessor.md)
@@ -130,7 +131,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 
 **Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
 
-**Path B — Self-hosting Phase 2 is complete; Phase 3 in progress.** Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Session 97 (Phase 3 part 1) added structs with `.` and `->`, struct-pointer fields for linked-list-style data, and struct-pointer function params — see [`docs/84-cc-structs.md`](docs/84-cc-structs.md).
+**Path B — Self-hosting Phase 2 is complete; Phase 3 in progress.** Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Session 97 (Phase 3 part 1) added structs with `.` and `->`, struct-pointer fields for linked-list-style data, and struct-pointer function params — see [`docs/84-cc-structs.md`](docs/84-cc-structs.md). Session 98 (Phase 3 part 2) added function pointers (no separate type syntax; just `int *fp`) with indirect calls and dispatch tables — see [`docs/85-cc-function-pointers.md`](docs/85-cc-function-pointers.md).
 
 Remaining candidate paths:
 - **Path B Phase 2+** — char/pointers/strings/globals/preprocessor in `cc`, or eventually a real `tcc` port.
