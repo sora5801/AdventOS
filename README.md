@@ -33,7 +33,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Modal editor — `vi.elf` (undo, count prefixes, search/replace, motions, modes) | ✅ |
 | Man pages — 27 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
 | Scripting — `lua` (Lua-syntax subset, int32 numbers, tree-walking interpreter) | ✅ |
-| Native compiler — `cc` (C-subset: int, char, pointers, arrays, string literals, globals, emits ELF32) | ✅ |
+| Native compiler — `cc` (C-subset: int, char, pointers, arrays, strings, globals, `printf`; emits ELF32) | ✅ |
 | ptrace-based debugger — `dbg.elf` | ✅ |
 | Multi-user with `/etc/passwd`-style login | ✅ |
 | JSON-RPC daemon (`agentd`) exposing the OS surface over loopback | ✅ |
@@ -93,9 +93,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **93 — cc Phase 2 part 3: global variables**. See [`docs/80-cc-globals.md`](docs/80-cc-globals.md) for the deep dive (file-scope int/char/pointer/array decls, single PT_LOAD covering code + strings + globals, glob_fixup table parallel to str_fixup). Globals accessible from any function via absolute-address moves.
+Current session: **94 — cc Phase 2 part 4: `printf`**. See [`docs/81-cc-printf.md`](docs/81-cc-printf.md) for the deep dive (printf as compile-time intrinsic that decomposes into helper calls, three new helpers for nonl-decimal / single-byte / hex, format-string interning during codegen). `printf("count = %d, %x\n", 42, 255)` works.
 
 Recent session deep dives:
+- [Session 94 — cc Phase 2 part 4: printf](docs/81-cc-printf.md)
 - [Session 93 — cc Phase 2 part 3: globals](docs/80-cc-globals.md)
 - [Session 92 — cc Phase 2 part 2: char + pointers + arrays](docs/79-cc-chars-pointers.md)
 - [Session 91 — cc Phase 2 part 1: string literals + puts](docs/78-cc-strings.md)
@@ -126,7 +127,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 
 **Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
 
-**Path B — Self-hosting is in progress.** Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–93 added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, and global variables; see [`docs/78-cc-strings.md`](docs/78-cc-strings.md) / [`docs/79-cc-chars-pointers.md`](docs/79-cc-chars-pointers.md) / [`docs/80-cc-globals.md`](docs/80-cc-globals.md). `my_strlen` / `my_strcpy` / module-level counters now compile and run. Remaining Phase 2 sub-sessions: `printf` (94), preprocessor (95), compound ops (96).
+**Path B — Self-hosting is in progress.** Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–94 added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, and `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`). `my_strlen` / `my_strcpy` / module-level counters / formatted output all compile and run. Remaining Phase 2 sub-sessions: preprocessor (95), compound ops (96).
 
 Remaining candidate paths:
 - **Path B Phase 2+** — char/pointers/strings/globals/preprocessor in `cc`, or eventually a real `tcc` port.

@@ -70,6 +70,18 @@ IMPLEMENTED
                    print_int(n)                decimal + newline
                    puts(s)                     string + newline   (session 91)
                    print_str(s)                string, no newline (session 91)
+                   printf(fmt_lit, ...)        formatted output   (session 94)
+
+    printf format  %d  signed decimal int
+                   %s  char* (NUL-terminated string)
+                   %c  single byte
+                   %x  lowercase hex (unsigned interpretation)
+                   %%  literal %
+                   The format string MUST be a literal — `printf(fmt, ...)`
+                   where fmt is a variable won't compile. The format is
+                   walked at compile time, and each %X expands to a
+                   call to a fixed helper function. No padding/width
+                   modifiers; no %f (no floats).
 
     Strings        "..." literals with escapes \n \t \r \0 \\ \" \'
                    Strings live in a pool appended to the code segment;
@@ -87,7 +99,10 @@ CODEGEN
     past EAX/EBX, no peephole. Produces correct but bulky code.
 
 DELIBERATELY NOT IMPLEMENTED
-    - printf-style formatted output (use puts + print_int + print_str)
+    - variadic functions in general (printf is a compile-time
+      intrinsic, not a real variadic function)
+    - %f / floating-point — no FPU support in user code
+    - width / precision modifiers in printf (e.g. %5d, %.3s)
     - preprocessor: #include, #define
     - compound assignment (+=, -=, ...)
     - ++ / --, ternary, comma operator
@@ -118,6 +133,7 @@ EXAMPLES
     Sample at /strs.c demonstrates puts / print_str / escapes.
     Sample at /chars.c demonstrates char arrays, my_strlen, my_strcpy.
     Sample at /globs.c demonstrates global int/char arrays + initializers.
+    Sample at /printf.c demonstrates %d %s %c %x %% formatting.
 
 EXIT STATUS
     0   compile succeeded

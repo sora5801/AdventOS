@@ -245,6 +245,8 @@ DATA_FILES = [
     ('chars.c',   'fs/chars.c',   None),
     # Session 93 — global-variables demo.
     ('globs.c',   'fs/globs.c',   None),
+    # Session 94 — printf demo.
+    ('printf.c',  'fs/printf.c',  None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

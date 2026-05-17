@@ -1436,6 +1436,123 @@ static void emit_syscall_intrinsic(const char *name, struct node *call) {
         e_add_esp_imm32(4);
         return;
     }
+    /* Session 94 — printf(fmt_literal, args...). Decomposed at compile
+     * time: the format string MUST be a string literal. Each %X expands
+     * into a call to the matching helper; literal text between specs
+     * is interned as a separate pool entry and printed via print_str.
+     *
+     * Specifiers: %d %s %c %x %% — anything else is a parse-error at
+     * compile time. */
+    if (my_streq(name, "printf")) {
+        if (call->n_list < 1) die_at(call->line, "printf needs at least 1 arg", 0);
+        struct node *fmt_node = call->list[0];
+        if (fmt_node->kind != N_STR)
+            die_at(call->line, "printf format must be a literal string", 0);
+        const char *fmt = &g_str_pool[g_str_offs[fmt_node->num]];
+        int arg_idx = 1;
+        char chunk[256];
+        int  chunk_n = 0;
+        /* Helper indices — all resolved up-front. */
+        int idx_str  = func_find("__print_str_helper");
+        int idx_int  = func_find("__print_int_nonl_helper");
+        int idx_char = func_find("__print_char_helper");
+        int idx_hex  = func_find("__print_hex_helper");
+        if (idx_str < 0 || idx_int < 0 || idx_char < 0 || idx_hex < 0)
+            die("printf helpers missing");
+        for (int i = 0; fmt[i]; i++) {
+            char c = fmt[i];
+            if (c != '%') {
+                if (chunk_n >= (int)sizeof(chunk) - 1) {
+                    /* Force-flush the chunk we have to keep tmp[] small. */
+                    int sidx = str_intern(chunk, chunk_n);
+                    if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many str fixups");
+                    emit_b(0xb8);
+                    int imm_off = g_code_len; emit_d(0);
+                    g_str_fixups[g_n_str_fixups].code_off = imm_off;
+                    g_str_fixups[g_n_str_fixups].str_idx  = sidx;
+                    g_n_str_fixups++;
+                    e_push_eax();
+                    int disp_off = e_call_rel32();
+                    if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+                    g_fixups[g_n_fixups].call_disp_off = disp_off;
+                    g_fixups[g_n_fixups].func_idx = idx_str;
+                    g_n_fixups++;
+                    e_add_esp_imm32(4);
+                    chunk_n = 0;
+                }
+                chunk[chunk_n++] = c;
+                continue;
+            }
+            /* Hit '%'. Flush any pending plain-text chunk first. */
+            if (chunk_n > 0) {
+                int sidx = str_intern(chunk, chunk_n);
+                if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many str fixups");
+                emit_b(0xb8);
+                int imm_off = g_code_len; emit_d(0);
+                g_str_fixups[g_n_str_fixups].code_off = imm_off;
+                g_str_fixups[g_n_str_fixups].str_idx  = sidx;
+                g_n_str_fixups++;
+                e_push_eax();
+                int disp_off = e_call_rel32();
+                if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+                g_fixups[g_n_fixups].call_disp_off = disp_off;
+                g_fixups[g_n_fixups].func_idx = idx_str;
+                g_n_fixups++;
+                e_add_esp_imm32(4);
+                chunk_n = 0;
+            }
+            char spec = fmt[++i];
+            if (spec == 0) die_at(call->line, "trailing % in printf format", 0);
+            if (spec == '%') {
+                /* Literal %. Re-add to the chunk. */
+                chunk[chunk_n++] = '%';
+                continue;
+            }
+            int helper_idx;
+            switch (spec) {
+                case 'd': helper_idx = idx_int;  break;
+                case 's': helper_idx = idx_str;  break;
+                case 'c': helper_idx = idx_char; break;
+                case 'x': helper_idx = idx_hex;  break;
+                default:
+                    die_at(call->line, "unknown printf specifier", 0);
+                    helper_idx = -1;
+            }
+            if (arg_idx >= call->n_list)
+                die_at(call->line, "not enough args for printf format", 0);
+            gen_expr(call->list[arg_idx++]);
+            e_push_eax();
+            int disp_off = e_call_rel32();
+            if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+            g_fixups[g_n_fixups].call_disp_off = disp_off;
+            g_fixups[g_n_fixups].func_idx = helper_idx;
+            g_n_fixups++;
+            e_add_esp_imm32(4);
+        }
+        /* Flush final chunk. */
+        if (chunk_n > 0) {
+            int sidx = str_intern(chunk, chunk_n);
+            if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many str fixups");
+            emit_b(0xb8);
+            int imm_off = g_code_len; emit_d(0);
+            g_str_fixups[g_n_str_fixups].code_off = imm_off;
+            g_str_fixups[g_n_str_fixups].str_idx  = sidx;
+            g_n_str_fixups++;
+            e_push_eax();
+            int disp_off = e_call_rel32();
+            if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+            g_fixups[g_n_fixups].call_disp_off = disp_off;
+            g_fixups[g_n_fixups].func_idx = idx_str;
+            g_n_fixups++;
+            e_add_esp_imm32(4);
+        }
+        if (arg_idx != call->n_list)
+            die_at(call->line, "too many args for printf format", 0);
+        /* printf returns "number of bytes printed" in real C. We just
+         * leave eax with whatever the last helper returned — caller's
+         * problem. */
+        return;
+    }
     die_at(call->line, "unknown intrinsic", name);
 }
 
@@ -1446,7 +1563,8 @@ static int is_intrinsic(const char *name) {
         || my_streq(name, "sys_getpid")
         || my_streq(name, "print_int")
         || my_streq(name, "puts")
-        || my_streq(name, "print_str");
+        || my_streq(name, "print_str")
+        || my_streq(name, "printf");        /* session 94 */
 }
 
 static void gen_call(struct node *call) {
@@ -2161,6 +2279,173 @@ static void emit_puts_helper(int idx, int print_str_idx) {
     e_ret();
 }
 
+/* Session 94 — print_int helper without the trailing newline.
+ *
+ * Same byte-shape as __print_int_helper but starts esi one position
+ * higher (ebp-12 instead of ebp-13, so there's no '\n' slot) and the
+ * loop pre-decrements esi instead of post-decrementing. Used by the
+ * printf %d expansion; the original __print_int_helper still adds a
+ * newline as `print_int(n)` users expect.
+ *
+ * Algorithm:
+ *   esi = ebp - 12              ; one past the highest buffer byte
+ *   if eax < 0: edi = 1, neg eax
+ *   if eax == 0: dec esi; write '0' at [esi]; jmp end
+ *   loop: idiv 10; dec esi; write digit at [esi]; if eax != 0 loop
+ *   if edi == 1: dec esi; write '-'
+ *   end: sys_write(1, esi, (ebp-12) - esi)
+ */
+static void emit_print_int_nonl_helper(int idx) {
+    g_funcs[idx].entry_off = g_code_len;
+    g_funcs[idx].defined   = 1;
+
+    e_push_ebp();
+    e_mov_ebp_esp();
+    e_push_ebx();
+    e_push_esi();
+    e_push_edi();
+    e_sub_esp_imm32(16);     /* 16-byte buffer */
+
+    /* lea esi, [ebp - 12]  →  8d 75 f4   (one past highest writable byte) */
+    emit_b(0x8d); emit_b(0x75); emit_b(0xf4);
+
+    e_load_local(8);
+    emit_b(0x31); emit_b(0xff);  /* xor edi, edi */
+    emit_b(0x85); emit_b(0xc0);  /* test eax, eax */
+    emit_b(0x7d); emit_b(0x07);  /* jge +7  (skip mov-edi + neg-eax) */
+    emit_b(0xbf); emit_d(1);     /* mov edi, 1 */
+    emit_b(0xf7); emit_b(0xd8);  /* neg eax */
+
+    /* Special case eax == 0: write '0' and jump past the loop. */
+    emit_b(0x85); emit_b(0xc0);  /* test eax, eax */
+    emit_b(0x75); emit_b(0x06);  /* jnz +6  (skip to loop) */
+    emit_b(0x4e);                                /* dec esi */
+    emit_b(0xc6); emit_b(0x06); emit_b(0x30);   /* mov byte [esi], '0' */
+    emit_b(0xeb); emit_b(0x12);                  /* jmp +18 to neg-sign check */
+
+    /* loop_top: */
+    emit_b(0xbb); emit_d(10);                    /* mov ebx, 10        (5) */
+    emit_b(0x99);                                 /* cdq                 (1) */
+    emit_b(0xf7); emit_b(0xfb);                   /* idiv ebx            (2) */
+    emit_b(0x80); emit_b(0xc2); emit_b(0x30);     /* add dl, '0'         (3) */
+    emit_b(0x4e);                                 /* dec esi             (1) */
+    emit_b(0x88); emit_b(0x16);                   /* mov [esi], dl       (2) */
+    emit_b(0x85); emit_b(0xc0);                   /* test eax, eax       (2) */
+    emit_b(0x75); emit_b((unsigned char)(-18 & 0xff));  /* jnz -18      (2) = 18 total */
+
+    /* If edi == 1, prepend '-'. */
+    emit_b(0x85); emit_b(0xff);  /* test edi, edi */
+    emit_b(0x74); emit_b(0x04);  /* jz +4 (skip prepend) */
+    emit_b(0x4e);                                /* dec esi */
+    emit_b(0xc6); emit_b(0x06); emit_b(0x2d);   /* mov byte [esi], '-' */
+
+    /* sys_write(fd=1, addr=esi, n=(ebp-12)-esi). */
+    emit_b(0x89); emit_b(0xf1);                  /* mov ecx, esi */
+    emit_b(0x89); emit_b(0xea);                  /* mov edx, ebp */
+    emit_b(0x29); emit_b(0xf2);                  /* sub edx, esi */
+    emit_b(0x83); emit_b(0xea); emit_b(0x0c);    /* sub edx, 12 */
+    e_mov_eax_imm(12);
+    e_mov_ebx_imm(1);
+    e_int_0x80();
+
+    e_add_esp_imm32(16);
+    e_pop_edi();
+    e_pop_esi();
+    e_pop_ebx();
+    e_mov_esp_ebp();
+    e_pop_ebp();
+    e_ret();
+}
+
+/* Session 94 — write a single byte (the low 8 bits of the arg) to fd 1.
+ * Used by printf's %c. Reuses the puts trailing-newline pattern:
+ * `push imm32; mov ecx, esp; sys_write 1 byte; add esp, 4`. */
+static void emit_print_char_helper(int idx) {
+    g_funcs[idx].entry_off = g_code_len;
+    g_funcs[idx].defined   = 1;
+    e_push_ebp();
+    e_mov_ebp_esp();
+    /* push dword [ebp+8]   →  ff 75 08   (push the arg as 4 bytes;
+     * sys_write only reads the first byte). */
+    emit_b(0xff); emit_b(0x75); emit_b(0x08);
+    emit_b(0x89); emit_b(0xe1);     /* mov ecx, esp */
+    emit_b(0xba); emit_d(1);        /* mov edx, 1 */
+    e_mov_ebx_imm(1);
+    e_mov_eax_imm(12);
+    e_int_0x80();
+    e_add_esp_imm32(4);
+    e_mov_esp_ebp();
+    e_pop_ebp();
+    e_ret();
+}
+
+/* Session 94 — print arg as lowercase hex, no padding, no newline.
+ * Treats the int as unsigned (uses `div` not `idiv`), so negative
+ * numbers display as the 8-digit two's-complement representation
+ * (e.g. -1 → "ffffffff").
+ *
+ * Same buffer/cursor pattern as __print_int_nonl_helper but with
+ * 16 as the divisor and an extra 'a'..'f' offset for the 10..15
+ * digits.
+ */
+static void emit_print_hex_helper(int idx) {
+    g_funcs[idx].entry_off = g_code_len;
+    g_funcs[idx].defined   = 1;
+    e_push_ebp();
+    e_mov_ebp_esp();
+    e_push_ebx();
+    e_push_esi();
+    e_sub_esp_imm32(16);
+
+    /* lea esi, [ebp - 8]   (one past the highest byte we'll write — we
+     * only need at most 8 hex digits for a 32-bit value; reserved 16
+     * to keep alignment same). */
+    emit_b(0x8d); emit_b(0x75); emit_b(0xf8);
+
+    e_load_local(8);     /* eax = arg */
+
+    /* Zero special-case. Loop body below is exactly 29 bytes, so we
+     * jump +29 from end-of-jmp to land at the sys_write call. */
+    emit_b(0x85); emit_b(0xc0);                   /* test eax, eax */
+    emit_b(0x75); emit_b(0x06);                   /* jnz +6 (skip to loop) */
+    emit_b(0x4e);                                  /* dec esi */
+    emit_b(0xc6); emit_b(0x06); emit_b(0x30);     /* mov byte [esi], '0' */
+    emit_b(0xeb); emit_b(0x1d);                   /* jmp +29 to write call */
+
+    /* loop_top — total 29 bytes. */
+    emit_b(0x31); emit_b(0xd2);                    /* xor edx, edx    (2) */
+    emit_b(0xbb); emit_d(16);                       /* mov ebx, 16     (5) */
+    emit_b(0xf7); emit_b(0xf3);                     /* div ebx         (2) */
+    emit_b(0x80); emit_b(0xfa); emit_b(0x0a);       /* cmp dl, 10      (3) */
+    emit_b(0x7c); emit_b(0x05);                     /* jl +5 (numeric) (2) */
+    /* alpha branch: dl = 10..15 → 'a'..'f' via add 0x57 = 'a' - 10. */
+    emit_b(0x80); emit_b(0xc2); emit_b(0x57);       /* add dl, 0x57    (3) */
+    emit_b(0xeb); emit_b(0x03);                     /* jmp +3 over numeric (2) */
+    /* numeric branch: dl = 0..9 → '0'..'9' via add 0x30. */
+    emit_b(0x80); emit_b(0xc2); emit_b(0x30);       /* add dl, '0'     (3) */
+    emit_b(0x4e);                                   /* dec esi         (1) */
+    emit_b(0x88); emit_b(0x16);                     /* mov [esi], dl   (2) */
+    emit_b(0x85); emit_b(0xc0);                     /* test eax, eax   (2) */
+    /* End of jnz at +29 from loop_top; loop_top at 0; disp = -29. */
+    emit_b(0x75); emit_b((unsigned char)(-29 & 0xff));  /* jnz -29 (2) */
+
+    /* sys_write(1, esi, (ebp-8) - esi). */
+    emit_b(0x89); emit_b(0xf1);                  /* mov ecx, esi */
+    emit_b(0x89); emit_b(0xea);                  /* mov edx, ebp */
+    emit_b(0x29); emit_b(0xf2);                  /* sub edx, esi */
+    emit_b(0x83); emit_b(0xea); emit_b(0x08);    /* sub edx, 8 */
+    e_mov_eax_imm(12);
+    e_mov_ebx_imm(1);
+    e_int_0x80();
+
+    e_add_esp_imm32(16);
+    e_pop_esi();
+    e_pop_ebx();
+    e_mov_esp_ebp();
+    e_pop_ebp();
+    e_ret();
+}
+
 /* ---------- Top-level driver -------------------------------------- */
 
 static void emit_start_stub(int main_idx) {
@@ -2357,6 +2642,16 @@ int main(int argc, char **argv) {
     emit_print_str_helper(print_str_idx);
     int puts_idx = func_intern("__puts_helper", 1);
     emit_puts_helper(puts_idx, print_str_idx);
+
+    /* Session 94 — printf helpers. The format-string dispatch happens
+     * at compile time inside emit_syscall_intrinsic, but the three
+     * extra runtime helpers must exist in the binary too. */
+    int pi_nonl_idx = func_intern("__print_int_nonl_helper", 1);
+    emit_print_int_nonl_helper(pi_nonl_idx);
+    int pchar_idx = func_intern("__print_char_helper", 1);
+    emit_print_char_helper(pchar_idx);
+    int phex_idx = func_intern("__print_hex_helper", 1);
+    emit_print_hex_helper(phex_idx);
 
     /* Generate code for every user function in source order. */
     for (int i = 0; i < prog->n_list; i++) {
