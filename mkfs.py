@@ -256,6 +256,8 @@ DATA_FILES = [
     ('structs.c', 'fs/structs.c', None),
     # Session 98 — function-pointer demo.
     ('fnptr.c',   'fs/fnptr.c',   None),
+    # Session 99 — scaled pointer arithmetic + sizeof demo.
+    ('ptrs.c',    'fs/ptrs.c',    None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

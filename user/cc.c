@@ -116,6 +116,7 @@ enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
     T_STRUCT,    /* session 97 */
+    T_SIZEOF,    /* session 99 */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -246,6 +247,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "int"))    return T_INT;
     if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
     if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
+    if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -931,6 +933,46 @@ static int binop_prec(int t) {
 static struct node *parse_primary(void) {
     struct tok_t *t = tk_cur();
     if (t->kind == T_NUM) { struct node *n = new_node(N_NUM); n->num = t->num; g_tk++; return n; }
+    if (t->kind == T_SIZEOF) {
+        /* Session 99 — sizeof(TYPE). Folded at parse time into an
+         * N_NUM. Accepted shapes:
+         *   sizeof(int)            -> 4
+         *   sizeof(char)           -> 1
+         *   sizeof(int *)          -> 4
+         *   sizeof(char *)         -> 4
+         *   sizeof(struct TAG)     -> g_structs[idx].size
+         *   sizeof(struct TAG *)   -> 4
+         * No `sizeof EXPR` form yet (would need expression type info). */
+        g_tk++;
+        expect(T_LPAREN, "'('");
+        int sz;
+        if (tk_cur()->kind == T_STRUCT) {
+            g_tk++;
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "sizeof: expected struct tag", 0);
+            int idx = struct_find(tk_cur()->name);
+            if (idx < 0)
+                die_at(tk_cur()->line, "sizeof: unknown struct", tk_cur()->name);
+            g_tk++;
+            if (accept(T_STAR)) sz = 4;
+            else                sz = g_structs[idx].size;
+        } else if (tk_cur()->kind == T_INT) {
+            g_tk++;
+            (void)accept(T_STAR);   /* int* same size as int */
+            sz = 4;
+        } else if (tk_cur()->kind == T_CHAR) {
+            g_tk++;
+            if (accept(T_STAR)) sz = 4;
+            else                sz = 1;
+        } else {
+            die_at(tk_cur()->line, "sizeof: expected type", 0);
+            sz = 0;
+        }
+        expect(T_RPAREN, "')'");
+        struct node *n = new_node(N_NUM);
+        n->num = sz;
+        return n;
+    }
     if (t->kind == T_STR) {
         /* Session 91 — string literal carries the pool index in `num`.
          * Codegen emits a placeholder `mov eax, imm32` and records a
@@ -2310,6 +2352,32 @@ static void gen_call(struct node *call) {
     if (argc > 0) e_add_esp_imm32(argc * 4);
 }
 
+/* Session 99 — returns the pointee element size if `n` is a NAME of
+ * a pointer-like kind (LK_*_PTR / LK_*_ARR / LK_STRUCT_PTR). Returns 0
+ * if `n` is an int / char / non-pointer / non-NAME. Used by N_BIN
+ * (for scaled pointer arithmetic) and N_INC_DEC (for `p++`). */
+static int expr_ptr_elem_size(struct node *n) {
+    if (!n || n->kind != N_NAME) return 0;
+    int k, sidx = -1;
+    int off = local_find(n->name);
+    if (off != 0) {
+        k = local_kind(n->name);
+        sidx = local_meta(n->name);
+    } else {
+        int gi = global_find(n->name);
+        if (gi < 0) return 0;
+        k = g_globals[gi].kind;
+        sidx = g_globals[gi].meta;
+    }
+    if (k == LK_CHAR_PTR || k == LK_CHAR_ARR) return 1;
+    if (k == LK_INT_PTR  || k == LK_INT_ARR)  return 4;
+    if (k == LK_STRUCT_PTR) {
+        if (sidx >= 0 && sidx < g_n_structs) return g_structs[sidx].size;
+        return 4;
+    }
+    return 0;
+}
+
 static void gen_expr(struct node *n) {
     if (!n) { e_mov_eax_imm(0); return; }
     switch (n->kind) {
@@ -2481,7 +2549,12 @@ static void gen_expr(struct node *n) {
         case N_CALL: gen_call(n); return;
         case N_INC_DEC: {
             /* Session 96 — ++x / --x / x++ / x--. Restriction: target
-             * is a NAME (local or global), int-sized.
+             * is a NAME (local or global).
+             *
+             * Session 99 — scaled for pointers: `int *p; p++` advances
+             * by 4, not 1. For non-pointer kinds we still emit the
+             * 1-byte inc/dec eax. Pointer kinds get a 3-byte
+             * add eax, imm8 (or sub).
              *
              *   prefix:  x += d; result = x
              *   postfix: save_old = x; x += d; result = save_old
@@ -2492,23 +2565,41 @@ static void gen_expr(struct node *n) {
             if (off == 0 && gi < 0)
                 die_at(n->line, "++/-- of undefined", n->name);
             int is_local = (off != 0);
-            int delta_byte = (n->op == T_INC) ? 0x40 : 0x48;  /* inc/dec eax */
+
+            /* Pick the delta. For pointer-like kinds, use the pointee
+             * size; otherwise 1. */
+            int k    = is_local ? local_kind(n->name) : g_globals[gi].kind;
+            int meta = is_local ? local_meta(n->name) : g_globals[gi].meta;
+            int delta = 1;
+            if (k == LK_INT_PTR || k == LK_INT_ARR) delta = 4;
+            else if (k == LK_STRUCT_PTR) {
+                if (meta >= 0 && meta < g_n_structs) delta = g_structs[meta].size;
+                if (delta <= 0) delta = 4;
+            }
+            /* (char* / char[] stay at delta=1; int-scalar stays at 1.) */
+
             /* Load current value. */
             if (is_local) e_load_local(off);
             else          emit_load_global(gi);
-            if (n->num) {
-                /* Prefix: modify, store, result = new value (already in eax). */
-                emit_b((unsigned char)delta_byte);
-                if (is_local) e_store_local(off);
-                else          emit_store_global(gi);
+
+            /* Modify and store. The "modify" depends on (op, delta):
+             *   op=T_INC, delta=1: inc eax    (1 byte, 0x40)
+             *   op=T_DEC, delta=1: dec eax    (1 byte, 0x48)
+             *   op=T_INC, delta!=1: add eax, imm8  (83 c0 imm8)
+             *   op=T_DEC, delta!=1: sub eax, imm8  (83 e8 imm8)
+             * imm8 fits if delta <= 127, which covers every struct we'd
+             * realistically see. */
+            if (n->num == 0) e_push_eax();  /* postfix saves old */
+            if (delta == 1) {
+                emit_b((unsigned char)((n->op == T_INC) ? 0x40 : 0x48));
             } else {
-                /* Postfix: save old, modify, store, result = old. */
-                e_push_eax();
-                emit_b((unsigned char)delta_byte);
-                if (is_local) e_store_local(off);
-                else          emit_store_global(gi);
-                e_pop_eax();
+                emit_b(0x83);
+                emit_b((unsigned char)((n->op == T_INC) ? 0xc0 : 0xe8));
+                emit_b((unsigned char)(delta & 0xff));
             }
+            if (is_local) e_store_local(off);
+            else          emit_store_global(gi);
+            if (n->num == 0) e_pop_eax();   /* postfix restores old */
             return;
         }
         case N_TERNARY: {
@@ -2535,6 +2626,49 @@ static void gen_expr(struct node *n) {
             return;
         }
         case N_BIN: {
+            /* Session 99 — scaled pointer arithmetic.
+             *
+             * For `p + n` / `n + p` / `p - n` where p is a pointer-kind
+             * variable (int*, char*, struct*, array), scale n by the
+             * pointee's size before combining. The scaling matches what
+             * real C does: `int *p; p+1` advances by 4 bytes, not 1.
+             *
+             * Pointer-minus-pointer (p - p) intentionally falls through
+             * unchanged — that's a raw byte distance, the user is
+             * responsible for dividing by sizeof(*p) if they want
+             * element distance.
+             *
+             * Only NAME operands are inspected for pointer-ness. Other
+             * expressions (e.g. `(p + 1) + 1`) aren't recognized and
+             * fall through to integer arithmetic. Documented limit. */
+            if (n->op == T_PLUS || n->op == T_MINUS) {
+                int ea = expr_ptr_elem_size(n->a);
+                int eb = expr_ptr_elem_size(n->b);
+                struct node *ptr_node = 0;
+                struct node *idx_node = 0;
+                int elem = 0;
+                if (ea > 0 && eb == 0) {
+                    ptr_node = n->a; idx_node = n->b; elem = ea;
+                } else if (eb > 0 && ea == 0 && n->op == T_PLUS) {
+                    /* n + p — only legal for +. */
+                    ptr_node = n->b; idx_node = n->a; elem = eb;
+                }
+                if (elem > 1) {
+                    gen_expr(idx_node);
+                    if (elem == 4) {
+                        e_shl_eax_imm8(2);
+                    } else {
+                        e_mov_ebx_imm(elem);
+                        e_imul_eax_ebx();
+                    }
+                    e_push_eax();
+                    gen_expr(ptr_node);
+                    e_pop_ebx();
+                    if (n->op == T_PLUS) e_add_eax_ebx();
+                    else                 e_sub_eax_ebx();
+                    return;
+                }
+            }
             /* Short-circuit && and ||. */
             if (n->op == T_AMP_AMP) {
                 gen_expr(n->a);

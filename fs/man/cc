@@ -38,6 +38,9 @@ IMPLEMENTED
                    += -= *= /= %=   compound assignment           (session 96)
                    ++name --name    prefix increment/decrement    (session 96)
                    name++ name--    postfix increment/decrement   (session 96)
+                   sizeof(TYPE)     compile-time size constant    (session 99)
+                   For pointer-typed names, +/- scales by sizeof(*p)
+                   and ++/-- advances by sizeof(*p) — same as real C.
                    Assignment is a statement, not an expression.
 
     Statements     int x;  int x = expr;       local declaration
@@ -156,7 +159,7 @@ DELIBERATELY NOT IMPLEMENTED
     - struct value assignment (use field-by-field)
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
-    - sizeof
+    - sizeof on an expression (only sizeof(TYPE) is supported)
     - union / enum / typedef
     - declared function-pointer types `int (*fp)(int)` syntax
       (function pointers exist; you just spell them `int *fp`)
@@ -202,6 +205,8 @@ EXAMPLES
     walk via struct node { int val; struct node *next; }.
     Sample at /fnptr.c demonstrates function pointers, indirect call,
     callback args, and a global dispatch table.
+    Sample at /ptrs.c demonstrates sizeof and scaled pointer arith
+    (int *p; p++ advances 4 bytes; *(p+i) for arbitrary offsets).
 
 EXIT STATUS
     0   compile succeeded
