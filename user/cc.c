@@ -113,7 +113,7 @@ static void die_at(int line, const char *what, const char *detail) {
 /* ---------- Lexer ------------------------------------------------- */
 
 enum {
-    T_END = 0, T_NUM, T_NAME,
+    T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -141,6 +141,53 @@ struct tok_t {
 static struct tok_t g_toks[MAX_TOKS];
 static int          g_n_toks;
 static int          g_tk;
+
+/* Session 91 — string pool.
+ *
+ * String literals from the source are interned into g_str_pool with
+ * NUL terminators in order. Each entry's start offset is recorded in
+ * g_str_offs. A T_STR token's `num` field is the string index (into
+ * g_str_offs), not a raw offset, because the pool's final base VA is
+ * not known until codegen finishes. Codegen for N_STR emits a
+ * `mov eax, imm32` placeholder and records a g_str_fixup so the imm
+ * can be patched once all code has been emitted and we know where
+ * the pool will live in the binary. */
+#define STR_POOL_MAX 4096
+#define MAX_STRS     256
+#define MAX_STR_FIXUPS 256
+static char g_str_pool[STR_POOL_MAX];
+static int  g_str_pool_len;
+static int  g_str_offs[MAX_STRS];
+static int  g_n_strs;
+struct str_fixup {
+    int code_off;   /* file offset of the 4-byte imm32 to patch */
+    int str_idx;    /* g_str_offs index */
+};
+static struct str_fixup g_str_fixups[MAX_STR_FIXUPS];
+static int              g_n_str_fixups;
+static int              g_str_pool_base_va;   /* set during finalization */
+
+/* Intern a (potentially un-terminated) source-side string. Returns
+ * the index into g_str_offs. Re-uses an existing entry if the
+ * payload is byte-identical (cheap to do because of NUL terminators).
+ * The pool keeps each string NUL-terminated so codegen can hand the
+ * address to sys_write + strlen-style helpers directly. */
+static int str_intern(const char *src, int len) {
+    /* dedupe pass */
+    for (int i = 0; i < g_n_strs; i++) {
+        const char *p = &g_str_pool[g_str_offs[i]];
+        int j = 0;
+        while (j < len && p[j] && p[j] == src[j]) j++;
+        if (j == len && p[j] == 0) return i;
+    }
+    if (g_n_strs >= MAX_STRS) die("too many string literals");
+    if (g_str_pool_len + len + 1 > STR_POOL_MAX) die("string pool overflow");
+    int off = g_str_pool_len;
+    for (int j = 0; j < len; j++) g_str_pool[g_str_pool_len++] = src[j];
+    g_str_pool[g_str_pool_len++] = 0;
+    g_str_offs[g_n_strs] = off;
+    return g_n_strs++;
+}
 
 static const char *g_src;
 static int         g_src_len;
@@ -194,6 +241,42 @@ static void lex_all(const char *src, int len) {
                 g_pos++;
             }
             g_pos += 2;
+            continue;
+        }
+        /* String literals — "..." with the usual escapes. The decoded
+         * bytes get NUL-terminated and interned in g_str_pool; the
+         * resulting index is stored in the token's `num` field.
+         * Session 91. */
+        if (c == '"') {
+            g_pos++;     /* skip opening quote */
+            char tmp[256];
+            int  tn = 0;
+            while (g_pos < g_src_len && g_src[g_pos] != '"') {
+                if (tn >= (int)sizeof(tmp) - 1)
+                    die_at(g_line, "string literal too long (max 255)", 0);
+                char ch = g_src[g_pos++];
+                if (ch == '\\' && g_pos < g_src_len) {
+                    char esc = g_src[g_pos++];
+                    switch (esc) {
+                        case 'n':  ch = '\n'; break;
+                        case 't':  ch = '\t'; break;
+                        case 'r':  ch = '\r'; break;
+                        case '0':  ch = '\0'; break;
+                        case '\\': ch = '\\'; break;
+                        case '"':  ch = '"';  break;
+                        case '\'': ch = '\''; break;
+                        default:
+                            die_at(g_line, "unknown escape in string", 0);
+                    }
+                }
+                if (ch == '\n') g_line++;
+                tmp[tn++] = ch;
+            }
+            if (g_pos >= g_src_len) die_at(g_line, "unterminated string", 0);
+            g_pos++;     /* skip closing quote */
+            int sidx = str_intern(tmp, tn);
+            push_tok(T_STR, g_line);
+            g_toks[g_n_toks - 1].num = sidx;
             continue;
         }
         /* Numbers — decimal only. */
@@ -294,7 +377,7 @@ static void expect(int k, const char *what) {
 /* ---------- AST --------------------------------------------------- */
 
 enum {
-    N_NUM, N_NAME,
+    N_NUM, N_NAME, N_STR,
     N_BIN, N_UN, N_CALL,
     N_VAR_DECL,   /* int NAME [= expr]; */
     N_ASSIGN,     /* NAME = expr;       */
@@ -373,6 +456,15 @@ static int binop_prec(int t) {
 static struct node *parse_primary(void) {
     struct tok_t *t = tk_cur();
     if (t->kind == T_NUM) { struct node *n = new_node(N_NUM); n->num = t->num; g_tk++; return n; }
+    if (t->kind == T_STR) {
+        /* Session 91 — string literal carries the pool index in `num`.
+         * Codegen emits a placeholder `mov eax, imm32` and records a
+         * fixup so the imm gets patched once the pool base VA is known. */
+        struct node *n = new_node(N_STR);
+        n->num = t->num;
+        g_tk++;
+        return n;
+    }
     if (t->kind == T_NAME) {
         struct node *n = new_node(N_NAME);
         int i = 0;
@@ -840,6 +932,24 @@ static void emit_syscall_intrinsic(const char *name, struct node *call) {
         e_add_esp_imm32(4);
         return;
     }
+    /* Session 91 — puts(s) / print_str(s). Both take 1 arg (char*) and
+     * trampoline into a fixed helper. */
+    if (my_streq(name, "puts") || my_streq(name, "print_str")) {
+        if (call->n_list != 1) die_at(call->line, "puts/print_str takes 1 arg", 0);
+        gen_expr(call->list[0]);
+        e_push_eax();
+        const char *helper = my_streq(name, "puts")
+            ? "__puts_helper" : "__print_str_helper";
+        int idx = func_find(helper);
+        if (idx < 0) die("puts/print_str helper missing");
+        int disp_off = e_call_rel32();
+        if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+        g_fixups[g_n_fixups].call_disp_off = disp_off;
+        g_fixups[g_n_fixups].func_idx = idx;
+        g_n_fixups++;
+        e_add_esp_imm32(4);
+        return;
+    }
     die_at(call->line, "unknown intrinsic", name);
 }
 
@@ -848,7 +958,9 @@ static int is_intrinsic(const char *name) {
     return my_streq(name, "sys_exit")
         || my_streq(name, "sys_write")
         || my_streq(name, "sys_getpid")
-        || my_streq(name, "print_int");
+        || my_streq(name, "print_int")
+        || my_streq(name, "puts")
+        || my_streq(name, "print_str");
 }
 
 static void gen_call(struct node *call) {
@@ -876,6 +988,19 @@ static void gen_expr(struct node *n) {
     if (!n) { e_mov_eax_imm(0); return; }
     switch (n->kind) {
         case N_NUM: e_mov_eax_imm(n->num); return;
+        case N_STR: {
+            /* Session 91 — emit `mov eax, 0` as a 5-byte placeholder
+             * and record a fixup to patch the imm32 with the string's
+             * final VA once the pool base is known. */
+            if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many string fixups");
+            emit_b(0xb8);
+            int imm_off = g_code_len;
+            emit_d(0);
+            g_str_fixups[g_n_str_fixups].code_off = imm_off;
+            g_str_fixups[g_n_str_fixups].str_idx  = n->num;
+            g_n_str_fixups++;
+            return;
+        }
         case N_NAME: {
             int off = local_find(n->name);
             if (off == 0) die_at(n->line, "undefined variable", n->name);
@@ -1259,6 +1384,120 @@ static void emit_print_int_helper(int idx) {
     e_ret();
 }
 
+/* Session 91 — print_str helper. One arg: a char* (NUL-terminated).
+ * Computes strlen inline, calls sys_write(1, ptr, len). No newline.
+ *
+ * Layout:
+ *   push ebp; mov ebp, esp        ; standard prologue
+ *   push ebx                       ; we clobber ebx for sys_write
+ *   mov ecx, [ebp+8]               ; ecx = ptr (also the sys_write addr)
+ *   xor edx, edx                   ; edx = scan index / final length
+ *   .loop:
+ *     cmp byte [ecx + edx], 0
+ *     je .done
+ *     inc edx
+ *     jmp .loop
+ *   .done:
+ *   mov ebx, 1                     ; stdout
+ *   mov eax, 12                    ; SYS_WRITE_FD
+ *   int 0x80
+ *   pop ebx                        ; restore
+ *   pop ebp
+ *   ret
+ *
+ * Note: print_str is also used internally by the `puts` helper,
+ * which adds a trailing newline write afterward. */
+static void emit_print_str_helper(int idx) {
+    g_funcs[idx].entry_off = g_code_len;
+    g_funcs[idx].defined   = 1;
+
+    e_push_ebp();
+    e_mov_ebp_esp();
+    e_push_ebx();
+    /* mov ecx, [ebp+8]   →  8b 4d 08 */
+    emit_b(0x8b); emit_b(0x4d); emit_b(0x08);
+    /* xor edx, edx       →  31 d2 */
+    emit_b(0x31); emit_b(0xd2);
+
+    /* .loop: */
+    int loop_top = g_code_len;
+    /* cmp byte [ecx + edx], 0   →  80 3c 11 00 (modrm 00.111.100 + sib 00.010.001) */
+    emit_b(0x80); emit_b(0x3c); emit_b(0x11); emit_b(0x00);
+    /* je .done — forward jump, patched after we know the offset.
+     * Use rel8: 74 imm8. */
+    emit_b(0x74);
+    int je_off = g_code_len;
+    emit_b(0);     /* placeholder disp8 */
+    /* inc edx  →  42 */
+    emit_b(0x42);
+    /* jmp .loop (rel8 backward) */
+    emit_b(0xeb);
+    int jmp_disp = loop_top - (g_code_len + 1);
+    emit_b((unsigned char)(jmp_disp & 0xff));
+
+    /* .done: */
+    int done = g_code_len;
+    /* patch je: distance from byte AFTER je's imm8 (= je_off+1) to .done */
+    g_code[je_off] = (unsigned char)((done - (je_off + 1)) & 0xff);
+
+    /* mov ebx, 1; mov eax, 12; int 0x80 */
+    e_mov_ebx_imm(1);
+    e_mov_eax_imm(12);
+    e_int_0x80();
+
+    /* Epilogue. */
+    e_pop_ebx();
+    e_mov_esp_ebp();
+    e_pop_ebp();
+    e_ret();
+}
+
+/* Session 91 — puts helper. Calls print_str, then writes "\n" to fd 1.
+ * Single arg: char* ptr. The trailing-newline write reuses a one-byte
+ * scratch slot built from `push 10; mov ecx, esp; …; add esp, 4`. */
+static void emit_puts_helper(int idx, int print_str_idx) {
+    g_funcs[idx].entry_off = g_code_len;
+    g_funcs[idx].defined   = 1;
+
+    e_push_ebp();
+    e_mov_ebp_esp();
+
+    /* Forward the arg to print_str. */
+    /* push [ebp+8]   →  ff 75 08 */
+    emit_b(0xff); emit_b(0x75); emit_b(0x08);
+    /* call print_str — rel32 with fixup. */
+    int disp_off = e_call_rel32();
+    if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+    g_fixups[g_n_fixups].call_disp_off = disp_off;
+    g_fixups[g_n_fixups].func_idx = print_str_idx;
+    g_n_fixups++;
+    /* Pop the arg we pushed (cdecl caller-cleanup). */
+    e_add_esp_imm32(4);
+
+    /* Now emit a 1-byte '\n' on the stack and sys_write it.
+     *   push 10            6a 0a       (push imm8 sign-extended to 32)
+     *   mov ecx, esp       89 e1
+     *   mov edx, 1         ba 01 00 00 00
+     *   mov ebx, 1         bb 01 00 00 00
+     *   mov eax, 12        b8 0c 00 00 00
+     *   int 0x80           cd 80
+     *   add esp, 4         (drop the pushed value)
+     */
+    emit_b(0x6a); emit_b(0x0a);
+    emit_b(0x89); emit_b(0xe1);
+    /* mov edx, 1 — use the existing e_mov_edx_imm... wait we removed it
+     * in session 90's cleanup. Inline the encoding. */
+    emit_b(0xba); emit_d(1);
+    e_mov_ebx_imm(1);
+    e_mov_eax_imm(12);
+    e_int_0x80();
+    e_add_esp_imm32(4);
+
+    e_mov_esp_ebp();
+    e_pop_ebp();
+    e_ret();
+}
+
 /* ---------- Top-level driver -------------------------------------- */
 
 static void emit_start_stub(int main_idx) {
@@ -1448,6 +1687,14 @@ int main(int argc, char **argv) {
     int helper_idx = func_intern("__print_int_helper", 0);
     emit_print_int_helper(helper_idx);
 
+    /* Session 91 — also reserve puts / print_str helpers (1 arg each).
+     * puts is layered on top of print_str (it forwards then writes '\n'),
+     * so print_str must be emitted FIRST. */
+    int print_str_idx = func_intern("__print_str_helper", 1);
+    emit_print_str_helper(print_str_idx);
+    int puts_idx = func_intern("__puts_helper", 1);
+    emit_puts_helper(puts_idx, print_str_idx);
+
     /* Generate code for every user function in source order. */
     for (int i = 0; i < prog->n_list; i++) {
         gen_func(prog->list[i]);
@@ -1457,6 +1704,20 @@ int main(int argc, char **argv) {
     if (!g_funcs[main_idx].defined) die("'main' function not found");
 
     resolve_fixups();
+
+    /* Session 91 — append the string pool right after the last code
+     * byte (no padding). Each string's VA is ENTRY_VA + (its offset
+     * in the final code+strings image). Patch every N_STR fixup. */
+    int pool_start_off = g_code_len;
+    g_str_pool_base_va = ENTRY_VA + pool_start_off;
+    if (g_str_pool_len + g_code_len > CODE_MAX)
+        die("code+strings would exceed CODE_MAX");
+    for (int i = 0; i < g_str_pool_len; i++) g_code[g_code_len++] = g_str_pool[i];
+    for (int i = 0; i < g_n_str_fixups; i++) {
+        int sidx = g_str_fixups[i].str_idx;
+        unsigned int va = (unsigned int)g_str_pool_base_va + (unsigned int)g_str_offs[sidx];
+        patch_d(g_str_fixups[i].code_off, va);
+    }
 
     if (write_elf(out_path, g_code_len) < 0) return 1;
 

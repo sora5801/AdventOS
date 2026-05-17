@@ -44,6 +44,13 @@ IMPLEMENTED
                    sys_write(fd, addr, n)      syscall 12
                    sys_getpid()                syscall 2
                    print_int(n)                decimal + newline
+                   puts(s)                     string + newline   (session 91)
+                   print_str(s)                string, no newline (session 91)
+
+    Strings        "..." literals with escapes \n \t \r \0 \\ \" \'
+                   Strings live in a pool appended to the code segment;
+                   identical literals are deduplicated. Pool cap is 4 KiB
+                   per program; up to 256 distinct literals.
 
 CODEGEN
     Stack-based, EAX-as-result. Every expression computes its result
@@ -57,7 +64,7 @@ CODEGEN
 
 DELIBERATELY NOT IMPLEMENTED
     - char / pointer / array types
-    - string literals (no way to printf "hello world" yet)
+    - printf-style formatted output (use puts + print_int instead)
     - global variables
     - preprocessor: #include, #define
     - compound assignment (+=, -=, ...)
@@ -77,7 +84,14 @@ EXAMPLES
       }
       int main() { print_int(fact(10)); return 0; }
 
+    Hello world (session 91):
+      int main() {
+          puts("hello, world");
+          return 0;
+      }
+
     Sample at /hello.c demonstrates fact / sum / gcd.
+    Sample at /strs.c demonstrates puts / print_str / escapes.
 
 EXIT STATUS
     0   compile succeeded

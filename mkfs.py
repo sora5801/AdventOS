@@ -239,6 +239,8 @@ DATA_FILES = [
     ('hello.lua', 'fs/hello.lua', None),
     # Session 90 — sample C source for the cc compiler.
     ('hello.c',   'fs/hello.c',   None),
+    # Session 91 — string-literals demo.
+    ('strs.c',    'fs/strs.c',    None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
