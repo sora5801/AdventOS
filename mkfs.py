@@ -252,6 +252,8 @@ DATA_FILES = [
     ('colors.h',  'fs/colors.h',  None),
     # Session 96 — compound operators demo.
     ('ops.c',     'fs/ops.c',     None),
+    # Session 97 — struct demo.
+    ('structs.c', 'fs/structs.c', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

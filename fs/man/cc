@@ -58,10 +58,24 @@ IMPLEMENTED
                    { stmts }                    block
 
     Functions      int NAME(int p1, int p2, ...) { body }
-                   Params may be int, char, int*, or char*.
-                   (session 92)
+                   Params may be int, char, int*, char*, or
+                   struct T * (session 92, 97).
                    Forward references work — codegen patches
                    call sites after parsing.
+
+    Structs        struct TAG { int x; char *s; struct TAG *next; };
+                                                 (session 97)
+                   struct TAG var;               struct value (local/global)
+                   struct TAG *p;                pointer to struct
+                   var.field = expr;             member assign
+                   p->field   = expr;            arrow assign
+                   var.field, p->field           member reads (rvalue)
+                   &var                          address-of (yields T*)
+                   Restrictions: every field is 4-byte (no byte-packed
+                   char fields yet); struct typed fields must be
+                   pointers (no nested struct values); only forward
+                   references via pointers; no struct-by-value in
+                   function params or returns.
 
     Preprocessor   #define NAME body        single-line object macros
                    #undef  NAME             remove a macro
@@ -129,7 +143,12 @@ DELIBERATELY NOT IMPLEMENTED
     - ++/-- on arr[i], *p, or expressions (NAME only)
     - assignment as an expression (a = b is a statement)
     - comma operator
-    - struct / union / enum / typedef
+    - struct value passing/returning (use pointers)
+    - struct value assignment (use field-by-field)
+    - char-sized struct fields (every field is 4 bytes)
+    - struct nesting (only struct *T is allowed as a field type)
+    - sizeof
+    - union / enum / typedef
     - function pointers
     - multi-file compilation (linker)
     - compound assignment (+=, -=, ...)
@@ -165,6 +184,8 @@ EXAMPLES
     Sample at /prep.c + /colors.h demonstrates #include + #define +
     #ifdef + #ifndef + #else + #endif + #undef.
     Sample at /ops.c demonstrates += -= *= /= %= ++ -- and ternary.
+    Sample at /structs.c demonstrates struct point + a linked-list
+    walk via struct node { int val; struct node *next; }.
 
 EXIT STATUS
     0   compile succeeded

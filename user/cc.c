@@ -115,6 +115,7 @@ static void die_at(int line, const char *what, const char *detail) {
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
+    T_STRUCT,    /* session 97 */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -126,6 +127,8 @@ enum {
     T_PLUS_EQ, T_MINUS_EQ, T_STAR_EQ, T_SLASH_EQ, T_PERCENT_EQ,
     T_INC, T_DEC,
     T_QUESTION, T_COLON,
+    /* Session 97 — struct member access. */
+    T_DOT, T_ARROW,
 };
 
 #define NAME_MAX 24
@@ -192,6 +195,7 @@ struct global_info {
     int  offset;     /* byte offset within g_data_pool */
     int  size;       /* bytes reserved (padded to 4) */
     int  kind;       /* LK_* */
+    int  meta;       /* struct_idx for LK_STRUCT/LK_STRUCT_PTR (s97) */
 };
 static struct global_info g_globals[MAX_GLOBALS];
 static int                g_n_globals;
@@ -241,6 +245,7 @@ static int is_digit(char c)    { return c >= '0' && c <= '9'; }
 static int kw_lookup(const char *s) {
     if (my_streq(s, "int"))    return T_INT;
     if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
+    if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -672,8 +677,11 @@ static void lex_all(const char *src, int len) {
                     push_tok(T_DEC, g_line); g_pos += 2;
                 } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_MINUS_EQ, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '>') {
+                    push_tok(T_ARROW, g_line); g_pos += 2;
                 } else { push_tok(T_MINUS, g_line); g_pos++; }
                 break;
+            case '.': push_tok(T_DOT, g_line); g_pos++; break;
             case '*':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_STAR_EQ, g_line); g_pos += 2;
@@ -760,11 +768,13 @@ static void expect(int k, const char *what) {
  * because that's what affects load/store size and `a[i]` scaling.
  * Same for params. */
 enum {
-    LK_INT       = 0,   /* int x */
-    LK_INT_PTR   = 1,   /* int *p (4-byte loads/stores via *p, scale i by 4) */
-    LK_CHAR_PTR  = 2,   /* char *p (1-byte loads/stores via *p, scale i by 1) */
-    LK_INT_ARR   = 3,   /* int x[N]  — name yields &x[0] (an int*) */
-    LK_CHAR_ARR  = 4,   /* char x[N] — name yields &x[0] (a  char*) */
+    LK_INT        = 0,   /* int x */
+    LK_INT_PTR    = 1,   /* int *p (4-byte loads/stores via *p, scale i by 4) */
+    LK_CHAR_PTR   = 2,   /* char *p (1-byte loads/stores via *p, scale i by 1) */
+    LK_INT_ARR    = 3,   /* int x[N]  — name yields &x[0] (an int*) */
+    LK_CHAR_ARR   = 4,   /* char x[N] — name yields &x[0] (a  char*) */
+    LK_STRUCT     = 5,   /* struct T x  — session 97. struct_idx in `meta`. */
+    LK_STRUCT_PTR = 6,   /* struct T *p — session 97. struct_idx in `meta`. */
 };
 
 /* Forward decls — these are referenced from the parser but defined in
@@ -774,18 +784,70 @@ static int  kind_is_pointerlike(int k);
 static int  kind_elem_size(int k);
 static int  global_declare(const char *name, int size, int kind);
 static int  global_find(const char *name);
+/* Session 97 — struct helpers. */
+static int  global_declare_struct(const char *name, int size, int kind, int meta);
+
+/* Session 97 — struct registry. Each struct type has a name, a list
+ * of fields (with offsets and kinds), and a total size. Field kinds
+ * may be LK_INT, LK_CHAR_PTR, LK_INT_PTR, or LK_STRUCT_PTR (for
+ * linked-list-style structs). Char fields stored as int-sized slots
+ * for simplicity — no field-level byte packing. Defined here (before
+ * the parser uses it) but the table's local_slot.meta companion lives
+ * down in the codegen-helpers section.
+ *
+ * The registry is *parse-time* state; the codegen doesn't allocate
+ * runtime struct descriptors. Struct types are entirely compile-time;
+ * runtime sees just N bytes of memory at the right offsets. */
+#define MAX_STRUCTS    32
+#define MAX_FIELDS     16
+struct field_info {
+    char name[NAME_MAX];
+    int  offset;
+    int  size;        /* always 4 for now (field-aligned) */
+    int  kind;        /* LK_* */
+    int  meta;        /* for LK_STRUCT_PTR fields: target struct_idx */
+};
+struct struct_info {
+    char name[NAME_MAX];
+    struct field_info fields[MAX_FIELDS];
+    int  n_fields;
+    int  size;        /* total bytes (== n_fields * 4 currently) */
+    int  defined;     /* 0 = forward-declared only */
+};
+static struct struct_info g_structs[MAX_STRUCTS];
+static int                g_n_structs;
+
+static int struct_find(const char *name) {
+    for (int i = 0; i < g_n_structs; i++) {
+        if (my_streq(g_structs[i].name, name)) return i;
+    }
+    return -1;
+}
+
+static int struct_field_find(int sidx, const char *fname) {
+    if (sidx < 0 || sidx >= g_n_structs) return -1;
+    for (int i = 0; i < g_structs[sidx].n_fields; i++) {
+        if (my_streq(g_structs[sidx].fields[i].name, fname)) return i;
+    }
+    return -1;
+}
 
 enum {
     N_NUM, N_NAME, N_STR,
     N_BIN, N_UN, N_CALL,
     N_VAR_DECL,   /* TYPE NAME [= expr]; */
     N_ARR_DECL,   /* TYPE NAME[N];      session 92 */
+    N_STRUCT_DECL,/* struct T NAME;     session 97 */
     N_ASSIGN,     /* NAME = expr;       */
     N_DEREF,      /* *expr              session 92 — unary */
     N_ADDR_OF,    /* &NAME              session 92 — unary */
     N_INDEX,      /* base[idx]          session 92 — binary, op=elem_size */
+    N_MEMBER,     /* NAME.field         session 97 — name=base, n->name2-ish stored elsewhere */
+    N_ARROW,      /* NAME->field        session 97 */
     N_DEREF_ASSIGN,    /* *p   = expr;  session 92 — store thru pointer */
     N_INDEX_ASSIGN,    /* a[i] = expr;  session 92 */
+    N_MEMBER_ASSIGN,   /* NAME.field = expr;  session 97 */
+    N_ARROW_ASSIGN,    /* NAME->field = expr; session 97 */
     /* Session 96 — compound operators. */
     N_COMPOUND_ASSIGN, /* NAME op= expr;  op stored in n->op (T_PLUS,
                         * T_MINUS, T_STAR, T_SLASH, T_PERCENT) */
@@ -807,6 +869,7 @@ struct node {
     int            op;
     int            num;
     char           name[NAME_MAX];
+    char           field_name[NAME_MAX];  /* session 97 — for N_MEMBER/N_ARROW */
     struct node   *a, *b, *c;
     struct node  **list;
     int            n_list;
@@ -822,6 +885,7 @@ static struct node *new_node(int kind) {
     n->op   = 0;
     n->num  = 0;
     n->name[0] = 0;
+    n->field_name[0] = 0;
     n->a = n->b = n->c = 0;
     n->list = 0; n->n_list = 0;
     n->params = 0; n->n_params = 0;
@@ -923,6 +987,23 @@ static struct node *parse_primary(void) {
             id->op  = op;
             id->num = 0;    /* 0 = postfix */
             return id;
+        }
+        /* Session 97 — postfix `NAME.field` and `NAME->field` as rvalues.
+         * The store-side cases are handled separately in parse_stmt. */
+        if (tk_cur()->kind == T_DOT || tk_cur()->kind == T_ARROW) {
+            int is_arrow = (tk_cur()->kind == T_ARROW);
+            g_tk++;
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected field name after . or ->", 0);
+            struct node *m = new_node(is_arrow ? N_ARROW : N_MEMBER);
+            int k = 0;
+            while (n->name[k]) { m->name[k] = n->name[k]; k++; }
+            m->name[k] = 0;
+            int f = 0;
+            while (tk_cur()->name[f]) { m->field_name[f] = tk_cur()->name[f]; f++; }
+            m->field_name[f] = 0;
+            g_tk++;
+            return m;
         }
         return n;
     }
@@ -1036,6 +1117,36 @@ static struct node *parse_block(void) {
 
 static struct node *parse_stmt(void) {
     int t = tk_cur()->kind;
+    /* Session 97 — local struct declarations.
+     *   struct TAG NAME;        a struct value
+     *   struct TAG *NAME;       a pointer to a struct
+     *   No initializer support (would need brace-init parsing).
+     *   No array-of-struct (e.g. `struct point p[8];`) yet. */
+    if (t == T_STRUCT) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected struct tag", 0);
+        char tag[NAME_MAX];
+        int ti = 0;
+        while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
+        tag[ti] = 0;
+        g_tk++;
+        int sidx = struct_find(tag);
+        if (sidx < 0)
+            die_at(tk_cur()->line, "undefined struct", tag);
+        int is_ptr = accept(T_STAR);
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected variable name", 0);
+        struct node *n = new_node(N_STRUCT_DECL);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;
+        n->op  = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
+        n->num = sidx;
+        expect(T_SEMI, "';'");
+        return n;
+    }
     if (t == T_INT || t == T_CHAR) {
         /* Local declaration. Accepted shapes (session 92):
          *   int  NAME [= expr];           kind = LK_INT
@@ -1155,6 +1266,25 @@ static struct node *parse_stmt(void) {
         expect(T_SEMI, "';'");
         return n;
     }
+    /* Session 97 — `NAME.field = expr;` and `NAME->field = expr;`. */
+    if (t == T_NAME && (tk_peek(1)->kind == T_DOT || tk_peek(1)->kind == T_ARROW)
+        && tk_peek(2)->kind == T_NAME && tk_peek(3)->kind == T_ASSIGN) {
+        int is_arrow = (tk_peek(1)->kind == T_ARROW);
+        struct node *n = new_node(is_arrow ? N_ARROW_ASSIGN : N_MEMBER_ASSIGN);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;     /* skip name */
+        g_tk++;     /* skip . or -> */
+        int f = 0;
+        while (tk_cur()->name[f]) { n->field_name[f] = tk_cur()->name[f]; f++; }
+        n->field_name[f] = 0;
+        g_tk++;     /* skip field */
+        g_tk++;     /* skip = */
+        n->a = parse_expr();
+        expect(T_SEMI, "';'");
+        return n;
+    }
     if (t == T_NAME && tk_peek(1)->kind == T_LBRACKET) {
         /* Could be either `a[i] = expr;` or an indexing expression-stmt
          * `a[i];`. Peek further: parse the index, then look for '='. */
@@ -1217,20 +1347,39 @@ static struct node *parse_func(void) {
     expect(T_LPAREN, "'('");
     int cap = 0;
     while (tk_cur()->kind != T_RPAREN) {
-        /* Param type: int|char, optionally followed by '*' for a pointer. */
-        if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
-            die_at(tk_cur()->line, "expected param type (int/char)", 0);
-        int is_char = (tk_cur()->kind == T_CHAR);
-        g_tk++;
-        int is_ptr = accept(T_STAR);
+        int kind, struct_idx = 0;
+        /* Session 97 — `struct T *p` parameter. */
+        if (tk_cur()->kind == T_STRUCT) {
+            g_tk++;
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected struct tag in param", 0);
+            char tag[NAME_MAX];
+            int x = 0;
+            while (tk_cur()->name[x]) { tag[x] = tk_cur()->name[x]; x++; }
+            tag[x] = 0;
+            g_tk++;
+            struct_idx = struct_find(tag);
+            if (struct_idx < 0)
+                die_at(tk_cur()->line, "undefined struct in param", tag);
+            if (!accept(T_STAR))
+                die_at(tk_cur()->line, "struct params must be pointers", tag);
+            kind = LK_STRUCT_PTR;
+        } else if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
+            int is_char = (tk_cur()->kind == T_CHAR);
+            g_tk++;
+            int is_ptr = accept(T_STAR);
+            kind = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+        } else {
+            die_at(tk_cur()->line, "expected param type (int/char/struct)", 0);
+            kind = LK_INT;
+        }
         if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected param name", 0);
         struct node *p = new_node(N_NAME);
         int j = 0;
         while (tk_cur()->name[j]) { p->name[j] = tk_cur()->name[j]; j++; }
         p->name[j] = 0;
-        /* Stash the param's kind in `op` so codegen can install the
-         * right local_kind when it binds the param at function entry. */
-        p->op = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+        p->op  = kind;          /* param kind for local-binding */
+        p->num = struct_idx;    /* meta (struct_idx for LK_STRUCT_PTR) */
         g_tk++;
         node_push(&fn->params, &fn->n_params, &cap, p);
         if (!accept(T_COMMA)) break;
@@ -1297,15 +1446,135 @@ static void parse_global_decl(void) {
     expect(T_SEMI, "';'");
 }
 
+/* Session 97 — parse `struct TAG { int field; ... };` or `struct TAG NAME;`
+ * at file scope. Disambiguates by peeking past `struct TAG` to look for
+ * a brace. */
+static void parse_struct_top(void) {
+    expect(T_STRUCT, "'struct'");
+    if (tk_cur()->kind != T_NAME)
+        die_at(tk_cur()->line, "expected struct tag name", 0);
+    char tag[NAME_MAX];
+    int ti = 0;
+    while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
+    tag[ti] = 0;
+    g_tk++;
+
+    if (tk_cur()->kind == T_LBRACE) {
+        /* Definition. */
+        g_tk++;
+        if (g_n_structs >= MAX_STRUCTS) die("too many struct types");
+        int sidx = struct_find(tag);
+        if (sidx < 0) {
+            sidx = g_n_structs++;
+            int j = 0;
+            while (tag[j]) { g_structs[sidx].name[j] = tag[j]; j++; }
+            g_structs[sidx].name[j] = 0;
+            g_structs[sidx].n_fields = 0;
+            g_structs[sidx].size = 0;
+            g_structs[sidx].defined = 0;
+        }
+        if (g_structs[sidx].defined)
+            die_at(tk_cur()->line, "struct redefined", tag);
+
+        int field_off = 0;
+        while (tk_cur()->kind != T_RBRACE) {
+            /* int NAME;  char NAME;  int *NAME;  char *NAME;
+             * struct OTHER *NAME;   — last is for linked-list-style. */
+            int field_kind;
+            int field_meta = 0;
+            if (tk_cur()->kind == T_STRUCT) {
+                g_tk++;
+                if (tk_cur()->kind != T_NAME)
+                    die_at(tk_cur()->line, "field: expected struct tag", 0);
+                char inner_tag[NAME_MAX];
+                int k = 0;
+                while (tk_cur()->name[k]) { inner_tag[k] = tk_cur()->name[k]; k++; }
+                inner_tag[k] = 0;
+                g_tk++;
+                int inner_idx = struct_find(inner_tag);
+                if (inner_idx < 0) {
+                    /* Allow forward reference for self/other-struct pointers. */
+                    if (g_n_structs >= MAX_STRUCTS) die("too many struct types");
+                    inner_idx = g_n_structs++;
+                    int x = 0;
+                    while (inner_tag[x]) { g_structs[inner_idx].name[x] = inner_tag[x]; x++; }
+                    g_structs[inner_idx].name[x] = 0;
+                    g_structs[inner_idx].n_fields = 0;
+                    g_structs[inner_idx].size = 0;
+                    g_structs[inner_idx].defined = 0;
+                }
+                if (!accept(T_STAR))
+                    die_at(tk_cur()->line, "struct-typed fields must be pointers", 0);
+                field_kind = LK_STRUCT_PTR;
+                field_meta = inner_idx;
+            } else if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
+                int is_char = (tk_cur()->kind == T_CHAR);
+                g_tk++;
+                int is_ptr = accept(T_STAR);
+                if (is_ptr) field_kind = is_char ? LK_CHAR_PTR : LK_INT_PTR;
+                else        field_kind = LK_INT;     /* scalar char ≡ int */
+            } else {
+                die_at(tk_cur()->line, "unsupported field type", 0);
+                field_kind = LK_INT;
+            }
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected field name", 0);
+            int fi = g_structs[sidx].n_fields;
+            if (fi >= MAX_FIELDS) die("too many fields in struct");
+            int k = 0;
+            while (tk_cur()->name[k]) {
+                g_structs[sidx].fields[fi].name[k] = tk_cur()->name[k]; k++;
+            }
+            g_structs[sidx].fields[fi].name[k] = 0;
+            g_structs[sidx].fields[fi].offset = field_off;
+            g_structs[sidx].fields[fi].size   = 4;  /* every field is 4-byte */
+            g_structs[sidx].fields[fi].kind   = field_kind;
+            g_structs[sidx].fields[fi].meta   = field_meta;
+            g_structs[sidx].n_fields++;
+            field_off += 4;
+            g_tk++;
+            expect(T_SEMI, "';'");
+        }
+        expect(T_RBRACE, "'}'");
+        expect(T_SEMI, "';'");
+        g_structs[sidx].size    = field_off;
+        g_structs[sidx].defined = 1;
+        return;
+    }
+
+    /* Otherwise: global variable declaration `struct TAG NAME;` or
+     * `struct TAG *NAME;`. */
+    int sidx = struct_find(tag);
+    if (sidx < 0)
+        die_at(tk_cur()->line, "undefined struct (must be defined before use)", tag);
+    int is_ptr = accept(T_STAR);
+    if (tk_cur()->kind != T_NAME)
+        die_at(tk_cur()->line, "expected variable name", 0);
+    char nm[NAME_MAX];
+    int i = 0;
+    while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+    nm[i] = 0;
+    g_tk++;
+    expect(T_SEMI, "';'");
+    int sz = is_ptr ? 4 : g_structs[sidx].size;
+    int kind = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
+    global_declare_struct(nm, sz, kind, sidx);
+}
+
 static struct node *parse_program(void) {
     struct node *p = new_node(N_PROGRAM);
     int cap = 0;
     while (tk_cur()->kind != T_END) {
+        /* Session 97 — `struct` at top level. */
+        if (tk_cur()->kind == T_STRUCT) {
+            parse_struct_top();
+            continue;
+        }
         /* Top-level disambiguation between function and global decl.
          * Both start with `int|char [*] NAME`. After the name we look
          * at the next token: `(` → function; `;`/`=`/`[` → global. */
         if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
-            die_at(tk_cur()->line, "expected 'int' or 'char' at top level", 0);
+            die_at(tk_cur()->line, "expected 'int', 'char' or 'struct' at top level", 0);
         /* Peek past the type (and optional '*' and name) to find the
          * disambiguator. We don't actually advance g_tk here. */
         int peek = 1;     /* tk_peek(0)==current type kw */
@@ -1621,10 +1890,12 @@ struct local_slot {
     char name[NAME_MAX];
     int  ebp_off;       /* negative offset from EBP */
     int  kind;          /* LK_* — session 92 */
+    int  meta;          /* struct_idx for LK_STRUCT/LK_STRUCT_PTR (s97) */
 };
 static struct local_slot g_locals[MAX_LOCALS];
 static int               g_n_locals;
 static int               g_locals_bytes;    /* total bytes of locals in current fn */
+
 
 /* Returns the size (in bytes) the pointee of this pointer occupies.
  * Used both for `*p` load/store width and for `a[i]` index scaling.
@@ -1697,13 +1968,32 @@ static int local_declare_sized(const char *name, int size, int kind) {
     g_locals[g_n_locals].name[j] = 0;
     g_locals[g_n_locals].ebp_off = off;
     g_locals[g_n_locals].kind    = kind;
+    g_locals[g_n_locals].meta    = 0;
     g_n_locals++;
+    return off;
+}
+
+/* Session 97 — like local_declare_sized but also stashes `meta`.
+ * Used for `struct T x;` (kind=LK_STRUCT, meta=struct_idx) and for
+ * `struct T *p;` (kind=LK_STRUCT_PTR, meta=struct_idx). */
+static int local_declare_struct(const char *name, int size, int kind, int meta) {
+    int off = local_declare_sized(name, size, kind);
+    g_locals[g_n_locals - 1].meta = meta;
     return off;
 }
 
 /* Shorthand for the common int-local case. */
 static int local_declare(const char *name) {
     return local_declare_sized(name, 4, LK_INT);
+}
+
+/* Session 97 — find a local's meta (struct_idx). Returns -1 if not
+ * found. Companion to local_kind. */
+static int local_meta(const char *name) {
+    for (int i = g_n_locals - 1; i >= 0; i--) {
+        if (my_streq(g_locals[i].name, name)) return g_locals[i].meta;
+    }
+    return -1;
 }
 
 /* Session 93 — global lookup + declaration. */
@@ -1726,11 +2016,19 @@ static int global_declare(const char *name, int size, int kind) {
     g_globals[idx].offset = g_data_pool_len;
     g_globals[idx].size   = padded;
     g_globals[idx].kind   = kind;
+    g_globals[idx].meta   = 0;
     /* Bytes are zero by default (g_data_pool lives in .bss). The
      * parser writes initial bytes directly afterward if there's an
      * initializer. */
     g_data_pool_len += padded;
     return idx;
+}
+
+/* Session 97 — global_declare for struct types. */
+static int global_declare_struct(const char *name, int size, int kind, int meta) {
+    int gi = global_declare(name, size, kind);
+    g_globals[gi].meta = meta;
+    return gi;
 }
 
 /* ---------- Codegen ----------------------------------------------- */
@@ -2066,6 +2364,62 @@ static void gen_expr(struct node *n) {
             else           e_load_eax_at_eax();
             return;
         }
+        case N_MEMBER:
+        case N_ARROW: {
+            /* Session 97 — `NAME.field` (member) or `NAME->field` (arrow).
+             *
+             * For N_MEMBER: NAME is a struct value; we LEA its address,
+             *   then add the field offset, then load the field.
+             * For N_ARROW: NAME is a struct pointer; we LOAD its value
+             *   (which is the address of a struct), then add the field
+             *   offset, then load the field. */
+            int is_arrow = (n->kind == N_ARROW);
+            int off = local_find(n->name);
+            int k, sidx;
+            int is_local = (off != 0);
+            int gi = -1;
+            if (is_local) {
+                k = local_kind(n->name);
+                sidx = local_meta(n->name);
+            } else {
+                gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "member of undefined", n->name);
+                k = g_globals[gi].kind;
+                sidx = g_globals[gi].meta;
+            }
+            if (is_arrow) {
+                if (k != LK_STRUCT_PTR)
+                    die_at(n->line, "-> requires struct pointer", n->name);
+            } else {
+                if (k != LK_STRUCT)
+                    die_at(n->line, ". requires struct value", n->name);
+            }
+            int fi = struct_field_find(sidx, n->field_name);
+            if (fi < 0) die_at(n->line, "no such field", n->field_name);
+            int field_off  = g_structs[sidx].fields[fi].offset;
+            int field_kind = g_structs[sidx].fields[fi].kind;
+            /* Base address into eax. */
+            if (is_arrow) {
+                if (is_local) e_load_local(off);
+                else          emit_load_global(gi);
+            } else {
+                if (is_local) e_lea_eax_ebp(off);
+                else          emit_addrof_global(gi);
+            }
+            /* Add field offset. */
+            if (field_off != 0) {
+                /* add eax, imm32  →  05 imm32  (special EAX form). */
+                emit_b(0x05); emit_d((unsigned)field_off);
+            }
+            /* Load width — char/byte vs dword. We currently store all
+             * fields at 4-byte slots, so all reads are dword unless the
+             * field is explicitly char-pointer-ish (which means the
+             * field VALUE is itself a pointer — still 4 bytes). Byte
+             * loads only matter for `char field;` someday — not in scope. */
+            (void)field_kind;
+            e_load_eax_at_eax();
+            return;
+        }
         case N_CALL: gen_call(n); return;
         case N_INC_DEC: {
             /* Session 96 — ++x / --x / x++ / x--. Restriction: target
@@ -2229,6 +2583,15 @@ static void gen_stmt(struct node *n) {
              * [ebp + off + i * elem]. */
             return;
         }
+        case N_STRUCT_DECL: {
+            /* Session 97 — `struct T NAME;` or `struct T *NAME;`. */
+            int kind = n->op;     /* LK_STRUCT or LK_STRUCT_PTR */
+            int sidx = n->num;
+            int size = (kind == LK_STRUCT_PTR) ? 4 : g_structs[sidx].size;
+            if (size <= 0) die_at(n->line, "struct size is zero", n->name);
+            local_declare_struct(n->name, size, kind, sidx);
+            return;
+        }
         case N_ASSIGN: {
             int off = local_find(n->name);
             if (off != 0) {
@@ -2316,6 +2679,55 @@ static void gen_stmt(struct node *n) {
             else           e_store_eax_at_ebx();
             return;
         }
+        case N_MEMBER_ASSIGN:
+        case N_ARROW_ASSIGN: {
+            /* Session 97 — `NAME.field = expr;` or `NAME->field = expr;`.
+             * Compute the rhs into eax, push, then compute the
+             * destination address (struct base + field offset), pop
+             * rhs into eax, store. */
+            int is_arrow = (n->kind == N_ARROW_ASSIGN);
+            int off = local_find(n->name);
+            int k, sidx;
+            int is_local = (off != 0);
+            int gi = -1;
+            if (is_local) {
+                k = local_kind(n->name);
+                sidx = local_meta(n->name);
+            } else {
+                gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "member-assign undefined", n->name);
+                k = g_globals[gi].kind;
+                sidx = g_globals[gi].meta;
+            }
+            if (is_arrow) {
+                if (k != LK_STRUCT_PTR)
+                    die_at(n->line, "-> requires struct pointer", n->name);
+            } else {
+                if (k != LK_STRUCT)
+                    die_at(n->line, ". requires struct value", n->name);
+            }
+            int fi = struct_field_find(sidx, n->field_name);
+            if (fi < 0) die_at(n->line, "no such field", n->field_name);
+            int field_off = g_structs[sidx].fields[fi].offset;
+
+            gen_expr(n->a);          /* eax = rhs */
+            e_push_eax();
+            /* Compute destination address into eax. */
+            if (is_arrow) {
+                if (is_local) e_load_local(off);
+                else          emit_load_global(gi);
+            } else {
+                if (is_local) e_lea_eax_ebp(off);
+                else          emit_addrof_global(gi);
+            }
+            if (field_off != 0) {
+                emit_b(0x05); emit_d((unsigned)field_off);
+            }
+            e_mov_ebx_eax();
+            e_pop_eax();
+            e_store_eax_at_ebx();
+            return;
+        }
         case N_RETURN: {
             if (n->a) gen_expr(n->a);
             else      e_mov_eax_imm(0);
@@ -2388,6 +2800,7 @@ static void gen_func(struct node *fn) {
         g_locals[g_n_locals].ebp_off = 8 + i * 4;
         g_locals[g_n_locals].kind    = fn->params[i]->op
                                        ? fn->params[i]->op : LK_INT;
+        g_locals[g_n_locals].meta    = fn->params[i]->num;   /* s97 */
         g_n_locals++;
     }
 
