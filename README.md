@@ -31,7 +31,8 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Unix coreutils — ls, cat, cp, mv, rm, mkdir, rmdir, chmod, touch, find, head, tail, grep, sort, uniq, wc, tee, tr, seq, echo, date, ps, kill, pwd, id, man | ✅ |
 | Shells — interactive `sh.elf` with pipes/redirection/jobs/history/tab-completion/env vars/mid-line editing | ✅ |
 | Modal editor — `vi.elf` (undo, count prefixes, search/replace, motions, modes) | ✅ |
-| Man pages — 26 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
+| Man pages — 27 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
+| Scripting — `lua` (Lua-syntax subset, int32 numbers, tree-walking interpreter) | ✅ |
 | ptrace-based debugger — `dbg.elf` | ✅ |
 | Multi-user with `/etc/passwd`-style login | ✅ |
 | JSON-RPC daemon (`agentd`) exposing the OS surface over loopback | ✅ |
@@ -91,9 +92,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **86 — Usable Unix Phase 4 (final)**. See [`docs/73-vi-polish.md`](docs/73-vi-polish.md) for the latest deep dive (undo, count prefixes, `:s/old/new/`, backward search). **Path A is complete.**
+Current session: **87 — Path D begins: Lua-syntax scripting**. See [`docs/74-tinylua.md`](docs/74-tinylua.md) for the latest deep dive (single-file tree-walking interpreter for a useful subset of Lua syntax; int32 numbers; ~1100 LOC).
 
 Recent session deep dives:
+- [Session 87 — Lua-syntax interpreter](docs/74-tinylua.md)
 - [Session 86 — vi polish (undo, search/replace, count prefixes, ?pat)](docs/73-vi-polish.md)
 - [Session 85 — Man pages](docs/72-man-pages.md)
 - [Session 84 — Shell mid-line editing](docs/71-shell-mid-line-editing.md)
@@ -115,10 +117,11 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 - Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
 - Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
 
-Candidate next paths:
+**Path D — Scripting** kicked off in session 87 with a fresh single-file Lua-syntax interpreter (`lua`). Real-Lua-source compatibility is a separate effort blocked by FPU support; the subset interpreter covers most daily scripting needs. See [`docs/74-tinylua.md`](docs/74-tinylua.md).
+
+Remaining candidate paths:
 - **Path B — Self-hosting.** Port `tcc` so AdventOS can compile its own programs.
 - **Path C — Graphics.** A minimal window manager on the VBE framebuffer.
-- **Path D — Scripting.** Port Lua as both a system scripting language and a REPL.
 - **Path E — Drivers.** virtio (modern QEMU's preferred device family), more USB device classes, sound consumer.
 
 ## License

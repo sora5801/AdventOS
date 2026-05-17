@@ -1,0 +1,85 @@
+NAME
+    lua - Lua-syntax interpreter (AdventOS subset)
+
+SYNOPSIS
+    lua FILE.lua            run a Lua script
+    lua                     interactive REPL
+    lua -e "STMT"           run one statement
+
+DESCRIPTION
+    A tree-walking interpreter for a subset of Lua 5. NOT a port of
+    the upstream Lua sources — this is a fresh single-file
+    implementation written for AdventOS, recognizing the same
+    surface syntax for the common cases.
+
+IMPLEMENTED
+    Types          nil, boolean, number (int32), string, table, function
+    Statements     assignment, local, if/elseif/else, while, numeric for,
+                   function definition, return, break,
+                   expression-as-statement
+    Expressions    binops (+ - * / % ^ == ~= < > <= >= .. and or),
+                   unops (- not #), function calls f(...),
+                   indexing t[k] / t.k, table constructors
+                   {1,2,3} or {x=1, [k]=v}, function literals
+    Built-ins      print, type, tostring, tonumber, ipairs,
+                   string.len/sub/upper/lower/rep,
+                   table.insert/concat,
+                   io.read/write,
+                   os.time/exit
+
+NUMBERS ARE INT32
+    Real Lua's numbers are doubles (or int64 in 5.3+). AdventOS user
+    programs build with -mgeneral-regs-only and no FPU support, so
+    floating-point would require either kernel FPU context switching
+    or shipping libgcc soft-float helpers. For a shell-scripting
+    language neither is worth it. Practical consequence:
+
+      1 / 3       =>  0       (integer division)
+      2 ^ 10      =>  1024    (works for nonneg integer exponents)
+      1.5         =>  parse error
+
+    Numbers fit in ~2 billion. tonumber("123") works; tonumber("1.5")
+    returns nil.
+
+DELIBERATELY NOT IMPLEMENTED
+    - Metatables and __index / __newindex
+    - Coroutines
+    - pcall / xpcall / error (any runtime error aborts the process;
+      the REPL has no fork-per-line so an error ends the session)
+    - Multiple return values
+    - Closures with upvalues (functions see globals + their own
+      locals — a nested function can't capture an outer local)
+    - require / packages
+    - String patterns / gmatch (string.find isn't included)
+    - math.* (no math library)
+
+EXAMPLES
+    lua -e "print('hello, world')"
+    lua -e "for i=1,10 do print(i, i*i) end"
+    lua /scripts/test.lua
+
+    A short script:
+      local function fact(n)
+          if n <= 1 then return 1 end
+          return n * fact(n - 1)
+      end
+      print(fact(10))            -- prints 3628800
+
+    Tables:
+      local t = { "apple", "banana", "cherry" }
+      table.insert(t, "date")
+      print(#t)                  -- 4
+      print(t[1])                -- apple
+      print(table.concat(t, ", "))
+
+EXIT STATUS
+    0   script ran to completion
+    1   any error (file missing, parse error, runtime error)
+
+SEE ALSO
+    sh(1), ed(1)
+
+NOTES
+    Single-process REPL — any error from die() exits the process. A
+    fork-per-line shape would recover but adds latency; not worth
+    it for the daily-use case.

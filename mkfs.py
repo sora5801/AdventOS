@@ -92,6 +92,8 @@ USER_PROGRAMS = [
     ('find.elf',  'user/_obj/find.bin',  None),
     # Session 85: path-A man-pages binary. Reads /man/<topic>.
     ('man.elf',   'user/_obj/man.bin',   None),
+    # Session 87: path-D scripting — Lua-syntax subset interpreter.
+    ('lua.elf',   'user/_obj/lua.bin',   None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -228,6 +230,9 @@ DATA_FILES = [
     ('pwd',   'fs/man/pwd',   'man'),
     ('id',    'fs/man/id',    'man'),
     ('sleep', 'fs/man/sleep', 'man'),
+    ('lua',   'fs/man/lua',   'man'),     # session 87
+    # Session 87 — sample script for the lua interpreter.
+    ('hello.lua', 'fs/hello.lua', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
