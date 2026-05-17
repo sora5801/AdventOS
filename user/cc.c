@@ -118,6 +118,7 @@ enum {
     T_STRUCT,    /* session 97 */
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
+    T_TYPEDEF,   /* session 104 */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -250,6 +251,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
     if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
     if (my_streq(s, "enum"))   return T_ENUM;     /* session 103 */
+    if (my_streq(s, "typedef"))return T_TYPEDEF;  /* session 104 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -871,6 +873,84 @@ static void enum_add(const char *name, int value) {
     g_enum_consts[idx].value = value;
 }
 
+/* Session 104 — typedef registry.
+ *
+ * `typedef BASE NAME;` records a (name, kind, meta) entry. Anywhere
+ * the parser looks for a type spec, it checks this table first if
+ * the current token is a T_NAME. The typedef is replaced inline
+ * with its underlying type info; no separate "typedef type" exists
+ * at codegen time. */
+#define MAX_TYPEDEFS 64
+struct typedef_entry {
+    char name[NAME_MAX];
+    int  kind;     /* LK_INT / LK_INT_PTR / LK_CHAR_PTR / LK_STRUCT / LK_STRUCT_PTR */
+    int  meta;     /* struct_idx for struct kinds */
+};
+static struct typedef_entry g_typedefs[MAX_TYPEDEFS];
+static int                  g_n_typedefs;
+
+static int typedef_find(const char *name) {
+    for (int i = 0; i < g_n_typedefs; i++) {
+        if (my_streq(g_typedefs[i].name, name)) return i;
+    }
+    return -1;
+}
+static void typedef_add(const char *name, int kind, int meta) {
+    if (g_n_typedefs >= MAX_TYPEDEFS) die("too many typedefs");
+    if (typedef_find(name) >= 0)
+        die_at(0, "duplicate typedef", name);
+    int idx = g_n_typedefs++;
+    int j = 0;
+    while (name[j] && j < NAME_MAX - 1) {
+        g_typedefs[idx].name[j] = name[j]; j++;
+    }
+    g_typedefs[idx].name[j] = 0;
+    g_typedefs[idx].kind = kind;
+    g_typedefs[idx].meta = meta;
+}
+
+/* Resolves the current token-stream position into a type spec.
+ * Returns 1 if a type was consumed (kind/meta filled in); 0 otherwise
+ * (no tokens consumed). Handles int, char, int*, char*, struct TAG,
+ * struct TAG*, and typedef-NAME (recursively). */
+static int try_consume_type(int *out_kind, int *out_meta) {
+    int tk = tk_cur()->kind;
+    if (tk == T_INT) {
+        g_tk++;
+        *out_kind = accept(T_STAR) ? LK_INT_PTR : LK_INT;
+        *out_meta = 0;
+        return 1;
+    }
+    if (tk == T_CHAR) {
+        g_tk++;
+        *out_kind = accept(T_STAR) ? LK_CHAR_PTR : LK_INT;  /* scalar char = int */
+        *out_meta = 0;
+        return 1;
+    }
+    if (tk == T_STRUCT) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected struct tag", 0);
+        int sidx = struct_find(tk_cur()->name);
+        if (sidx < 0)
+            die_at(tk_cur()->line, "undefined struct", tk_cur()->name);
+        g_tk++;
+        *out_kind = accept(T_STAR) ? LK_STRUCT_PTR : LK_STRUCT;
+        *out_meta = sidx;
+        return 1;
+    }
+    if (tk == T_NAME) {
+        int ti = typedef_find(tk_cur()->name);
+        if (ti >= 0) {
+            g_tk++;
+            *out_kind = g_typedefs[ti].kind;
+            *out_meta = g_typedefs[ti].meta;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 enum {
     N_NUM, N_NAME, N_STR,
     N_BIN, N_UN, N_CALL,
@@ -1232,6 +1312,40 @@ static struct node *parse_block(void) {
 
 static struct node *parse_stmt(void) {
     int t = tk_cur()->kind;
+    /* Session 104 — local declaration via a typedef-NAME at type
+     * position. We expand to whatever the typedef resolves to and
+     * emit the matching AST. Restriction: arrays (`Td var[N];`)
+     * aren't supported via typedef-name yet. */
+    if (t == T_NAME) {
+        int ti = typedef_find(tk_cur()->name);
+        if (ti >= 0) {
+            int kind = g_typedefs[ti].kind;
+            int meta = g_typedefs[ti].meta;
+            g_tk++;     /* consume typedef name */
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected variable name after typedef-name", 0);
+            char nm[NAME_MAX];
+            int i = 0;
+            while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+            nm[i] = 0;
+            g_tk++;
+            if (kind == LK_STRUCT || kind == LK_STRUCT_PTR) {
+                expect(T_SEMI, "';'");
+                struct node *n = new_node(N_STRUCT_DECL);
+                for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+                n->op  = kind;
+                n->num = meta;
+                return n;
+            }
+            /* Scalar/pointer typedef (LK_INT, LK_INT_PTR, LK_CHAR_PTR). */
+            struct node *n = new_node(N_VAR_DECL);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->op = kind;
+            if (accept(T_ASSIGN)) n->a = parse_expr();
+            expect(T_SEMI, "';'");
+            return n;
+        }
+    }
     /* Session 97/102 — local struct declarations.
      *   struct TAG NAME;        a struct value
      *   struct TAG *NAME;       a pointer to a struct
@@ -1488,16 +1602,17 @@ static struct node *parse_stmt(void) {
 }
 
 static struct node *parse_func(void) {
-    /* Return type — int or char are both accepted, both yield int
-     * internally. We don't enforce return-type matching on the
-     * actual return value. */
-    if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
-        die_at(tk_cur()->line, "expected 'int' or 'char' (return type)", 0);
-    g_tk++;
-    /* Session 100 — allow `int *foo()` / `char *bar()` for pointer
-     * return types. The `*` is consumed but not propagated — cc
-     * doesn't check the actual returned value's type against it. */
-    (void)accept(T_STAR);
+    /* Return type — int or char or a typedef name. cc doesn't track
+     * the function's return type at codegen, so all of these are
+     * equivalent. We consume the tokens and move on. */
+    if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
+        g_tk++;
+        (void)accept(T_STAR);   /* allow `int *foo()` etc. — session 100 */
+    } else if (tk_cur()->kind == T_NAME && typedef_find(tk_cur()->name) >= 0) {
+        g_tk++;     /* consume typedef-NAME — session 104 */
+    } else {
+        die_at(tk_cur()->line, "expected 'int' / 'char' / typedef-name (return type)", 0);
+    }
     if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected function name", 0);
     struct node *fn = new_node(N_FUNC_DECL);
     int i = 0;
@@ -1529,8 +1644,16 @@ static struct node *parse_func(void) {
             g_tk++;
             int is_ptr = accept(T_STAR);
             kind = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+        } else if (tk_cur()->kind == T_NAME) {
+            /* Session 104 — typedef-NAME as param type. */
+            int ti = typedef_find(tk_cur()->name);
+            if (ti < 0)
+                die_at(tk_cur()->line, "expected param type (int/char/struct/typedef)", 0);
+            g_tk++;
+            kind = g_typedefs[ti].kind;
+            struct_idx = g_typedefs[ti].meta;
         } else {
-            die_at(tk_cur()->line, "expected param type (int/char/struct)", 0);
+            die_at(tk_cur()->line, "expected param type (int/char/struct/typedef)", 0);
             kind = LK_INT;
         }
         if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected param name", 0);
@@ -1561,6 +1684,30 @@ static struct node *parse_func(void) {
  * the data section, which requires running string-pool finalization
  * before global finalization. Future work. */
 static void parse_global_decl(void) {
+    /* Session 104 — typedef-NAME global. Resolve and emit. */
+    if (tk_cur()->kind == T_NAME) {
+        int ti = typedef_find(tk_cur()->name);
+        if (ti >= 0) {
+            int td_kind = g_typedefs[ti].kind;
+            int td_meta = g_typedefs[ti].meta;
+            g_tk++;
+            if (tk_cur()->kind != T_NAME)
+                die_at(tk_cur()->line, "expected variable name in global", 0);
+            char nm[NAME_MAX];
+            int i = 0;
+            while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+            nm[i] = 0;
+            g_tk++;
+            expect(T_SEMI, "';'");
+            if (td_kind == LK_STRUCT)
+                global_declare_struct(nm, g_structs[td_meta].size, LK_STRUCT, td_meta);
+            else if (td_kind == LK_STRUCT_PTR)
+                global_declare_struct(nm, 4, LK_STRUCT_PTR, td_meta);
+            else
+                global_declare(nm, 4, td_kind);
+            return;
+        }
+    }
     int is_char = (tk_cur()->kind == T_CHAR);
     g_tk++;
     int is_ptr = accept(T_STAR);
@@ -1759,6 +1906,21 @@ static void parse_enum_top(void) {
     expect(T_SEMI, "';'");
 }
 
+/* Session 104 — parse a top-level typedef:
+ *   typedef BASE NAME;
+ * where BASE is int [*] / char [*] / struct TAG [*]. */
+static void parse_typedef_top(void) {
+    expect(T_TYPEDEF, "'typedef'");
+    int kind, meta;
+    if (!try_consume_type(&kind, &meta))
+        die_at(tk_cur()->line, "typedef: expected base type", 0);
+    if (tk_cur()->kind != T_NAME)
+        die_at(tk_cur()->line, "typedef: expected new type name", 0);
+    typedef_add(tk_cur()->name, kind, meta);
+    g_tk++;
+    expect(T_SEMI, "';'");
+}
+
 static struct node *parse_program(void) {
     struct node *p = new_node(N_PROGRAM);
     int cap = 0;
@@ -1773,15 +1935,32 @@ static struct node *parse_program(void) {
             parse_enum_top();
             continue;
         }
+        /* Session 104 — `typedef` at top level. */
+        if (tk_cur()->kind == T_TYPEDEF) {
+            parse_typedef_top();
+            continue;
+        }
         /* Top-level disambiguation between function and global decl.
-         * Both start with `int|char [*] NAME`. After the name we look
-         * at the next token: `(` → function; `;`/`=`/`[` → global. */
-        if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR)
-            die_at(tk_cur()->line, "expected 'int', 'char', 'struct' or 'enum' at top level", 0);
+         * The type can be `int|char [*]` (and via session 104,
+         * a typedef-name resolving to one of those). After the type
+         * we expect a NAME, then `(` → function or `;`/`=`/`[` → global. */
+        int td_is_type = 0;
+        if (tk_cur()->kind == T_NAME && typedef_find(tk_cur()->name) >= 0)
+            td_is_type = 1;
+        if (tk_cur()->kind != T_INT && tk_cur()->kind != T_CHAR && !td_is_type)
+            die_at(tk_cur()->line,
+                   "expected 'int', 'char', 'struct', 'enum', 'typedef' or "
+                   "a typedef name at top level", 0);
         /* Peek past the type (and optional '*' and name) to find the
-         * disambiguator. We don't actually advance g_tk here. */
-        int peek = 1;     /* tk_peek(0)==current type kw */
-        if (tk_peek(peek)->kind == T_STAR) peek++;
+         * disambiguator. For typedef names, the type is one token (no
+         * trailing '*' is part of the typedef per session 104's design). */
+        int peek;
+        if (td_is_type) {
+            peek = 1;            /* tk_peek(0)=typedef name; (1) is the var name */
+        } else {
+            peek = 1;            /* tk_peek(0)=int/char */
+            if (tk_peek(peek)->kind == T_STAR) peek++;
+        }
         if (tk_peek(peek)->kind != T_NAME)
             die_at(tk_peek(peek)->line, "expected name", 0);
         peek++;

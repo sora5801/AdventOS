@@ -106,6 +106,13 @@ IMPLEMENTED
                                             Values auto-increment from 0
                                             (or last explicit value + 1).
 
+    Typedef        typedef BASE NAME;       (session 104)
+                                            BASE is int [*], char [*],
+                                            or struct TAG [*]. NAME becomes
+                                            a type alias usable in local,
+                                            global, param, and return-type
+                                            positions.
+
     Preprocessor   #define NAME body        single-line object macros
                    #undef  NAME             remove a macro
                    #include "FILE"          relative paths resolve to /FILE
@@ -179,7 +186,7 @@ DELIBERATELY NOT IMPLEMENTED
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof on an expression (only sizeof(TYPE) is supported)
-    - union / typedef
+    - union
     - declared function-pointer types `int (*fp)(int)` syntax
       (function pointers exist; you just spell them `int *fp`)
     - calling a function pointer directly off an expression
@@ -234,6 +241,8 @@ EXAMPLES
     Sample at /enums.c demonstrates tagged + anonymous enums,
     auto-incrementing and explicit-value enumerators, and using
     enum constants in conditionals + bitwise expressions.
+    Sample at /typedefs.c demonstrates scalar, pointer, struct-value,
+    and struct-pointer typedefs in locals, globals, params, returns.
 
 EXIT STATUS
     0   compile succeeded

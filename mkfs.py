@@ -260,6 +260,8 @@ DATA_FILES = [
     ('sarr.c',    'fs/sarr.c',    None),
     # Session 103 — enum demo.
     ('enums.c',   'fs/enums.c',   None),
+    # Session 104 — typedef demo.
+    ('typedefs.c','fs/typedefs.c',None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
