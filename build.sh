@@ -150,7 +150,8 @@ USER_PROGS=(hello sh echo httpd ed init
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
             smp-hammer
-            cp mv rm mkdir rmdir chmod touch find)
+            cp mv rm mkdir rmdir chmod touch find
+            man)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.

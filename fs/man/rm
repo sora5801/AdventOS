@@ -1,0 +1,32 @@
+NAME
+    rm - remove one or more regular files
+
+SYNOPSIS
+    rm FILE [FILE...]
+
+DESCRIPTION
+    Unlinks each FILE. Reports per-file failures to stderr and keeps
+    going — a missing FILE doesn't abort the rest. Exit status is 1
+    only if at least one removal failed.
+
+    Refuses directories. Use rmdir for empty dirs; there is no
+    recursive rm -r in this OS yet.
+
+    The kernel sys_unlink enforces:
+      - owner-or-root permission on the target
+      - refusal if any task currently has the file open (EBUSY-ish)
+      - refusal on directories
+
+EXAMPLES
+    rm hello.txt
+    rm /tmp/a.log /tmp/b.log /tmp/c.log
+
+EXIT STATUS
+    0   every FILE was removed
+    1   at least one FILE could not be removed
+
+SEE ALSO
+    rmdir(1), find(1)
+
+NOTES
+    No -f (suppress errors), -i (interactive), or -r (recursive).

@@ -1,0 +1,32 @@
+NAME
+    cp - copy a regular file
+
+SYNOPSIS
+    cp SRC DST
+
+DESCRIPTION
+    Copies SRC's contents to DST. DST is created (or truncated if it
+    already exists). Two-argument form only — there is no
+    `cp SRC... DSTDIR` multi-source mode and no -r recursive flag yet.
+
+    The copy goes via a single contiguous buffer in the calling task's
+    heap (sized via sys_brk), then SYS_FS_WRITE persists the buffer to
+    DST in one atomic sector-run swap. An interrupted cp leaves DST
+    either unchanged or fully replaced — never half-overwritten.
+
+EXAMPLES
+    cp hello.txt copy.txt
+    cp /etc/passwd /tmp/passwd.bak
+
+EXIT STATUS
+    0   success
+    1   any failure (SRC missing, DST permission denied, out of memory,
+        short read on SRC, etc.)
+
+SEE ALSO
+    mv(1), rm(1), find(1)
+
+NOTES
+    No -p (preserve mode), -i (interactive), or -r (recursive). Added
+    in session 83. See docs/70-usable-unix-coreutils.md for the
+    coreutils gap-fill design.

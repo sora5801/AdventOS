@@ -1,0 +1,57 @@
+NAME
+    vi - modal screen editor
+
+SYNOPSIS
+    vi [FILE]
+
+DESCRIPTION
+    A vi-style modal editor. Loads FILE into the buffer, draws the
+    screen via direct sys_tty_cursor positioning, and reads keys in
+    TTY_RAW mode.
+
+MODES
+    Normal mode (default on start)
+    Insert mode (entered via i / I / a / A / o / O)
+    Command-line mode (entered via :)
+
+KEYS (normal mode)
+    h j k l         cursor left / down / up / right
+    w / b           jump word forward / backward
+    0 / $           start / end of line
+    gg / G          first / last line of file
+    i / a           enter insert mode (at cursor / after cursor)
+    I / A           enter insert mode (start / end of current line)
+    o / O           open line below / above + enter insert mode
+    x               delete char under cursor
+    dd              delete current line
+    yy              yank current line to register
+    p               paste register after cursor
+    u               undo last change (limited; sessions 46+ heritage)
+    :               enter command-line mode
+
+COMMAND-LINE MODE (:)
+    :w [FILE]       write to FILE (default: loaded file)
+    :q              quit (refuses if unsaved)
+    :q!             quit unconditionally
+    :wq             write then quit
+    :N              jump to line N
+    :/pat           search forward for pat
+
+EXAMPLES
+    vi hello.txt
+    :w   :q
+
+EXIT STATUS
+    0   clean quit
+    1   command syntax error or write failure
+
+SEE ALSO
+    ed(1), sh(1)
+
+NOTES
+    Cursor positioning uses SYS_TTY_CURSOR, which updates the
+    framebuffer and VGA grid but not the host terminal's idea
+    of cursor over -serial stdio. The QEMU graphical window
+    renders vi correctly; the serial side gets a redraw-only
+    view. Limitation acknowledged; ANSI-CSI emission in fbcon
+    would fix both at once but is a separate session.

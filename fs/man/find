@@ -1,0 +1,36 @@
+NAME
+    find - recursive file listing
+
+SYNOPSIS
+    find [PATH]
+
+DESCRIPTION
+    Walks the directory tree rooted at PATH (default: current
+    directory) depth-first and prints every entry (files and dirs)
+    one per line. Output includes PATH itself, matching POSIX
+    behavior.
+
+    The recursion uses sys_readdir for iteration and sys_fs_size to
+    distinguish files from directories — sys_fs_size returns -1 for
+    any non-regular entry (same convention ls's JSONL mode uses for
+    its "type" field).
+
+    Depth is capped at 32 levels; the FS uses a single uint8_t for
+    parent_dir so any tree it can hold is well within that limit.
+
+EXAMPLES
+    find                        # walk current directory
+    find /                      # walk the whole tree
+    find /etc                   # subtree under /etc
+
+EXIT STATUS
+    0   walk completed
+    1   PATH could not be opened (no recursion happens)
+
+SEE ALSO
+    ls(1), grep(1)
+
+NOTES
+    No predicates yet — no -name PATTERN, -type d, -maxdepth N, or
+    -exec CMD. Filter via pipes: `find / | grep \.json$` is the
+    current way to do "find all .json files". Added in session 83.

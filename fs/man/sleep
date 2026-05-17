@@ -1,0 +1,31 @@
+NAME
+    sleep - pause for a number of seconds
+
+SYNOPSIS
+    sleep SECONDS
+
+DESCRIPTION
+    Sleeps for SECONDS (integer, 0-600). Implemented as a loop of
+    100 ms sys_sleep_ms calls so that SIGKILL can interrupt within
+    one chunk — pit_sleep itself doesn't check pending signals,
+    but each chunk's iret-to-ring-3 boundary does.
+
+    SECONDS is capped at 600 (10 minutes) for selftest hygiene —
+    no realistic interactive use needs more than that, and a runaway
+    sleep can hold task table slots otherwise.
+
+EXAMPLES
+    sleep 1
+    sleep 10                            # 10-second pause
+
+EXIT STATUS
+    0   slept for the full duration
+    1   bad argument (non-numeric, negative)
+
+SEE ALSO
+    kill(1), ps(1)
+
+NOTES
+    If you SIGKILL a running sleep, the kill lands within ~100 ms
+    of the cancel — the chunked design intentionally bounds the
+    delivery latency.

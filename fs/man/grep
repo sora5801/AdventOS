@@ -1,0 +1,40 @@
+NAME
+    grep - search lines for a pattern
+
+SYNOPSIS
+    grep PATTERN [FILE...]
+    grep -v PATTERN [FILE...]
+    grep -f FIELD VALUE                 (JSONL mode)
+
+DESCRIPTION
+    Prints every line of input that contains PATTERN as a literal
+    substring. PATTERN is NOT a regular expression in this OS yet —
+    plain substring match only.
+
+    With FILE arguments, reads each in turn. With no FILE arguments,
+    reads stdin.
+
+    -v inverts the match (print lines that do NOT contain PATTERN).
+
+    -f FIELD VALUE (session 82) is the JSONL mode: input is parsed
+    as JSONL records; output keeps every record where the FIELD's
+    string value contains VALUE as a substring. Used inside `|>`
+    pipelines.
+
+EXAMPLES
+    grep root /etc/passwd
+    ps | grep init
+    cat /etc/passwd | grep -v root
+    ps |> grep -f name init             # structured pipeline
+
+EXIT STATUS
+    0   at least one matching line printed
+    1   no lines matched
+    2   I/O error
+
+SEE ALSO
+    cat(1), head(1), tail(1), sort(1), pluck(1), where(1)
+
+NOTES
+    No regex, no -E (extended), no -i (case-insensitive), no -r
+    (recursive). Use find | grep for recursive search.

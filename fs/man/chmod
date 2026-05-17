@@ -1,0 +1,30 @@
+NAME
+    chmod - change file permission bits
+
+SYNOPSIS
+    chmod MODE FILE [FILE...]
+
+DESCRIPTION
+    Sets each FILE's permission bits to MODE. MODE is a 1-4 digit
+    octal integer (e.g. 755, 644, 0600). Symbolic modes like u+x or
+    go-w are NOT supported — use the octal form.
+
+    The low 9 bits map as the usual rwx-rwx-rwx triple: owner, group,
+    other. The kernel SYS_CHMOD enforces that only the file's owner
+    or root may change permissions.
+
+EXAMPLES
+    chmod 755 script.sh         # rwxr-xr-x
+    chmod 600 /etc/secret       # rw-------
+    chmod 0644 /tmp/log.txt     # leading 0 allowed but optional
+
+EXIT STATUS
+    0   every FILE was chmod'd
+    1   at least one chmod failed (missing, not owner, bad MODE)
+
+SEE ALSO
+    ls(1), id(1)
+
+NOTES
+    No symbolic mode (chmod u+x). The octal form covers every real
+    use case in <80 chars of code per script. Added in session 83.

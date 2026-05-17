@@ -1,0 +1,52 @@
+NAME
+    ed - the line editor
+
+SYNOPSIS
+    ed [FILE]
+
+DESCRIPTION
+    A POSIX-style line editor. Reads commands on stdin, writes
+    diagnostic output (just "?" on error) to stdout. Loads FILE
+    into the in-memory buffer at start; w FILE saves the buffer
+    back to disk via sys_fs_write.
+
+    For interactive use, vi is friendlier. ed is here because (a)
+    it's small and reliable, (b) it works over a serial line
+    where vi's cursor positioning doesn't, and (c) it's the
+    canonical Unix line editor.
+
+COMMANDS
+    .                   end-of-input marker (in input mode)
+    N                   set current line to N and print it
+    .,$p                print from current line to end
+    1,$p                print whole buffer
+    a                   append text after current line (end with .)
+    i                   insert text before current line (end with .)
+    c                   change current line (end with .)
+    d                   delete current line
+    s/pat/repl/         substitute first match on current line
+    s/pat/repl/g        substitute all matches
+    w [FILE]            write buffer to FILE (default: original)
+    q                   quit (refuses if unsaved changes)
+    Q                   quit unconditionally
+    =                   print current line number
+    /pat/               search forward for pat
+
+EXAMPLES
+    ed hello.txt
+    a
+    line 1
+    line 2
+    .
+    w
+    q
+
+EXIT STATUS
+    0   normal quit
+    1   command syntax error or write failure
+
+SEE ALSO
+    vi(1), cat(1)
+
+NOTES
+    Pattern syntax is literal substring, NOT regex (matching grep).

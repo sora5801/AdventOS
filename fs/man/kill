@@ -1,0 +1,35 @@
+NAME
+    kill - send a signal to a process
+
+SYNOPSIS
+    kill PID [PID...]
+    kill -SIG PID [PID...]
+
+DESCRIPTION
+    Sends SIG (default: SIGTERM) to each PID. SIG may be a number
+    (e.g. -9) or a name (e.g. -KILL). Supported signals:
+
+      1   HUP     hang-up
+      2   INT     interrupt (Ctrl-C from a terminal)
+      9   KILL    uncatchable terminate
+      15  TERM    terminate (default)
+      17  CHLD    child exited
+      18  CONT    continue (resume a stopped task)
+      19  STOP    uncatchable stop
+      20  TSTP    stop from terminal (Ctrl-Z)
+
+    KILL and STOP cannot be caught or blocked. Everything else can
+    be installed via sys_sigaction (libuser's sig_install wrapper).
+
+EXAMPLES
+    kill 17                             # SIGTERM the task at pid 17
+    kill -9 17                          # SIGKILL the task at pid 17
+    kill -STOP 12                       # pause pid 12
+    kill -CONT 12                       # resume it
+
+EXIT STATUS
+    0   every signal was delivered
+    1   at least one PID was missing or not signalable
+
+SEE ALSO
+    ps(1), signal(2)

@@ -1,0 +1,30 @@
+NAME
+    rmdir - remove one or more EMPTY directories
+
+SYNOPSIS
+    rmdir DIR [DIR...]
+
+DESCRIPTION
+    Removes each DIR. The kernel sys_rmdir refuses non-empty
+    directories — any child entry whose parent_dir points at the
+    target blocks the removal (POSIX ENOTEMPTY analog).
+
+    For recursive removal, remove the contents first (with rm and
+    rmdir) and then rmdir the now-empty container. There is no -r
+    or rm -r in this OS yet.
+
+EXAMPLES
+    rmdir tmp
+    rmdir /var/log /var/spool
+
+EXIT STATUS
+    0   every DIR was removed
+    1   at least one DIR could not be removed (not empty, not a
+        directory, missing, or no permission)
+
+SEE ALSO
+    rm(1), mkdir(1), find(1)
+
+NOTES
+    Same owner-or-root permission model as rm. Added in session 83
+    via the new SYS_RMDIR syscall (= 86).

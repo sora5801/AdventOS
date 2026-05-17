@@ -1,0 +1,45 @@
+NAME
+    man - read a man page
+
+SYNOPSIS
+    man TOPIC
+    man -k WORD
+    man
+
+DESCRIPTION
+    Reads /man/TOPIC and writes it to stdout. With no arguments,
+    lists every available topic (the contents of /man/). With
+    -k WORD, lists every topic whose name contains WORD as a
+    substring.
+
+    AdventOS does NOT use Unix section numbers (man 1 cp). All
+    pages live in a flat /man/ directory. Section suffixes will
+    be added if a name collision ever happens.
+
+    There is no pager — `man` is closer to `cat /man/TOPIC` than
+    to GNU man's `less`-wrapped behavior. Pages are kept short
+    (typically 30-60 lines) so this is usually fine. Pipe to
+    `head` or `tail` if a page is longer than your screen:
+
+        man find | head -25
+
+EXAMPLES
+    man cp
+    man -k file                 # everything mentioning "file" in name
+    man                         # list all topics
+
+EXIT STATUS
+    0   page found and printed (or list emitted)
+    1   topic not found
+    2   usage error or I/O error
+
+SEE ALSO
+    ls(1), cat(1), grep(1)
+
+NOTES
+    Page format is plain text, no markup. Standard sections:
+    NAME, SYNOPSIS, DESCRIPTION, EXAMPLES, EXIT STATUS, SEE ALSO,
+    NOTES. New pages should follow the same skeleton.
+
+    To add a man page: drop the file at fs/man/<topic> and add
+    it to mkfs.py's DATA_FILES list with parent='man'.

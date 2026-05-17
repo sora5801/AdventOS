@@ -1,0 +1,32 @@
+NAME
+    touch - create empty files (no-op on existing)
+
+SYNOPSIS
+    touch FILE [FILE...]
+
+DESCRIPTION
+    For each FILE:
+      - If FILE doesn't exist, create it as an empty regular file
+        with mode 0644.
+      - If FILE already exists as a regular file, do nothing
+        (AdventFS entries don't carry an mtime today, so there's
+        nothing to bump).
+      - If FILE exists but isn't a regular file (e.g., it's a
+        directory), the underlying sys_fs_write refuses and touch
+        reports the failure.
+
+EXAMPLES
+    touch hello.txt
+    touch a.log b.log c.log
+
+EXIT STATUS
+    0   every FILE was touched (or already existed)
+    1   at least one FILE could not be touched
+
+SEE ALSO
+    cp(1), rm(1)
+
+NOTES
+    If/when fs_entry grows an mtime field, touch should start
+    bumping it on the existing-file path. Right now there is
+    literally nothing to bump.

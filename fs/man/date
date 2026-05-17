@@ -1,0 +1,33 @@
+NAME
+    date - print the current date and time
+
+SYNOPSIS
+    date
+    date --advjson
+
+DESCRIPTION
+    Reads the Unix epoch via SYS_TIME (the NTP-corrected wall clock —
+    see session 60) and prints a human-readable form:
+
+      Sat May 17 11:25:30 UTC 2026
+
+    The OS keeps time in UTC. Time zones aren't modeled.
+
+    --advjson emits one JSONL record with: unix (epoch seconds),
+    iso (ISO-8601 string), year, month, day, hour, minute, second.
+
+EXAMPLES
+    date
+    date |> pluck unix                  # epoch as a single line
+
+EXIT STATUS
+    0   always
+
+SEE ALSO
+    pluck(1)
+
+NOTES
+    The RTC is read at boot and NTP-synced periodically (kernel
+    /proc/ntp shows sync status). Without a working NTP server in
+    the QEMU NAT environment, the OS uses whatever the BIOS RTC
+    says when the VM started.

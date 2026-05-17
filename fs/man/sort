@@ -1,0 +1,35 @@
+NAME
+    sort - sort lines of text
+
+SYNOPSIS
+    sort [FILE...]
+    sort -r [FILE...]
+    sort -n [FILE...]
+    sort -k FIELD                       (JSONL mode)
+
+DESCRIPTION
+    Reads input lines from each FILE (or stdin if none), sorts them,
+    and writes the sorted output to stdout. Default sort is
+    lexicographic (byte-by-byte ASCII).
+
+    -r    reverse the sort order
+    -n    numeric sort (compare leading digit runs as integers)
+    -k FIELD  JSONL mode: parse input as JSONL records, sort by the
+              value of FIELD. Numeric vs string is auto-detected
+              per-record. Used inside `|>` pipelines.
+
+    Sort is in-memory and bounded by the input buffer; very large
+    streams (>~256 KiB) may be truncated.
+
+EXAMPLES
+    sort names.txt
+    sort -r names.txt                   # reverse
+    ps |> sort -k pid                   # sort processes by pid
+    ls /etc | sort                      # ls already does this
+
+EXIT STATUS
+    0   sort completed
+    1   I/O error or buffer overrun
+
+SEE ALSO
+    uniq(1), grep(1), pluck(1)

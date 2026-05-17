@@ -1,0 +1,24 @@
+NAME
+    pwd - print the current working directory
+
+SYNOPSIS
+    pwd
+
+DESCRIPTION
+    Calls SYS_GETCWD and writes the result to stdout.
+
+    There is also a shell builtin `pwd` that does the same thing
+    without forking — the binary exists so that pipelines like
+    `pwd | tr / -` work (because the binary is what gets forked
+    and exec'd into the pipeline stage, not the builtin).
+
+EXAMPLES
+    pwd
+    pwd | tr / -
+
+EXIT STATUS
+    0   cwd printed
+    1   SYS_GETCWD failed
+
+SEE ALSO
+    sh(1), cd

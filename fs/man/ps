@@ -1,0 +1,36 @@
+NAME
+    ps - list running processes
+
+SYNOPSIS
+    ps
+    ps --json
+    ps --advjson
+
+DESCRIPTION
+    Shows every user task currently in the task table. Default
+    output is a column-aligned table with PID, PPID, STATE, NAME.
+
+    Kernel-only tasks (kmain, the reaper, demo tasks) are filtered
+    out — only is_user=1 tasks are listed.
+
+    --advjson (session 81) emits one JSONL record per task with
+    fields: pid, ppid, state, name, uid, gid, rss_pages, cpu_ticks,
+    limits (nested object with rss/cpu/wall/fds caps), sandbox
+    (bitmask of installed syscall masks).
+
+EXAMPLES
+    ps
+    ps |> where state=RUNNING
+    ps |> sort -k pid |> head -5
+
+EXIT STATUS
+    0   listing emitted
+    1   no tasks visible (should not happen — kmain is always there)
+
+SEE ALSO
+    kill(1), id(1), ls(1)
+
+NOTES
+    The state field is one of: READY, RUNNING, BLOCKED, ZOMBIE,
+    DEAD, STOPPED, BLOCKED_ON_CHILD. See kernel/task.h for the
+    full enum.

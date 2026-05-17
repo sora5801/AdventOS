@@ -1,0 +1,36 @@
+NAME
+    ls - list directory contents
+
+SYNOPSIS
+    ls [PATH]
+    ls --json [PATH]
+    ls --advjson [PATH]
+
+DESCRIPTION
+    Lists the entries in PATH (default: current directory). Each
+    entry appears on its own line. No -l (long format) flag for
+    the bare mode; use --json or --advjson for structured output.
+
+    --json    emits a single JSON object {path, entries: [...]}.
+    --advjson emits JSONL (one record per entry, line-terminated).
+              Activated automatically inside a `|>` pipeline; see
+              docs/69-structured-pipelines.md.
+
+    Each --advjson record has:
+      name   16-char directory entry name
+      type   "FILE" or "DIR" (computed from sys_fs_size; -1 = DIR)
+      size   file size in bytes (omitted for dirs)
+      perm   octal mode bits (e.g. 644)
+      uid, gid
+
+EXAMPLES
+    ls
+    ls /etc
+    ls / |> where type=FILE |> count       # structured pipeline
+
+EXIT STATUS
+    0   listing emitted (even an empty dir is success)
+    1   PATH does not exist or is not a directory
+
+SEE ALSO
+    find(1), pluck(1), where(1), count(1)

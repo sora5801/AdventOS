@@ -28,9 +28,10 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
 | In-guest httpd, httpsd, sshd, ircd | ✅ |
 | In-guest clients: nc, wget, telnet, irc, ssh, httpsget | ✅ |
-| Unix coreutils — ls, cat, cp, mv, rm, mkdir, rmdir, chmod, touch, find, head, tail, grep, sort, uniq, wc, tee, tr, seq, echo, date, ps, kill, pwd, id | ✅ |
-| Shells — interactive `sh.elf` with pipes/redirection/jobs/history/tab-completion/env vars | ✅ |
+| Unix coreutils — ls, cat, cp, mv, rm, mkdir, rmdir, chmod, touch, find, head, tail, grep, sort, uniq, wc, tee, tr, seq, echo, date, ps, kill, pwd, id, man | ✅ |
+| Shells — interactive `sh.elf` with pipes/redirection/jobs/history/tab-completion/env vars/mid-line editing | ✅ |
 | Modal editor — `vi.elf` (limited but real) | ✅ |
+| Man pages — 26 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
 | ptrace-based debugger — `dbg.elf` | ✅ |
 | Multi-user with `/etc/passwd`-style login | ✅ |
 | JSON-RPC daemon (`agentd`) exposing the OS surface over loopback | ✅ |
@@ -90,9 +91,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **84 — Usable Unix Phase 2**. See [`docs/71-shell-mid-line-editing.md`](docs/71-shell-mid-line-editing.md) for the latest deep dive (left/right arrows, Home/End, Ctrl-A/E/B/F/W/U/K in `sh.elf`).
+Current session: **85 — Usable Unix Phase 3**. See [`docs/72-man-pages.md`](docs/72-man-pages.md) for the latest deep dive (`man` binary + 26 man pages under `/man/`).
 
 Recent session deep dives:
+- [Session 85 — Man pages](docs/72-man-pages.md)
 - [Session 84 — Shell mid-line editing](docs/71-shell-mid-line-editing.md)
 - [Session 83 — Usable Unix Phase 1: coreutils gap-fill + selftest reliability](docs/70-usable-unix-coreutils.md)
 
@@ -106,7 +108,13 @@ The full session index is in `docs/`. Highlights:
 
 AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BIOS that ships with it. Real-hardware boot has worked in the past but isn't continuously tested. The OS is single-architecture (i386), single-FS (AdventFS), single-machine — no clustering, no live migration, no certifications.
 
-The current phase ("Path A — Usable Unix") is closing the gaps that make daily shell use feel broken: missing coreutils, weak line-editing, no man pages, vi limitations. After that, candidate next phases are self-hosting a C compiler (port `tcc`), a window manager on the VBE framebuffer, more drivers (virtio, AC97 consumer), and a scripting language (probably Lua).
+The current phase ("Path A — Usable Unix") is closing the gaps that make daily shell use feel broken. As of session 85:
+- Phase 1 ✅ — coreutils gap-fill (cp/mv/rm/mkdir/rmdir/chmod/touch/find)
+- Phase 2 ✅ — shell mid-line editing (left/right arrows, Ctrl-A/E/W/U/K)
+- Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
+- Phase 4 (next) — vi polish (search, undo, smoother save/quit)
+
+After Phase 4, candidate next paths are self-hosting a C compiler (port `tcc`), a window manager on the VBE framebuffer, more drivers (virtio, AC97 consumer), and a scripting language (probably Lua).
 
 ## License
 

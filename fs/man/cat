@@ -1,0 +1,29 @@
+NAME
+    cat - concatenate files to stdout
+
+SYNOPSIS
+    cat [FILE...]
+    cat --advjson [FILE...]
+
+DESCRIPTION
+    Writes each FILE's contents to stdout in order. With no FILE,
+    or when FILE is `-`, reads from stdin.
+
+    --advjson mode (session 82) emits each non-empty line of the
+    input as a JSONL record: {"line": "<the line text>"}. Used
+    inside `|>` pipelines so downstream filters like pluck/where/
+    count can operate on text files without breaking the JSONL
+    convention.
+
+EXAMPLES
+    cat hello.txt
+    cat /etc/passwd
+    cat a.txt b.txt > combined.txt          # shell redirection
+    cat /etc/passwd |> count                # how many users
+
+EXIT STATUS
+    0   every FILE was read
+    1   at least one FILE could not be opened
+
+SEE ALSO
+    head(1), tail(1), wc(1), grep(1)

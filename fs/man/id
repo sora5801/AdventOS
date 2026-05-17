@@ -1,0 +1,28 @@
+NAME
+    id - print uid and gid
+
+SYNOPSIS
+    id
+
+DESCRIPTION
+    Calls SYS_GETUID and SYS_GETGID and prints them in the form
+
+      uid=0(root) gid=0
+
+    The user name is looked up by reading /etc/passwd and matching
+    the uid; if no match is found, the (name) parenthetical is
+    omitted.
+
+EXAMPLES
+    id
+
+EXIT STATUS
+    0   always
+
+SEE ALSO
+    login(1), passwd(5)
+
+NOTES
+    No -u / -g / -n flags. Multi-user support (session 47) gave
+    every fork an inherited uid/gid; setuid switches it within
+    the allowed envelope (root → anyone; non-root → no change).

@@ -53,6 +53,7 @@ OUT_IMG           = 'fs.img'
 DIRECTORIES = [
     'etc',
     'mnt',                   # session 42 — USB drive mounts here at /mnt/usb
+    'man',                   # session 85 — man pages (flat layout, no section dirs)
     ('ssl', 'etc'),          # session 59 — CA root store + httpsd server cert/key
 ]
 
@@ -89,6 +90,8 @@ USER_PROGRAMS = [
     ('chmod.elf', 'user/_obj/chmod.bin', None),
     ('touch.elf', 'user/_obj/touch.bin', None),
     ('find.elf',  'user/_obj/find.bin',  None),
+    # Session 85: path-A man-pages binary. Reads /man/<topic>.
+    ('man.elf',   'user/_obj/man.bin',   None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -195,6 +198,36 @@ DATA_FILES = [
     # what agentd's dispatcher accepts; agents read this to learn
     # what they can call.
     ('agent.tools.json', 'fs/etc/agent.tools.json', 'etc'),
+    # Session 85: man pages. Plain-text files under /man/, one per
+    # topic. The `man` binary reads /man/<topic> and writes it to
+    # stdout. No section numbers; flat layout. To add a new page:
+    # drop the text at fs/man/<topic> and add the line here.
+    ('cp',    'fs/man/cp',    'man'),
+    ('mv',    'fs/man/mv',    'man'),
+    ('rm',    'fs/man/rm',    'man'),
+    ('mkdir', 'fs/man/mkdir', 'man'),
+    ('rmdir', 'fs/man/rmdir', 'man'),
+    ('chmod', 'fs/man/chmod', 'man'),
+    ('touch', 'fs/man/touch', 'man'),
+    ('find',  'fs/man/find',  'man'),
+    ('ls',    'fs/man/ls',    'man'),
+    ('cat',   'fs/man/cat',   'man'),
+    ('grep',  'fs/man/grep',  'man'),
+    ('sort',  'fs/man/sort',  'man'),
+    ('head',  'fs/man/head',  'man'),
+    ('tail',  'fs/man/tail',  'man'),
+    ('wc',    'fs/man/wc',    'man'),
+    ('ps',    'fs/man/ps',    'man'),
+    ('kill',  'fs/man/kill',  'man'),
+    ('date',  'fs/man/date',  'man'),
+    ('echo',  'fs/man/echo',  'man'),
+    ('sh',    'fs/man/sh',    'man'),
+    ('ed',    'fs/man/ed',    'man'),
+    ('vi',    'fs/man/vi',    'man'),
+    ('man',   'fs/man/man',   'man'),
+    ('pwd',   'fs/man/pwd',   'man'),
+    ('id',    'fs/man/id',    'man'),
+    ('sleep', 'fs/man/sleep', 'man'),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

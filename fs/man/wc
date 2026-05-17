@@ -1,0 +1,33 @@
+NAME
+    wc - count lines, words, and bytes
+
+SYNOPSIS
+    wc [FILE...]
+    wc -l [FILE...]
+    wc -w [FILE...]
+    wc -c [FILE...]
+
+DESCRIPTION
+    Counts lines, words, and bytes in each FILE (or stdin if none).
+    Default output is "LINES WORDS BYTES FILENAME". With a single
+    flag, only that count is emitted.
+
+      -l    count lines (newline-terminated)
+      -w    count words (whitespace-delimited)
+      -c    count bytes
+
+    A "word" is any maximal run of non-whitespace characters. A
+    "line" is a string ending in a newline; the final unterminated
+    line is still counted.
+
+    --advjson mode (session 82) emits a single JSONL summary record
+    per file: {"file": "...", "lines": N, "words": N, "bytes": N}.
+
+EXAMPLES
+    wc -l /etc/passwd                   # how many users
+    cat *.txt | wc                      # totals across all .txt
+    ls / | wc -l                        # how many entries
+
+EXIT STATUS
+    0   counts emitted
+    1   I/O error

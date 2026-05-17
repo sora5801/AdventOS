@@ -1,0 +1,32 @@
+NAME
+    mv - move/rename a regular file
+
+SYNOPSIS
+    mv SRC DST
+
+DESCRIPTION
+    Renames SRC to DST. Implemented as copy-then-unlink because
+    AdventFS doesn't yet expose a single rename syscall. The copy
+    uses sys_fs_write's atomic sector-run swap, so the data side is
+    safe: SRC stays whole until DST is fully durable.
+
+    Refuses if DST already exists — there is no -f flag. Two-arg
+    form only (no `mv SRC... DSTDIR`).
+
+EXAMPLES
+    mv draft.txt final.txt
+    mv /tmp/build.log /var/log/build.log
+
+EXIT STATUS
+    0   success
+    1   any failure. If the copy succeeded but the unlink failed,
+        BOTH files are left in place; mv exits 1 and the user can
+        decide which to remove. Better than the rename-and-lose
+        case.
+
+SEE ALSO
+    cp(1), rm(1)
+
+NOTES
+    No -i (interactive), no -f (force overwrite), no multi-source
+    form. Added in session 83.

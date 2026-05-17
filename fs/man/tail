@@ -1,0 +1,29 @@
+NAME
+    tail - print the last lines of a file
+
+SYNOPSIS
+    tail [-N] [FILE]
+    tail [FILE]
+
+DESCRIPTION
+    Prints the last 10 lines of FILE (default: stdin). With -N
+    (e.g. -5), prints the last N lines.
+
+    No -f (follow) flag yet — tail reads the file to EOF, finds the
+    last N newlines, and exits. For log-following, you'll need to
+    poll the file size in a loop or wait for the future -f flag.
+
+    Inside a `|>` structured pipeline, tail silently consumes the
+    --advjson flag.
+
+EXAMPLES
+    tail /var/log/build.log
+    tail -1 /etc/passwd                 # last line
+    ps | tail -3                        # last 3 processes by pid
+
+EXIT STATUS
+    0   lines were printed
+    1   FILE could not be opened
+
+SEE ALSO
+    head(1), cat(1), grep(1)

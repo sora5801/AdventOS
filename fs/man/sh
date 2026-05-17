@@ -1,0 +1,57 @@
+NAME
+    sh - the AdventOS shell
+
+SYNOPSIS
+    sh                          interactive prompt
+    sh FILE.sh                  run FILE.sh in a fresh shell
+
+DESCRIPTION
+    The interactive shell. Reads commands from stdin (when
+    interactive) or from a script file, forks+execs each external
+    command, and handles pipelines, redirection, jobs, env vars,
+    and history.
+
+LINE EDITING (sessions 49 + 84)
+    Backspace         erase char before cursor
+    Left / Right      move cursor (also Ctrl-B / Ctrl-F)
+    Home  / Ctrl-A    start of line
+    End   / Ctrl-E    end of line
+    Up / Down         walk the command history
+    Tab               complete a filename from the cwd
+    Ctrl-W            delete the word before cursor
+    Ctrl-U            delete from start of line to cursor
+    Ctrl-K            delete from cursor to end of line
+    Ctrl-C            discard the current line
+
+PIPELINES + REDIRECTION
+    cmd1 | cmd2 | ... [> outfile]
+      Each stage is a separate fork()+exec(); | wires stdin/stdout
+      via SYS_PIPE+SYS_DUP2; > opens an in-RAM tmpfs file you can
+      later cat back.
+
+    cmd1 |> cmd2 |> ...
+      Structured pipeline (session 81). Every stage is run with
+      --advjson; producers emit JSONL records and consumers parse
+      JSONL. See `man pluck`, `man where`, `man count`, and
+      docs/69-structured-pipelines.md.
+
+JOBS
+    cmd &                 run in the background
+    jobs                  list active job table
+    fg %N                 bring job N to foreground
+    bg %N                 resume job N in the background
+
+ENV VARS (session 49)
+    export NAME=value     set; $NAME expands in future commands
+    unset NAME            remove
+    env                   list all current env vars
+
+SCRIPTS
+    sh FILE.sh            run FILE.sh in a fresh shell (env not shared)
+    source FILE.sh        run FILE.sh in THIS shell (env persists)
+
+EXIT
+    exit [CODE]           exit (default code: 0)
+
+SEE ALSO
+    init(1), ed(1), vi(1)

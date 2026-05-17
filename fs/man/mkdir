@@ -1,0 +1,27 @@
+NAME
+    mkdir - create one or more directories
+
+SYNOPSIS
+    mkdir DIR [DIR...]
+
+DESCRIPTION
+    Creates each DIR. The parent directory must already exist — there
+    is no -p flag. If DIR already exists (whether as a file or a
+    directory), mkdir fails for that name.
+
+EXAMPLES
+    mkdir tmp
+    mkdir /var/log /var/spool
+    mkdir nested/subdir         # fails if nested/ doesn't exist
+
+EXIT STATUS
+    0   every DIR was created
+    1   at least one DIR could not be created (already exists, parent
+        missing, FS full, no permission)
+
+SEE ALSO
+    rmdir(1), ls(1)
+
+NOTES
+    No -p (create intermediate dirs), no -m (mode). New dirs get
+    mode 0755 (rwxr-xr-x) and inherit the caller's uid/gid.

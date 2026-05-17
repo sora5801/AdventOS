@@ -1,0 +1,27 @@
+NAME
+    head - print the first lines of a file
+
+SYNOPSIS
+    head [-N] [FILE]
+    head [FILE]
+
+DESCRIPTION
+    Prints the first 10 lines of FILE (default: stdin). With -N
+    (e.g. -5), prints the first N lines.
+
+    Inside a `|>` structured pipeline, head silently consumes the
+    --advjson flag and counts JSONL records the same way it counts
+    text lines — newlines work either way.
+
+EXAMPLES
+    head /etc/passwd
+    head -1 /etc/passwd                 # first line only
+    ps |> sort -k pid |> head -1        # process with lowest pid
+    cat huge.log | head -50
+
+EXIT STATUS
+    0   lines were printed (or FILE was shorter than N)
+    1   FILE could not be opened
+
+SEE ALSO
+    tail(1), cat(1), grep(1)

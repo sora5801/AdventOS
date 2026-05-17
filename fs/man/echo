@@ -1,0 +1,31 @@
+NAME
+    echo - print arguments to stdout
+
+SYNOPSIS
+    echo [ARG...]
+
+DESCRIPTION
+    Writes each ARG to stdout separated by spaces, followed by a
+    newline. Useful for shell scripts and inside pipelines as a
+    constant string source.
+
+    The shell's variable expansion happens BEFORE echo sees its
+    argv — `echo $PATH` is shell-expanded to `echo /` (or wherever
+    PATH is) before the binary runs. echo itself just prints what
+    it's given.
+
+EXAMPLES
+    echo hello world
+    echo $PS1                           # current prompt
+    echo "spaces are fine"              # quotes are shell, not echo
+    echo line1 > out.txt                # redirect to file
+
+EXIT STATUS
+    0   always
+
+SEE ALSO
+    sh(1), cat(1)
+
+NOTES
+    No -n (suppress newline) yet. No -e (interpret escapes). The
+    output is always exactly the argv joined by single spaces + \n.
