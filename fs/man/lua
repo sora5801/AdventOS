@@ -21,7 +21,7 @@ IMPLEMENTED
                    unops (- not #), function calls f(...),
                    indexing t[k] / t.k, table constructors
                    {1,2,3} or {x=1, [k]=v}, function literals
-    Built-ins      print, type, tostring, tonumber, ipairs,
+    Built-ins      print, type, tostring, tonumber, ipairs, pairs, next,
                    pcall, error, last_error, collectgarbage,
                    string.len/sub/upper/lower/rep/find/byte/char,
                    table.insert/concat,
@@ -29,11 +29,19 @@ IMPLEMENTED
                    os.time/exit
     Error handling pcall/error via __builtin_setjmp; the REPL recovers
                    from errors automatically. (session 88)
+                   pcall now returns (true, ...returns) on success or
+                   (false, errmsg) on failure. (session 89)
     Closures       Inner functions capture outer locals at creation
                    time (capture-by-value semantics). (session 88)
     GC             Mark-sweep, triggered after every N allocations
                    (threshold grows geometrically). Manual trigger
                    via collectgarbage(). (session 88)
+    Multi-return   return a, b, c works; receiver: local x, y, z = f()
+                   or x, y, z = f() or for k, v in pairs(t) do.
+                   Max 8 returns per call (silently truncated). (session 89)
+    Generic for    for v1, ..., vN in explist do body end. Standard Lua
+                   iterator protocol: explist yields (iter, state, ctrl)
+                   and each iteration calls iter(state, ctrl). (session 89)
 
 NUMBERS ARE INT32
     Real Lua's numbers are doubles (or int64 in 5.3+). AdventOS user
@@ -52,8 +60,6 @@ NUMBERS ARE INT32
 DELIBERATELY NOT IMPLEMENTED
     - Metatables and __index / __newindex
     - Coroutines
-    - Multiple return values (pcall returns false-on-error rather
-      than (false, msg); use last_error() for the message)
     - Capture-by-reference closures (we do capture-by-value: a
       change to the outer local AFTER the inner function is
       created isn't visible to the inner. Differs from real Lua.)

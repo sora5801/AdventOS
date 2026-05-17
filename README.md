@@ -92,9 +92,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **88 — Path D continues: error handling, closures, GC**. See [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) for the latest deep dive (`pcall` + `error` via `__builtin_setjmp`, capture-by-value closures, mark-sweep GC, `string.find`/`byte`/`char`).
+Current session: **89 — Path D completes: multi-return + generic for**. See [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) for the latest deep dive (multi-return values, multi-assignment, `for k, v in pairs(t)`, real `pairs`/`ipairs`/`next` iterators, proper `pcall` semantics). **Path D is complete.**
 
 Recent session deep dives:
+- [Session 89 — Lua: multi-return + generic for](docs/76-lua-multireturn.md)
 - [Session 88 — Lua: error handling, closures, GC](docs/75-lua-error-handling-and-gc.md)
 - [Session 87 — Lua-syntax interpreter](docs/74-tinylua.md)
 - [Session 86 — vi polish (undo, search/replace, count prefixes, ?pat)](docs/73-vi-polish.md)
@@ -118,7 +119,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 - Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
 - Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
 
-**Path D — Scripting** kicked off in session 87 with a fresh single-file Lua-syntax interpreter (`lua`). Session 88 added `pcall`/`error` (REPL recovers from errors), capture-by-value closures, mark-sweep GC, and more string built-ins. Multi-return values + generic `for k,v in pairs(t)` are the remaining gap, planned for session 89. See [`docs/74-tinylua.md`](docs/74-tinylua.md) for the original design and [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) for the session-88 additions.
+**Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
 
 Remaining candidate paths:
 - **Path B — Self-hosting.** Port `tcc` so AdventOS can compile its own programs.

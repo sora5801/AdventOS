@@ -1,6 +1,5 @@
 -- hello.lua — smoke-test for the AdventOS lua interpreter.
--- Exercises every major feature the interpreter ships, organized
--- by session for tracing.
+-- Organized by session for tracing.
 
 -- ===== Session 87: core types, control flow, recursion =====
 
@@ -16,44 +15,57 @@ local function fact(n)
 end
 print("10! =", fact(10))
 
--- Tables: positional + named, length, indexing, concat.
 local t = { "apple", "banana", "cherry" }
 table.insert(t, "date")
 print("table length:", #t)
 print("joined:", table.concat(t, ", "))
 
--- ===== Session 88: pcall + error =====
+-- ===== Session 88: pcall + closures + GC + string ops =====
 
-local ok = pcall(function()
-    error("intentional failure")
-end)
-print("pcall caught:", ok, "msg:", last_error())
-
--- pcall around a no-error function returns the value through.
-print("pcall ok:", pcall(function() return 42 end))
-
--- ===== Session 88: closures with upvalue capture =====
--- Capture-by-value, so a closure sees the outer locals at creation
--- time. Subsequent changes in the outer scope aren't visible — this
--- is a documented difference from real Lua.
+local ok, msg = pcall(function() error("intentional failure") end)
+print("pcall caught:", ok, "msg:", msg)
+print("pcall ok:",     pcall(function() return 42 end))
 
 local function make_greeter(name)
     return function() return "hello " .. name end
 end
-local g1 = make_greeter("world")
-local g2 = make_greeter("AdventOS")
-print(g1())
-print(g2())
+print(make_greeter("world")())
+print(make_greeter("AdventOS")())
 
--- ===== Session 88: string.find / string.byte / string.char =====
+print("'AdventOS' contains 'Os' at:", string.find("AdventOS", "Os"))
+print("'hello' byte 1:", string.byte("hello", 1))
+print("char 104:", string.char(104))
 
-print("'AdventOS' contains 'Os':", string.find("AdventOS", "Os"))
-print("'hello' first byte:", string.byte("hello", 1))    -- 104
-print("byte 104 as char:", string.char(104))             -- "h"
+-- ===== Session 89: multi-return + generic for =====
 
--- ===== Session 88: GC =====
--- Allocate a bunch and force a collection. Should not crash.
+-- Multi-return from a function.
+local function pair_of(a, b) return a, b end
+local x, y = pair_of(10, 20)
+print("multi-return: x=" .. x .. " y=" .. y)
 
+-- Swap via multi-assignment.
+local p, q = 1, 2
+p, q = q, p
+print("swap: p=" .. p .. " q=" .. q)
+
+-- Generic for with ipairs (positional iteration).
+print("ipairs walk:")
+for i, v in ipairs(t) do
+    print("  [" .. i .. "] = " .. v)
+end
+
+-- Generic for with pairs (full table iteration).
+local config = { name = "AdventOS", version = 1, smp = 2 }
+print("pairs walk:")
+for k, v in pairs(config) do
+    print("  " .. tostring(k) .. " => " .. tostring(v))
+end
+
+-- pcall with real multi-return on success.
+local ok2, a, b, c = pcall(function() return 1, 2, 3 end)
+print("pcall returns:", ok2, a, b, c)
+
+-- ===== GC stress =====
 for i = 1, 500 do
     local junk = { "a", "b", "c", "d" }
     junk[5] = string.rep("x", 16)

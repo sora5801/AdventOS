@@ -171,8 +171,23 @@ struct value {
         struct string  *s;
         struct table   *t;
         struct func    *fn;
-        struct value  (*bi)(int argc, struct value *argv);
+        /* Session 89: builtins return struct values (multi). Single-
+         * value builtins wrap via vs_one(). Refactored from
+         * returning struct value directly in session 87. */
+        struct values (*bi)(int argc, struct value *argv);
     } as;
+};
+
+/* Session 89: multi-return values. Lua allows a function call to
+ * return zero or more values; assignment / return / generic-for can
+ * destructure them. `struct values` is the carrier — a small fixed
+ * array with a count. MAX_RETS=8 is well above what any practical
+ * script uses (real Lua doesn't cap, but ours does and silently
+ * truncates beyond — documented). */
+#define MAX_RETS 8
+struct values {
+    int          n;
+    struct value v[MAX_RETS];
 };
 
 struct string {
@@ -297,8 +312,22 @@ static struct value v_fn(struct func *f) {
     struct value v; v.kind = V_FN; v.as.fn = f; return v;
 }
 
-static struct value v_builtin(struct value (*bi)(int, struct value *)) {
+static struct value v_builtin(struct values (*bi)(int, struct value *)) {
     struct value v; v.kind = V_BUILTIN; v.as.bi = bi; return v;
+}
+
+/* struct values constructors. vs_one wraps a scalar; vs_none is
+ * empty (typed nil-ish — n=0). Most builtins use vs_one. */
+static struct values vs_none(void) {
+    struct values r; r.n = 0; return r;
+}
+static struct values vs_one(struct value v) {
+    struct values r; r.n = 1; r.v[0] = v; return r;
+}
+/* First-value extractor — used everywhere a scalar context wraps a
+ * multi-return result. */
+static struct value vs_first(struct values vs) {
+    return vs.n > 0 ? vs.v[0] : v_nil();
 }
 
 /* Truthiness — Lua: only false and nil are false. */
@@ -628,6 +657,7 @@ enum node_kind {
     N_IF,
     N_WHILE,
     N_FOR_NUM,
+    N_FOR_GEN,        /* session 89: for v1,...,vN in expr do ... end */
     N_BLOCK,
     N_RETURN,
     N_BREAK,
@@ -661,6 +691,13 @@ struct node {
     struct kv_node *kv;
     int             n_kv;
 
+    /* Session 89: second expression list. Used for the RHS of
+     * multi-target N_ASSIGN, the init list of multi-name N_LOCAL,
+     * and the explist of N_FOR_GEN. (The LHS / name list / loop
+     * vars live in `list[]`.) */
+    struct node  **rhs;
+    int            n_rhs;
+
     /* If: pairs of (cond, then_block) in list[]; else_block in body. */
     /* For numeric: target=str, start=a, stop=b, step=c, body=body. */
     /* Local: name list in list[], value list in (alt)? — we restrict
@@ -677,6 +714,7 @@ static struct node *new_node(int kind) {
     n->params = 0; n->n_params = 0;
     n->body = 0;
     n->kv = 0; n->n_kv = 0;
+    n->rhs = 0; n->n_rhs = 0;
     return n;
 }
 
@@ -925,14 +963,42 @@ static struct node *parse_while(void) {
 static struct node *parse_for(void) {
     expect(T_FOR, "'for'");
     if (tk_cur()->kind != T_NAME) die("parse: expected name after 'for'");
-    struct node *n = new_node(N_FOR_NUM);
-    n->str = tk_cur()->s;
+    struct string *first = tk_cur()->s;
     tk_advance();
-    expect(T_ASSIGN, "'='");
-    n->a = parse_expr();
-    expect(T_COMMA, "','");
-    n->b = parse_expr();
-    if (accept(T_COMMA)) n->c = parse_expr();
+    int t = tk_cur()->kind;
+    if (t == T_ASSIGN) {
+        /* Numeric: for name = a, b[, c] do body end */
+        struct node *n = new_node(N_FOR_NUM);
+        n->str = first;
+        tk_advance();
+        n->a = parse_expr();
+        expect(T_COMMA, "','");
+        n->b = parse_expr();
+        if (accept(T_COMMA)) n->c = parse_expr();
+        expect(T_DO, "'do'");
+        n->body = parse_block();
+        expect(T_END_KW, "'end'");
+        return n;
+    }
+    /* Session 89: generic for — for name1[, name2...] in explist do ... end */
+    struct node *n = new_node(N_FOR_GEN);
+    int cap_l = 0;
+    {
+        struct node *nm = new_node(N_NAME);
+        nm->str = first;
+        node_push(&n->list, &n->n_list, &cap_l, nm);
+    }
+    while (accept(T_COMMA)) {
+        if (tk_cur()->kind != T_NAME) die("parse: expected name in for-in var list");
+        struct node *nm = new_node(N_NAME);
+        nm->str = tk_cur()->s;
+        tk_advance();
+        node_push(&n->list, &n->n_list, &cap_l, nm);
+    }
+    expect(T_IN, "'in'");
+    int cap_r = 0;
+    node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
+    while (accept(T_COMMA)) node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
     expect(T_DO, "'do'");
     n->body = parse_block();
     expect(T_END_KW, "'end'");
@@ -942,7 +1008,7 @@ static struct node *parse_for(void) {
 static struct node *parse_local(void) {
     expect(T_LOCAL, "'local'");
     if (accept(T_FUNCTION)) {
-        /* local function name(args) body end */
+        /* local function name(args) body end — no multi-name form */
         if (tk_cur()->kind != T_NAME) die("parse: expected name after 'local function'");
         struct node *n = new_node(N_LOCAL);
         n->str = tk_cur()->s;
@@ -950,11 +1016,37 @@ static struct node *parse_local(void) {
         n->a = parse_func_body();
         return n;
     }
+    /* Session 89: comma-separated names + optional comma-separated
+     * init exprs. Stored as:
+     *   n->str   = first name (kept for single-name backward compat in eval)
+     *   n->list  = array of N_NAME nodes (all names)
+     *   n->a     = first init expr (single-name backward compat)
+     *   n->rhs   = array of init exprs (all of them)
+     *   n->n_rhs > 0 marks the multi-init form. */
     struct node *n = new_node(N_LOCAL);
     if (tk_cur()->kind != T_NAME) die("parse: expected name after 'local'");
-    n->str = tk_cur()->s;
-    tk_advance();
-    if (accept(T_ASSIGN)) n->a = parse_expr();
+    int cap_l = 0;
+    {
+        struct node *nm = new_node(N_NAME);
+        nm->str = tk_cur()->s;
+        tk_advance();
+        node_push(&n->list, &n->n_list, &cap_l, nm);
+    }
+    while (accept(T_COMMA)) {
+        if (tk_cur()->kind != T_NAME) die("parse: expected name after ','");
+        struct node *nm = new_node(N_NAME);
+        nm->str = tk_cur()->s;
+        tk_advance();
+        node_push(&n->list, &n->n_list, &cap_l, nm);
+    }
+    /* Keep the single-name backward-compat shorthand for eval. */
+    n->str = n->list[0]->str;
+    if (accept(T_ASSIGN)) {
+        int cap_r = 0;
+        node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
+        while (accept(T_COMMA)) node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
+        n->a = n->rhs[0];     /* single-init shorthand */
+    }
     return n;
 }
 
@@ -988,8 +1080,13 @@ static struct node *parse_return(void) {
     expect(T_RETURN, "'return'");
     struct node *n = new_node(N_RETURN);
     int t = tk_cur()->kind;
+    /* Session 89: collect comma-separated return exprs into list[]. */
+    int cap = 0;
     if (t != T_END_KW && t != T_ELSE && t != T_ELSEIF && t != T_UNTIL && t != T_SEMI && t != T_END) {
-        n->a = parse_expr();
+        node_push(&n->list, &n->n_list, &cap, parse_expr());
+        while (accept(T_COMMA)) {
+            node_push(&n->list, &n->n_list, &cap, parse_expr());
+        }
     }
     accept(T_SEMI);
     return n;
@@ -1011,12 +1108,26 @@ static struct node *parse_stmt(void) {
         expect(T_END_KW, "'end'");
         return blk;
     }
-    /* Expression statement — either function call or assignment. */
+    /* Expression statement — function call OR multi-target assignment.
+     * Session 89: collect comma-separated LHS exprs (each must be
+     * N_NAME or N_INDEX), then on '=', collect comma-separated RHS. */
     struct node *e = parse_prefix();
-    if (accept(T_ASSIGN)) {
-        struct node *rhs = parse_expr();
+    if (tk_cur()->kind == T_COMMA || tk_cur()->kind == T_ASSIGN) {
         struct node *n = new_node(N_ASSIGN);
-        n->a = e; n->b = rhs;
+        int cap_l = 0, cap_r = 0;
+        node_push(&n->list, &n->n_list, &cap_l, e);
+        while (accept(T_COMMA)) {
+            struct node *lhs = parse_prefix();
+            if (lhs->kind != N_NAME && lhs->kind != N_INDEX)
+                die("parse: assignment target must be name or index (line %d)", lhs->line);
+            node_push(&n->list, &n->n_list, &cap_l, lhs);
+        }
+        expect(T_ASSIGN, "'='");
+        node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
+        while (accept(T_COMMA)) node_push(&n->rhs, &n->n_rhs, &cap_r, parse_expr());
+        /* Single-target shorthand fields for eval_block's existing path. */
+        n->a = n->list[0];
+        n->b = n->rhs[0];
         return n;
     }
     /* Otherwise must be a call. */
@@ -1139,7 +1250,7 @@ static void local_declare(struct env *e, struct string *name, struct value v) {
 
 /* Per-loop flow control. Returned by eval_block to signal break/return. */
 enum flow { FL_NORMAL = 0, FL_BREAK, FL_RETURN };
-struct ret { enum flow f; struct value v; };
+struct ret { enum flow f; struct values vs; };
 
 static struct value eval_expr(struct env *e, struct node *n);
 static struct ret  eval_block(struct env *e, struct node *blk);
@@ -1298,7 +1409,9 @@ static struct value eval_expr(struct env *e, struct node *n) {
     return v_nil();
 }
 
-static struct value eval_call(struct env *outer, struct node *call) {
+/* Session 89: multi-return call. Returns the full struct values
+ * from a user function or builtin. eval_call (single) wraps this. */
+static struct values eval_call_multi(struct env *outer, struct node *call) {
     struct value callee = eval_expr(outer, call->a);
     struct value args[16];
     int argc = call->n_list;
@@ -1308,23 +1421,54 @@ static struct value eval_call(struct env *outer, struct node *call) {
     if (callee.kind != V_FN)      die("attempt to call non-function (line %d)", call->line);
     struct func *f = callee.as.fn;
     struct env *child = make_env(outer->globals);
-    child->host_fn = f;     /* session 88: enable upvalue lookup */
+    child->host_fn = f;
     int n = f->n_params < argc ? f->n_params : argc;
     for (int i = 0; i < n; i++) {
         local_declare(child, f->params[i]->str, args[i]);
     }
-    /* Pad missing params with nil. */
     for (int i = n; i < f->n_params; i++) {
         local_declare(child, f->params[i]->str, v_nil());
     }
     struct ret r = eval_block(child, f->body);
     free_env(child);
-    if (r.f == FL_RETURN) return r.v;
-    return v_nil();
+    if (r.f == FL_RETURN) return r.vs;
+    return vs_none();
+}
+
+static struct value eval_call(struct env *outer, struct node *call) {
+    return vs_first(eval_call_multi(outer, call));
+}
+
+/* Evaluate one expression with multi-expansion: if the node is a
+ * call, return all its returns. Otherwise return a single-value
+ * list. Used in return / local / assign RHS contexts where the
+ * LAST item expands. */
+static struct values eval_expr_multi(struct env *e, struct node *n) {
+    if (n && n->kind == N_CALL) return eval_call_multi(e, n);
+    return vs_one(eval_expr(e, n));
+}
+
+/* Evaluate a list of expressions into a flat values list, expanding
+ * the LAST one if it's a call. Used by N_RETURN / N_LOCAL / N_ASSIGN
+ * for the right-hand-side packing. Truncated at MAX_RETS. */
+static struct values eval_pack(struct env *e, struct node **list, int n_list) {
+    struct values out;
+    out.n = 0;
+    for (int i = 0; i < n_list && out.n < MAX_RETS; i++) {
+        int is_last = (i == n_list - 1);
+        if (is_last) {
+            struct values vs = eval_expr_multi(e, list[i]);
+            for (int j = 0; j < vs.n && out.n < MAX_RETS; j++)
+                out.v[out.n++] = vs.v[j];
+        } else {
+            out.v[out.n++] = eval_expr(e, list[i]);
+        }
+    }
+    return out;
 }
 
 static struct ret eval_block(struct env *e, struct node *blk) {
-    struct ret r; r.f = FL_NORMAL; r.v = v_nil();
+    struct ret r; r.f = FL_NORMAL; r.vs = vs_none();
     int saved_locals = e->n_locals;
     for (int i = 0; i < blk->n_list; i++) {
         /* Session 88: try GC between statements. Safe because no
@@ -1334,20 +1478,114 @@ static struct ret eval_block(struct env *e, struct node *blk) {
         struct node *s = blk->list[i];
         switch (s->kind) {
             case N_LOCAL: {
-                struct value v = s->a ? eval_expr(e, s->a) : v_nil();
-                local_declare(e, s->str, v);
+                /* Session 89: multi-name local with multi-init.
+                 * Parser fills s->list[] with name nodes; s->rhs[] with
+                 * init exprs (may be empty for `local a, b` without =).
+                 * For `local function name(...) end` the parser uses
+                 * the single-name shorthand (s->str + s->a). */
+                if (s->n_list == 0 && s->str) {
+                    /* local-function path. */
+                    struct value v = s->a ? eval_expr(e, s->a) : v_nil();
+                    local_declare(e, s->str, v);
+                    break;
+                }
+                struct values rhs;
+                if (s->n_rhs > 0) {
+                    rhs = eval_pack(e, s->rhs, s->n_rhs);
+                } else {
+                    rhs.n = 0;
+                }
+                for (int j = 0; j < s->n_list; j++) {
+                    struct value v = (j < rhs.n) ? rhs.v[j] : v_nil();
+                    local_declare(e, s->list[j]->str, v);
+                }
                 break;
             }
             case N_ASSIGN: {
-                struct value v = eval_expr(e, s->b);
-                if (s->a->kind == N_NAME) var_set(e, s->a->str, v);
-                else if (s->a->kind == N_INDEX) {
-                    struct value t = eval_expr(e, s->a->a);
-                    struct value k = eval_expr(e, s->a->b);
-                    if (t.kind != V_TABLE) die("assign to non-table index (line %d)", s->line);
-                    table_set(t.as.t, k, v);
+                /* Session 89: multi-target multi-source assignment.
+                 * s->list[] = LHS exprs (each N_NAME or N_INDEX),
+                 * s->rhs[]  = RHS exprs (last one expands if call).
+                 * Evaluate ALL RHS into a flat values list FIRST
+                 * (so a, b = b, a swaps correctly), then assign. */
+                struct values rhs = eval_pack(e, s->rhs, s->n_rhs);
+                for (int j = 0; j < s->n_list; j++) {
+                    struct value v = (j < rhs.n) ? rhs.v[j] : v_nil();
+                    struct node *target = s->list[j];
+                    if (target->kind == N_NAME) {
+                        var_set(e, target->str, v);
+                    } else if (target->kind == N_INDEX) {
+                        struct value t = eval_expr(e, target->a);
+                        struct value k = eval_expr(e, target->b);
+                        if (t.kind != V_TABLE)
+                            die("assign to non-table index (line %d)", s->line);
+                        table_set(t.as.t, k, v);
+                    } else {
+                        die("assignment target not assignable (line %d)", s->line);
+                    }
                 }
-                else die("assignment target not assignable (line %d)", s->line);
+                break;
+            }
+            case N_FOR_GEN: {
+                /* Generic for: for v1, v2, ..., vN in explist do body end
+                 *
+                 * Lua's semantics:
+                 *   1. Eval explist as a packed values list. The first
+                 *      three are: iter_fn, state, control_var (initial).
+                 *   2. Loop:
+                 *      call iter_fn(state, control_var) -> multi values
+                 *      v1..vN = those values (padded with nil)
+                 *      if v1 is nil, stop
+                 *      control_var := v1
+                 *      eval body
+                 */
+                struct values exprs = eval_pack(e, s->rhs, s->n_rhs);
+                struct value iter_fn = (exprs.n > 0) ? exprs.v[0] : v_nil();
+                struct value state   = (exprs.n > 1) ? exprs.v[1] : v_nil();
+                struct value ctrl    = (exprs.n > 2) ? exprs.v[2] : v_nil();
+                /* Declare the loop vars as locals; we'll write them
+                 * each iteration. */
+                int slot0 = e->n_locals;
+                for (int j = 0; j < s->n_list; j++)
+                    local_declare(e, s->list[j]->str, v_nil());
+                for (;;) {
+                    /* Call iter_fn(state, ctrl). */
+                    struct value call_args[2];
+                    call_args[0] = state;
+                    call_args[1] = ctrl;
+                    struct values out;
+                    if (iter_fn.kind == V_BUILTIN) {
+                        out = iter_fn.as.bi(2, call_args);
+                    } else if (iter_fn.kind == V_FN) {
+                        struct func *f = iter_fn.as.fn;
+                        struct env *child = make_env(e->globals);
+                        child->host_fn = f;
+                        int n2 = f->n_params < 2 ? f->n_params : 2;
+                        for (int k = 0; k < n2; k++)
+                            local_declare(child, f->params[k]->str, call_args[k]);
+                        for (int k = n2; k < f->n_params; k++)
+                            local_declare(child, f->params[k]->str, v_nil());
+                        struct ret rr = eval_block(child, f->body);
+                        free_env(child);
+                        out = (rr.f == FL_RETURN) ? rr.vs : vs_none();
+                    } else {
+                        die("for: iterator must be function (line %d)", s->line);
+                        out = vs_none();
+                    }
+                    /* If first return is nil, we're done. */
+                    struct value first_v = (out.n > 0) ? out.v[0] : v_nil();
+                    if (first_v.kind == V_NIL) break;
+                    /* Bind loop vars. */
+                    for (int j = 0; j < s->n_list; j++) {
+                        e->locals[slot0 + j].value = (j < out.n) ? out.v[j] : v_nil();
+                    }
+                    /* Advance control variable. */
+                    ctrl = first_v;
+                    /* Run body. */
+                    r = eval_block(e, s->body);
+                    if (r.f == FL_BREAK)  { r.f = FL_NORMAL; break; }
+                    if (r.f == FL_RETURN) goto out;
+                }
+                e->n_locals = slot0;     /* pop loop vars */
                 break;
             }
             case N_FUNC_DECL: {
@@ -1406,8 +1644,23 @@ static struct ret eval_block(struct env *e, struct node *blk) {
                 break;
             }
             case N_RETURN: {
+                /* Session 89: multi-return. The parser now puts the
+                 * comma-separated return exprs in s->list[]. If the
+                 * LAST one is a call, it expands to its full multi-
+                 * value result (Lua semantics). Otherwise it's scalar
+                 * like every other expr in the list. */
                 r.f = FL_RETURN;
-                r.v = s->a ? eval_expr(e, s->a) : v_nil();
+                r.vs.n = 0;
+                for (int j = 0; j < s->n_list && r.vs.n < MAX_RETS; j++) {
+                    int is_last = (j == s->n_list - 1);
+                    if (is_last && s->list[j]->kind == N_CALL) {
+                        struct values vs = eval_call_multi(e, s->list[j]);
+                        for (int k = 0; k < vs.n && r.vs.n < MAX_RETS; k++)
+                            r.vs.v[r.vs.n++] = vs.v[k];
+                    } else {
+                        r.vs.v[r.vs.n++] = eval_expr(e, s->list[j]);
+                    }
+                }
                 goto out;
             }
             case N_BREAK: {
@@ -1436,77 +1689,103 @@ out:
 static void out_str(const char *s) { sys_write(1, s, s_len(s)); }
 static void out_chr(char c)        { sys_write(1, &c, 1); }
 
-static struct value bi_print(int argc, struct value *argv) {
+static struct values bi_print(int argc, struct value *argv) {
     for (int i = 0; i < argc; i++) {
         if (i) out_chr('\t');
         struct string *s = to_str(argv[i]);
         sys_write(1, s->data, s->len);
     }
     out_chr('\n');
-    return v_nil();
+    return vs_one(v_nil());
 }
 
-static struct value bi_type(int argc, struct value *argv) {
+static struct values bi_type(int argc, struct value *argv) {
     if (argc < 1) die("type: missing arg");
     switch (argv[0].kind) {
-        case V_NIL:   return v_strz("nil");
-        case V_BOOL:  return v_strz("boolean");
-        case V_NUM:   return v_strz("number");
-        case V_STR:   return v_strz("string");
-        case V_TABLE: return v_strz("table");
-        case V_FN: case V_BUILTIN: return v_strz("function");
+        case V_NIL:   return vs_one(v_strz("nil"));
+        case V_BOOL:  return vs_one(v_strz("boolean"));
+        case V_NUM:   return vs_one(v_strz("number"));
+        case V_STR:   return vs_one(v_strz("string"));
+        case V_TABLE: return vs_one(v_strz("table"));
+        case V_FN: case V_BUILTIN: return vs_one(v_strz("function"));
     }
-    return v_strz("?");
+    return vs_one(v_strz("?"));
 }
 
-static struct value bi_tostring(int argc, struct value *argv) {
+static struct values bi_tostring(int argc, struct value *argv) {
     if (argc < 1) die("tostring: missing arg");
-    return v_str_take(to_str(argv[0]));
+    return vs_one(v_str_take(to_str(argv[0])));
 }
 
-static struct value bi_tonumber(int argc, struct value *argv) {
-    if (argc < 1) return v_nil();
-    if (argv[0].kind == V_NUM) return argv[0];
+static struct values bi_tonumber(int argc, struct value *argv) {
+    if (argc < 1) return vs_one(v_nil());
+    if (argv[0].kind == V_NUM) return vs_one(argv[0]);
     if (argv[0].kind == V_STR) {
         int r;
-        if (parse_int(argv[0].as.s->data, argv[0].as.s->len, &r)) return v_num(r);
+        if (parse_int(argv[0].as.s->data, argv[0].as.s->len, &r)) return vs_one(v_num(r));
     }
-    return v_nil();
+    return vs_one(v_nil());
 }
 
-static struct value bi_ipairs_iter(int argc, struct value *argv) {
-    /* args: (table, current_index). Return (next_index, value) or nil
-     * to terminate. */
-    if (argc < 2) return v_nil();
-    if (argv[0].kind != V_TABLE) return v_nil();
+/* Session 89: proper Lua iterator protocol. ipairs(t) returns
+ * (iter, t, 0); each iter call returns (i+1, t[i+1]) or nil to
+ * stop. pairs(t) returns (next, t, nil); next(t, k) returns the
+ * key/value pair after k (or any pair if k is nil), or nil at end. */
+static struct values bi_ipairs_iter(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_TABLE) return vs_none();
     int i = to_num(argv[1], "ipairs iter") + 1;
     struct value v = table_get(argv[0].as.t, v_num(i));
-    if (v.kind == V_NIL) return v_nil();
-    /* We only have single-return in this subset, so callers do
-     * `for i, v in ipairs(t) do` style which expects multi-return.
-     * We approximate by returning a 2-element table; the for-loop
-     * doesn't support it. Document and don't worry about this. */
-    struct table *t = table_new();
-    table_set(t, v_num(1), v_num(i));
-    table_set(t, v_num(2), v);
-    return v_table(t);
+    if (v.kind == V_NIL) return vs_none();
+    struct values r; r.n = 2; r.v[0] = v_num(i); r.v[1] = v;
+    return r;
 }
-static struct value bi_ipairs(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_TABLE) return v_nil();
-    /* Multi-return not supported — wrap as a table the user can
-     * inspect, or return the iter fn for manual use. Real ipairs
-     * returns (iter_fn, t, 0); we just return iter_fn. */
-    (void)argv;
-    return v_builtin(bi_ipairs_iter);
+static struct values bi_ipairs(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_TABLE)
+        die("ipairs: argument must be a table");
+    struct values r;
+    r.n = 3;
+    r.v[0] = v_builtin(bi_ipairs_iter);
+    r.v[1] = argv[0];
+    r.v[2] = v_num(0);
+    return r;
 }
 
-static struct value bi_string_len(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_STR) return v_num(0);
-    return v_num(argv[0].as.s->len);
+/* next(t, k) — walks the table's hash slots in insertion order.
+ * With k==nil, returns the first entry. With k matching some key,
+ * returns the entry after it. Returns nothing (n=0) at end. */
+static struct values bi_next(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_TABLE) return vs_none();
+    struct table *t = argv[0].as.t;
+    int start = 0;
+    if (argc >= 2 && argv[1].kind != V_NIL) {
+        int idx = table_find(t, argv[1]);
+        if (idx < 0) return vs_none();
+        start = idx + 1;
+    }
+    if (start >= t->count) return vs_none();
+    struct values r; r.n = 2;
+    r.v[0] = t->kv[start].k;
+    r.v[1] = t->kv[start].v;
+    return r;
+}
+static struct values bi_pairs(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_TABLE)
+        die("pairs: argument must be a table");
+    struct values r;
+    r.n = 3;
+    r.v[0] = v_builtin(bi_next);
+    r.v[1] = argv[0];
+    r.v[2] = v_nil();
+    return r;
 }
 
-static struct value bi_string_sub(int argc, struct value *argv) {
-    if (argc < 2 || argv[0].kind != V_STR) return v_strz("");
+static struct values bi_string_len(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_STR) return vs_one(v_num(0));
+    return vs_one(v_num(argv[0].as.s->len));
+}
+
+static struct values bi_string_sub(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_STR) return vs_one(v_strz(""));
     struct string *s = argv[0].as.s;
     int i = (int)to_num(argv[1], "string.sub i");
     int j = (argc >= 3) ? (int)to_num(argv[2], "string.sub j") : s->len;
@@ -1515,32 +1794,32 @@ static struct value bi_string_sub(int argc, struct value *argv) {
     if (j < 0) j = s->len + j + 1;
     if (i < 1) i = 1;
     if (j > s->len) j = s->len;
-    if (i > j) return v_strz("");
-    return v_str(s->data + i - 1, j - i + 1);
+    if (i > j) return vs_one(v_strz(""));
+    return vs_one(v_str(s->data + i - 1, j - i + 1));
 }
 
-static struct value bi_string_upper(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_STR) return v_strz("");
+static struct values bi_string_upper(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_STR) return vs_one(v_strz(""));
     struct string *s = argv[0].as.s;
     struct string *r = make_string(s->data, s->len);
     for (int i = 0; i < r->len; i++) {
         if (r->data[i] >= 'a' && r->data[i] <= 'z') r->data[i] -= 32;
     }
-    return v_str_take(r);
+    return vs_one(v_str_take(r));
 }
 
-static struct value bi_string_lower(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_STR) return v_strz("");
+static struct values bi_string_lower(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_STR) return vs_one(v_strz(""));
     struct string *s = argv[0].as.s;
     struct string *r = make_string(s->data, s->len);
     for (int i = 0; i < r->len; i++) {
         if (r->data[i] >= 'A' && r->data[i] <= 'Z') r->data[i] += 32;
     }
-    return v_str_take(r);
+    return vs_one(v_str_take(r));
 }
 
-static struct value bi_string_rep(int argc, struct value *argv) {
-    if (argc < 2 || argv[0].kind != V_STR) return v_strz("");
+static struct values bi_string_rep(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_STR) return vs_one(v_strz(""));
     struct string *s = argv[0].as.s;
     int n = (int)to_num(argv[1], "string.rep n");
     if (n < 0) n = 0;
@@ -1550,11 +1829,11 @@ static struct value bi_string_rep(int argc, struct value *argv) {
         for (int j = 0; j < s->len; j++) r->data[k * s->len + j] = s->data[j];
     }
     r->data[r->len] = 0;
-    return v_str_take(r);
+    return vs_one(v_str_take(r));
 }
 
-static struct value bi_table_insert(int argc, struct value *argv) {
-    if (argc < 2 || argv[0].kind != V_TABLE) return v_nil();
+static struct values bi_table_insert(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_TABLE) return vs_one(v_nil());
     struct table *t = argv[0].as.t;
     /* Two forms: table.insert(t, v) — append; table.insert(t, pos, v). */
     if (argc == 2) {
@@ -1570,11 +1849,11 @@ static struct value bi_table_insert(int argc, struct value *argv) {
         }
         table_set(t, v_num(pos), v);
     }
-    return v_nil();
+    return vs_one(v_nil());
 }
 
-static struct value bi_table_concat(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_TABLE) return v_strz("");
+static struct values bi_table_concat(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_TABLE) return vs_one(v_strz(""));
     struct table *t = argv[0].as.t;
     const char *sep = "";
     int sep_len = 0;
@@ -1603,59 +1882,58 @@ static struct value bi_table_concat(int argc, struct value *argv) {
         }
     }
     r->data[o] = 0;
-    return v_str_take(r);
+    return vs_one(v_str_take(r));
 }
 
-static struct value bi_io_write(int argc, struct value *argv) {
+static struct values bi_io_write(int argc, struct value *argv) {
     for (int i = 0; i < argc; i++) {
         struct string *s = to_str(argv[i]);
         sys_write(1, s->data, s->len);
     }
-    return v_nil();
+    return vs_one(v_nil());
 }
 
-static struct value bi_io_read(int argc, struct value *argv) {
+static struct values bi_io_read(int argc, struct value *argv) {
     (void)argc; (void)argv;
     char buf[256];
     int n = sys_read_line(buf, sizeof(buf));
-    if (n <= 0) return v_nil();
+    if (n <= 0) return vs_one(v_nil());
     /* sys_read_line includes trailing newline; strip it. */
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) n--;
-    return v_str(buf, n);
+    return vs_one(v_str(buf, n));
 }
 
-static struct value bi_os_time(int argc, struct value *argv) {
+static struct values bi_os_time(int argc, struct value *argv) {
     (void)argc; (void)argv;
-    return v_num((int)sys_time());
+    return vs_one(v_num((int)sys_time()));
 }
 
-static struct value bi_os_exit(int argc, struct value *argv) {
+static struct values bi_os_exit(int argc, struct value *argv) {
     int code = (argc >= 1) ? to_num(argv[0], "os.exit") : 0;
     sys_exit(code);
-    return v_nil();     /* unreachable */
+    return vs_none();
 }
 
-/* Session 88: pcall(f, args...) — call f protected. On success
- * returns the result. On error, returns nil (in a real Lua you'd
- * get (false, errmsg); we'd need multi-return for that, and we
- * don't have multi-return in this session. As a compromise we
- * return false on error AND stash the message in `last_error()`).
+/* Session 89: pcall(f, args...) — call f protected. Real Lua
+ * semantics now restored:
+ *   - On success: returns (true, ...returns of f)
+ *   - On error:  returns (false, errmsg)
  *
- * Note: this is intentionally a thin shim around __builtin_setjmp.
- * The "real" Lua semantics need multi-return; a follow-on session
- * with multi-return values can clean this up. */
+ * The pre-session-89 single-return shim is gone; last_error() stays
+ * around for code that wants to query the message later but isn't
+ * needed for the canonical Lua pattern any more. */
 static struct string *g_last_error;
 
-static struct value bi_last_error(int argc, struct value *argv) {
+static struct values bi_last_error(int argc, struct value *argv) {
     (void)argc; (void)argv;
-    if (!g_last_error) return v_strz("");
-    return v_str_take(g_last_error);
+    if (!g_last_error) return vs_one(v_strz(""));
+    return vs_one(v_str_take(g_last_error));
 }
 
-static struct value bi_pcall(int argc, struct value *argv) {
-    if (argc < 1) return v_bool(0);
+static struct values bi_pcall(int argc, struct value *argv) {
+    if (argc < 1) return vs_one(v_bool(0));
     struct value callee = argv[0];
-    if (callee.kind != V_FN && callee.kind != V_BUILTIN) return v_bool(0);
+    if (callee.kind != V_FN && callee.kind != V_BUILTIN) return vs_one(v_bool(0));
 
     struct err_frame frame;
     frame.msg[0] = 0;
@@ -1664,46 +1942,49 @@ static struct value bi_pcall(int argc, struct value *argv) {
     g_err_stack = &frame;
 
     if (__builtin_setjmp(frame.jmp) == 0) {
-        struct value r;
+        struct values inner;
         if (callee.kind == V_BUILTIN) {
-            r = callee.as.bi(argc - 1, argv + 1);
+            inner = callee.as.bi(argc - 1, argv + 1);
         } else {
-            /* User function — need to set up a call. Without access
-             * to the outer env at this point, build a minimal one
-             * pointing at globals. The function body sees its
-             * params + globals (no captured locals — closures cover
-             * that path separately if/when they land). */
             struct func *f = callee.as.fn;
             struct env *child = make_env(g_globals);
-            child->host_fn = f;     /* session 88: closure context */
+            child->host_fn = f;
             int n = f->n_params < (argc - 1) ? f->n_params : (argc - 1);
-            for (int i = 0; i < n; i++) {
+            for (int i = 0; i < n; i++)
                 local_declare(child, f->params[i]->str, argv[1 + i]);
-            }
-            for (int i = n; i < f->n_params; i++) {
+            for (int i = n; i < f->n_params; i++)
                 local_declare(child, f->params[i]->str, v_nil());
-            }
-            struct ret ret = eval_block(child, f->body);
+            struct ret r = eval_block(child, f->body);
             free_env(child);
-            r = (ret.f == FL_RETURN) ? ret.v : v_nil();
+            inner = (r.f == FL_RETURN) ? r.vs : vs_none();
         }
         g_err_stack = frame.prev;
         g_last_error = 0;
-        return r;
+        /* Prepend `true` to inner; cap at MAX_RETS. */
+        struct values out;
+        out.n = 0;
+        out.v[out.n++] = v_bool(1);
+        for (int i = 0; i < inner.n && out.n < MAX_RETS; i++)
+            out.v[out.n++] = inner.v[i];
+        return out;
     }
-    /* Caught an error. */
+    /* Caught an error — return (false, errmsg). */
     g_err_stack = frame.prev;
     g_last_error = make_string(frame.msg, frame.msg_len);
-    return v_bool(0);
+    struct values out;
+    out.n = 2;
+    out.v[0] = v_bool(0);
+    out.v[1] = v_str(frame.msg, frame.msg_len);
+    return out;
 }
 
 /* error(msg) — raise an error. Without pcall on the stack, the
  * interpreter exits. With pcall, the longjmp in die() catches.   */
-static struct value bi_error(int argc, struct value *argv) {
+static struct values bi_error(int argc, struct value *argv) {
     if (argc < 1) die("error called");
     struct string *s = to_str(argv[0]);
     die("%s", s->data);
-    return v_nil();     /* unreachable */
+    return vs_none();
 }
 
 /* string.find(s, pattern, [init], [plain])
@@ -1713,36 +1994,36 @@ static struct value bi_error(int argc, struct value *argv) {
  *   match. (Real Lua returns start AND end; we don't have
  *   multi-return yet, so the caller computes end as start +
  *   #pattern - 1 if needed.) */
-static struct value bi_string_find(int argc, struct value *argv) {
-    if (argc < 2 || argv[0].kind != V_STR || argv[1].kind != V_STR) return v_nil();
+static struct values bi_string_find(int argc, struct value *argv) {
+    if (argc < 2 || argv[0].kind != V_STR || argv[1].kind != V_STR) return vs_one(v_nil());
     struct string *s = argv[0].as.s;
     struct string *p = argv[1].as.s;
     int start = (argc >= 3) ? to_num(argv[2], "string.find init") : 1;
     if (start < 1) start = 1;
-    if (p->len == 0) return v_num(start);
+    if (p->len == 0) return vs_one(v_num(start));
     int last = s->len - p->len;
     for (int i = start - 1; i <= last; i++) {
         int ok = 1;
         for (int j = 0; j < p->len; j++) {
             if (s->data[i + j] != p->data[j]) { ok = 0; break; }
         }
-        if (ok) return v_num(i + 1);
+        if (ok) return vs_one(v_num(i + 1));
     }
-    return v_nil();
+    return vs_one(v_nil());
 }
 
 /* string.byte(s, [i]) — returns the byte value at position i (1-indexed,
  * default 1). Useful for low-level string inspection. */
-static struct value bi_string_byte(int argc, struct value *argv) {
-    if (argc < 1 || argv[0].kind != V_STR) return v_nil();
+static struct values bi_string_byte(int argc, struct value *argv) {
+    if (argc < 1 || argv[0].kind != V_STR) return vs_one(v_nil());
     struct string *s = argv[0].as.s;
     int i = (argc >= 2) ? to_num(argv[1], "string.byte i") : 1;
-    if (i < 1 || i > s->len) return v_nil();
-    return v_num((unsigned char)s->data[i - 1]);
+    if (i < 1 || i > s->len) return vs_one(v_nil());
+    return vs_one(v_num((unsigned char)s->data[i - 1]));
 }
 
 /* string.char(n1, n2, ...) — builds a string from byte values. */
-static struct value bi_string_char(int argc, struct value *argv) {
+static struct values bi_string_char(int argc, struct value *argv) {
     struct string *r = (struct string *)malloc(sizeof(*r) + argc + 1);
     r->len = argc;
     for (int i = 0; i < argc; i++) {
@@ -1750,7 +2031,7 @@ static struct value bi_string_char(int argc, struct value *argv) {
         r->data[i] = (char)b;
     }
     r->data[argc] = 0;
-    return v_str_take(r);
+    return vs_one(v_str_take(r));
 }
 
 /* ---------- Mark-sweep GC (session 88) --------------------------- */
@@ -1840,10 +2121,10 @@ static void gc_maybe_collect(void) {
 }
 
 /* Lua: collectgarbage("collect") forces a collection. */
-static struct value bi_collectgarbage(int argc, struct value *argv) {
+static struct values bi_collectgarbage(int argc, struct value *argv) {
     (void)argc; (void)argv;
     gc_collect();
-    return v_nil();
+    return vs_one(v_nil());
 }
 
 /* Wire up the standard library — fill the globals table with sub-
@@ -1854,6 +2135,8 @@ static void install_stdlib(struct table *g) {
     table_set(g, v_strz("tostring"),    v_builtin(bi_tostring));
     table_set(g, v_strz("tonumber"),    v_builtin(bi_tonumber));
     table_set(g, v_strz("ipairs"),      v_builtin(bi_ipairs));
+    table_set(g, v_strz("pairs"),       v_builtin(bi_pairs));
+    table_set(g, v_strz("next"),        v_builtin(bi_next));
     table_set(g, v_strz("pcall"),       v_builtin(bi_pcall));
     table_set(g, v_strz("error"),       v_builtin(bi_error));
     table_set(g, v_strz("last_error"),  v_builtin(bi_last_error));
