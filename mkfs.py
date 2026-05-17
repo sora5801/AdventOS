@@ -262,6 +262,8 @@ DATA_FILES = [
     ('enums.c',   'fs/enums.c',   None),
     # Session 104 — typedef demo.
     ('typedefs.c','fs/typedefs.c',None),
+    # Session 105 — variadic-functions demo.
+    ('vararg.c',  'fs/vararg.c',  None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

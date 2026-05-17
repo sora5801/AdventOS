@@ -140,6 +140,18 @@ IMPLEMENTED
                    puts(s)                     string + newline   (session 91)
                    print_str(s)                string, no newline (session 91)
                    printf(fmt_lit, ...)        formatted output   (session 94)
+                   va_start(ap, last)          start arg walker   (session 105)
+                   va_arg(ap)                  read next 4-byte arg, advance ap
+                   va_end(ap)                  no-op (matches real C signature)
+
+    Variadics      int foo(int n, ...) { ... }                    (session 105)
+                                                Trailing `...` makes a
+                                                function variadic; cc
+                                                relaxes the arg-count
+                                                check for variadic-tagged
+                                                functions. User declares
+                                                `int ap;` and walks with
+                                                va_start/va_arg/va_end.
 
     printf format  %d  signed decimal int
                    %s  char* (NUL-terminated string)
@@ -168,8 +180,8 @@ CODEGEN
     past EAX/EBX, no peephole. Produces correct but bulky code.
 
 DELIBERATELY NOT IMPLEMENTED
-    - variadic functions in general (printf is a compile-time
-      intrinsic, not a real variadic function)
+    - variadic args other than int-sized (no float/double/struct in
+      `va_arg`; everything is treated as a 4-byte slot)
     - %f / floating-point — no FPU support in user code
     - width / precision modifiers in printf (e.g. %5d, %.3s)
     - function-like macros: #define ADD(a,b) ((a)+(b))
@@ -243,6 +255,8 @@ EXAMPLES
     enum constants in conditionals + bitwise expressions.
     Sample at /typedefs.c demonstrates scalar, pointer, struct-value,
     and struct-pointer typedefs in locals, globals, params, returns.
+    Sample at /vararg.c demonstrates user-defined variadic functions
+    using va_start / va_arg / va_end.
 
 EXIT STATUS
     0   compile succeeded

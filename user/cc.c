@@ -132,6 +132,8 @@ enum {
     T_QUESTION, T_COLON,
     /* Session 97 — struct member access. */
     T_DOT, T_ARROW,
+    /* Session 105 — variadic functions. */
+    T_ELLIPSIS,
 };
 
 #define NAME_MAX 24
@@ -687,7 +689,16 @@ static void lex_all(const char *src, int len) {
                     push_tok(T_ARROW, g_line); g_pos += 2;
                 } else { push_tok(T_MINUS, g_line); g_pos++; }
                 break;
-            case '.': push_tok(T_DOT, g_line); g_pos++; break;
+            case '.':
+                /* Session 105 — recognize `...` as T_ELLIPSIS for
+                 * variadic function declarations. Otherwise plain `.`
+                 * for struct member access (session 97). */
+                if (g_pos + 2 < g_src_len && g_src[g_pos + 1] == '.' && g_src[g_pos + 2] == '.') {
+                    push_tok(T_ELLIPSIS, g_line); g_pos += 3;
+                } else {
+                    push_tok(T_DOT, g_line); g_pos++;
+                }
+                break;
             case '*':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_STAR_EQ, g_line); g_pos += 2;
@@ -1622,6 +1633,14 @@ static struct node *parse_func(void) {
     expect(T_LPAREN, "'('");
     int cap = 0;
     while (tk_cur()->kind != T_RPAREN) {
+        /* Session 105 — `...` at end of param list = variadic. */
+        if (tk_cur()->kind == T_ELLIPSIS) {
+            g_tk++;
+            fn->op = 1;     /* mark as variadic (reuse op as the flag) */
+            if (tk_cur()->kind != T_RPAREN)
+                die_at(tk_cur()->line, "... must be last in param list", 0);
+            break;
+        }
         int kind, struct_idx = 0;
         /* Session 97 — `struct T *p` parameter. */
         if (tk_cur()->kind == T_STRUCT) {
@@ -2237,8 +2256,9 @@ static void e_test_eax_eax(void) {
 struct func_info {
     char name[NAME_MAX];
     int  entry_off;     /* byte offset within g_code where the function starts */
-    int  n_params;
+    int  n_params;      /* named params (excludes the trailing ...) for variadic */
     int  defined;       /* once codegen-resolved (set when entry_off is real) */
+    int  is_variadic;   /* 1 if declared with `...` — session 105 */
 };
 
 static struct func_info g_funcs[MAX_FUNCS];
@@ -2313,6 +2333,11 @@ static int func_intern(const char *name, int n_params) {
             g_funcs[i].n_params = n_params;
             return i;
         }
+        /* Session 105 — variadic functions accept any argc from call
+         * sites. We only enforce the check for non-variadic functions.
+         * (Forward calls to variadic functions still need the variadic
+         * flag to be set — the definition typically comes first.) */
+        if (g_funcs[i].is_variadic) return i;
         if (n_params >= 0 && g_funcs[i].n_params != n_params)
             die_at(0, "arg-count mismatch for", name);
         return i;
@@ -2322,9 +2347,10 @@ static int func_intern(const char *name, int n_params) {
     int j = 0;
     while (name[j]) { g_funcs[idx].name[j] = name[j]; j++; }
     g_funcs[idx].name[j] = 0;
-    g_funcs[idx].entry_off = -1;
-    g_funcs[idx].n_params  = n_params;
-    g_funcs[idx].defined   = 0;
+    g_funcs[idx].entry_off  = -1;
+    g_funcs[idx].n_params   = n_params;
+    g_funcs[idx].defined    = 0;
+    g_funcs[idx].is_variadic = 0;
     return idx;
 }
 
@@ -2644,6 +2670,69 @@ static void emit_syscall_intrinsic(const char *name, struct node *call) {
          * problem. */
         return;
     }
+    /* Session 105 — variadic-arg intrinsics.
+     *   va_start(ap, last_named)  ap = &last_named + 4 (next stack slot)
+     *   va_arg(ap)                returns *ap, then ap += 4
+     *   va_end(ap)                no-op
+     *
+     * `ap` must be a local int variable (we treat it as a pointer to
+     * the next unread arg). `last_named` must be a function parameter
+     * (positive ebp_off). Restriction: va_arg always reads 4 bytes;
+     * cc has no way to specify the type so the caller is responsible. */
+    if (my_streq(name, "va_start")) {
+        if (call->n_list != 2)
+            die_at(call->line, "va_start takes 2 args", 0);
+        struct node *ap_n   = call->list[0];
+        struct node *last_n = call->list[1];
+        if (!ap_n || ap_n->kind != N_NAME)
+            die_at(call->line, "va_start first arg must be a local name", 0);
+        if (!last_n || last_n->kind != N_NAME)
+            die_at(call->line, "va_start second arg must be a param name", 0);
+        int ap_off = local_find(ap_n->name);
+        int last_off = local_find(last_n->name);
+        if (ap_off == 0 || last_off == 0)
+            die_at(call->line, "va_start: name not a local", 0);
+        if (last_off < 8)
+            die_at(call->line, "va_start: second arg must be a param (ebp+N)", 0);
+        /* lea eax, [ebp + last_off + 4]; store to ap. */
+        e_lea_eax_ebp(last_off + 4);
+        e_store_local(ap_off);
+        return;
+    }
+    if (my_streq(name, "va_arg")) {
+        if (call->n_list != 1)
+            die_at(call->line, "va_arg takes 1 arg", 0);
+        struct node *ap_n = call->list[0];
+        if (!ap_n || ap_n->kind != N_NAME)
+            die_at(call->line, "va_arg arg must be a local name", 0);
+        int ap_off = local_find(ap_n->name);
+        if (ap_off == 0)
+            die_at(call->line, "va_arg: name not a local", 0);
+        /* load ap, deref to eax, advance ap by 4, write back. */
+        /* mov ebx, [ebp + ap_off]   →  8b 5d disp8 / 8b 9d disp32 */
+        if (ap_off >= -128 && ap_off <= 127) {
+            emit_b(0x8b); emit_b(0x5d); emit_b((unsigned char)(ap_off & 0xff));
+        } else {
+            emit_b(0x8b); emit_b(0x9d); emit_d((unsigned)ap_off);
+        }
+        /* mov eax, [ebx]   →  8b 03 */
+        emit_b(0x8b); emit_b(0x03);
+        /* add ebx, 4       →  83 c3 04 */
+        emit_b(0x83); emit_b(0xc3); emit_b(0x04);
+        /* mov [ebp + ap_off], ebx */
+        if (ap_off >= -128 && ap_off <= 127) {
+            emit_b(0x89); emit_b(0x5d); emit_b((unsigned char)(ap_off & 0xff));
+        } else {
+            emit_b(0x89); emit_b(0x9d); emit_d((unsigned)ap_off);
+        }
+        return;
+    }
+    if (my_streq(name, "va_end")) {
+        /* no-op — we don't have heap-allocated va_list state. */
+        if (call->n_list != 1)
+            die_at(call->line, "va_end takes 1 arg", 0);
+        return;
+    }
     die_at(call->line, "unknown intrinsic", name);
 }
 
@@ -2655,7 +2744,10 @@ static int is_intrinsic(const char *name) {
         || my_streq(name, "print_int")
         || my_streq(name, "puts")
         || my_streq(name, "print_str")
-        || my_streq(name, "printf");        /* session 94 */
+        || my_streq(name, "printf")          /* session 94 */
+        || my_streq(name, "va_start")        /* session 105 */
+        || my_streq(name, "va_arg")
+        || my_streq(name, "va_end");
 }
 
 static void gen_call(struct node *call) {
@@ -3449,7 +3541,12 @@ static void gen_stmt(struct node *n) {
 }
 
 static void gen_func(struct node *fn) {
+    /* Session 105 — register variadic-ness BEFORE func_intern so the
+     * intern's argc-check sees the correct flag. */
+    int pre_idx = func_find(fn->name);
+    if (pre_idx >= 0) g_funcs[pre_idx].is_variadic = fn->op ? 1 : 0;
     int idx = func_intern(fn->name, fn->n_params);
+    g_funcs[idx].is_variadic = fn->op ? 1 : 0;
     /* Session 100 — multi-file compilation can produce duplicate
      * function definitions if a user puts the same function body in
      * two source files. Catch it here. (For single-file builds this
