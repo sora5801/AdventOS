@@ -110,6 +110,8 @@ USER_PROGRAMS = [
     # Session 115: path-C phase 9 — clock + paint apps.
     ('wmclock.elf', 'user/_obj/wmclock.bin', None),
     ('wmpaint.elf', 'user/_obj/wmpaint.bin', None),
+    # Session 122: path-C phase 16 — multi-window-per-client demo.
+    ('wmpair.elf',  'user/_obj/wmpair.bin',  None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -255,6 +257,7 @@ DATA_FILES = [
     ('wmtype',  'fs/man/wmtype',  'man'), # session 114
     ('wmclock', 'fs/man/wmclock', 'man'), # session 115
     ('wmpaint', 'fs/man/wmpaint', 'man'), # session 115
+    ('wmpair',  'fs/man/wmpair',  'man'), # session 122
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were

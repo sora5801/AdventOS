@@ -177,9 +177,14 @@ int wm_create_window(struct task *client, struct sys_wm_create *args) {
     if (!slot->pages) return -1;
     for (uint32_t i = 0; i < n_pages; i++) slot->pages[i] = 0;
 
-    /* Client always gets WM_SURFACE_VA_BASE (single window per task
-     * in session 112). WM side gets a stable per-slot VA range. */
-    uint32_t client_va = WM_SURFACE_VA_BASE;
+    /* Session 122 — per-task VA bump allocator.  next_wm_va starts
+     * at 0 (sentinel) and the first allocation sets it to the base.
+     * Each subsequent SYS_WM_CREATE in the same task advances by
+     * WM_MAX_PAGES_PER_WIN*PAGE_SIZE = 1 MiB so two windows in the
+     * same client never share VA space.  WM side still uses a per-
+     * slot stable VA range. */
+    if (client->next_wm_va == 0) client->next_wm_va = WM_SURFACE_VA_BASE;
+    uint32_t client_va = client->next_wm_va;
     int slot_idx = (int)(slot - g_state->windows);
     uint32_t wmd_va = WM_SURFACE_VA_BASE
            + (uint32_t)slot_idx * WM_MAX_PAGES_PER_WIN * PAGE_SIZE;
@@ -218,6 +223,10 @@ int wm_create_window(struct task *client, struct sys_wm_create *args) {
 
     args->id        = slot->id;
     args->pixels_va = client_va;
+    /* Session 122 — advance the per-task bump only on successful
+     * commit so a failed allocation can be retried at the same VA. */
+    client->next_wm_va = client_va
+                       + WM_MAX_PAGES_PER_WIN * PAGE_SIZE;
     return 0;
 
 rollback:
