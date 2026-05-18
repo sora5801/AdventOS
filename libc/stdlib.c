@@ -222,7 +222,7 @@ long strtol(const char *s, char **end, int base) {
 
 int abs(int x) { return x < 0 ? -x : x; }
 
-/* Session 132 — strtoll, the 64-bit cousin of strtol.  tcc emits
+/* Session 134 — strtoll, the 64-bit cousin of strtol.  tcc emits
  * 64-bit constants and uses this to parse the source-level literals.
  * Same logic as strtol but on a `long long` accumulator. */
 long long strtoll(const char *s, char **end, int base) {

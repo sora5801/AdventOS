@@ -1,7 +1,7 @@
 /*
  * AdventOS libc — stdio FILE * implementation.
  *
- * Session 132 (Path B tcc port phase 2). tcc relies heavily on
+ * Session 134 (Path B tcc port phase 2). tcc relies heavily on
  * fopen/fread/fwrite/fprintf/etc. AdventOS doesn't have a kernel-
  * level seek primitive, so we implement seekable FILEs by buffering
  * the entire file in memory.

@@ -133,6 +133,12 @@ typedef unsigned int   size_t;
 #define SYS_WM_EVENT_PUSH  94
 #define SYS_WM_EVENT_POLL  95
 
+/* Session 119 — Path E phase 2 (virtio-rng / -console / -balloon). */
+#define SYS_GETRANDOM             96
+#define SYS_VIRTIO_CONSOLE_WRITE  97
+#define SYS_VIRTIO_CONSOLE_READ   98
+#define SYS_VIRTIO_BALLOON_STATS  99
+
 /* Session 70: syscall sandbox.
  *
  * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
@@ -356,6 +362,13 @@ int      sys_smp_stats(unsigned int out[8]);
  * device. The buffer is COPIED into kernel staging — caller can
  * reuse on return. */
 int      sys_audio_play(const void *pcm, int n);
+
+/* virtio-rng + virtio-console + virtio-balloon syscalls (Path E
+ * second batch, session 119). */
+int      sys_getrandom        (void *buf, int n);
+int      sys_virtio_console_write(const void *buf, int n);
+int      sys_virtio_console_read (void *buf, int n);
+int      sys_virtio_balloon_stats(unsigned int out[4]);
 
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns
@@ -719,7 +732,7 @@ int      tolower (int c);
 /* Self-introspection: out[0]=magic, out[1]=version, out[2]=count. */
 void     libc_info(uint32_t out[3]);
 
-/* Session 132 — FILE * surface (Path B tcc port phase 2).
+/* Session 134 — FILE * surface (Path B tcc port phase 2).
  *
  * FILE is opaque to user code; mirror struct lives in libc/libc.h.
  * fopen "r" loads the full file into a malloc'd buffer at open time;
@@ -759,7 +772,7 @@ int     fgetc   (FILE *f);
 int     fprintf (FILE *f, const char *fmt, ...);
 int     vfprintf(FILE *f, const char *fmt, va_list ap);
 
-/* Session 132 — POSIX fd layer over a fake-fd table.  open() loads
+/* Session 134 — POSIX fd layer over a fake-fd table.  open() loads
  * read-only files entirely into RAM; lseek/read serve from buffer.
  * Write-mode open() pairs with fdopen() to share a FILE * buffer.
  * Fake fds occupy [100, 116); real kernel fds are below that.

@@ -1,4 +1,4 @@
-# Session 131 — Path B: tcc port, Phase 1 foundation
+# Session 133 — Path B: tcc port, Phase 1 foundation
 
 After session 128 closed out the cc language corners (and made it
 clear cc has stopped being a useful place to extend the C surface
@@ -167,5 +167,5 @@ when ready.
 - `tcc/` — new vendored tree (22 .c/.h files + headers + lib + examples)
 - `tcc/README.AdventOS` — vendoring notes + Phase 2 plan
 - `build.sh` — `[5f/7]` host-tcc build step (opt-in, skipped if tcc/ absent)
-- `docs/118-pathB-tcc-foundation.md` — this file
+- `docs/119-pathB-tcc-foundation.md` — this file
 - `README.md` — pointer + current-session update

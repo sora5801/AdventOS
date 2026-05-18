@@ -91,6 +91,14 @@ static void release_fd(struct task_fd *e) {
         case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
         case FD_PTY_M:   pty_close_master (e->obj_idx); break;
         case FD_PTY_S:   pty_close_slave  (e->obj_idx); break;
+        case FD_9P: {
+            /* Release the per-fd 9p inode slot so future opens don't
+             * exhaust the pool.  9p fids themselves are short-lived
+             * (each read does walk + open + clunk inline). */
+            extern void virtio_9p_fd_close(int);
+            virtio_9p_fd_close(e->obj_idx);
+            break;
+        }
         default: break;     /* FD_FS / FD_STDIN / FD_STDOUT have no refcount */
     }
     e->kind    = FD_FREE;
@@ -441,6 +449,19 @@ void syscall_dispatch(struct registers *r) {
                     /* /proc files are synthesized fresh on every
                      * read. obj_idx packs (kind, pid). */
                     int rd = procfs_read_by_id(e->obj_idx, e->offset,
+                                               buf, (uint32_t)n);
+                    if (rd > 0) e->offset += (uint32_t)rd;
+                    ret = rd;
+                    break;
+                }
+                case FD_9P: {
+                    /* virtio-9p file. Each read translates to a 9P
+                     * Twalk + Tlopen + Tread + Tclunk round-trip, so
+                     * reads are O(round-trips-per-syscall) — fine for
+                     * small files, slow for big ones.  The path is
+                     * stored in g_inodes[obj_idx] in virtio_9p.c. */
+                    extern int virtio_9p_fd_read(int, uint32_t, void *, uint32_t);
+                    int rd = virtio_9p_fd_read(e->obj_idx, e->offset,
                                                buf, (uint32_t)n);
                     if (rd > 0) e->offset += (uint32_t)rd;
                     ret = rd;
@@ -888,6 +909,56 @@ void syscall_dispatch(struct registers *r) {
             ret = b ? wm_poll_event(task_current(), (uint32_t)a,
                                     (struct sys_wm_event *)(uintptr_t)b) : -1;
             break;
+        case SYS_GETRANDOM: {
+            extern int virtio_rng_get(void *, int);
+            extern int virtio_rng_available(void);
+            void *ubuf = (void *)(uintptr_t)a;
+            int   n    = (int)b;
+            if (!ubuf || (uintptr_t)ubuf >= 0xC0000000u) { ret = -1; break; }
+            if (n <= 0 || n > 4096) { ret = -1; break; }
+            if (virtio_rng_available()) {
+                ret = virtio_rng_get(ubuf, n);
+                break;
+            }
+            /* Fallback: weak entropy from PIT ticks + RTC. Adequate
+             * for non-crypto uses (random colors, ids, etc.); callers
+             * that need real entropy should check `sys_getrandom_secure`
+             * (= -1 when no virtio-rng). */
+            uint8_t *p = (uint8_t *)ubuf;
+            uint32_t s = pit_ticks() ^ (uint32_t)rtc_epoch_corrected();
+            for (int i = 0; i < n; i++) {
+                /* xorshift32 — fine for weak random. */
+                s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+                p[i] = (uint8_t)s;
+            }
+            ret = -1;        /* signal weak/no-device path */
+            break;
+        }
+        case SYS_VIRTIO_CONSOLE_WRITE: {
+            extern int virtio_console_write(const void *, int);
+            const void *ubuf = (const void *)(uintptr_t)a;
+            int n = (int)b;
+            if (!ubuf || (uintptr_t)ubuf >= 0xC0000000u) { ret = -1; break; }
+            if (n <= 0 || n > 4096) { ret = -1; break; }
+            ret = virtio_console_write(ubuf, n);
+            break;
+        }
+        case SYS_VIRTIO_CONSOLE_READ: {
+            extern int virtio_console_read(void *, int);
+            void *ubuf = (void *)(uintptr_t)a;
+            int n = (int)b;
+            if (!ubuf || (uintptr_t)ubuf >= 0xC0000000u) { ret = -1; break; }
+            if (n <= 0 || n > 4096) { ret = -1; break; }
+            ret = virtio_console_read(ubuf, n);
+            break;
+        }
+        case SYS_VIRTIO_BALLOON_STATS: {
+            extern int virtio_balloon_get_stats(uint32_t out[4]);
+            uint32_t *uout = (uint32_t *)(uintptr_t)a;
+            if (!uout || (uintptr_t)uout >= 0xC0000000u) { ret = -1; break; }
+            ret = virtio_balloon_get_stats(uout);
+            break;
+        }
         case SYS_PTRACE: {
             /* Multiplexed ptrace dispatch (session 57). See the op
              * comments in syscall.h for what each one does; the heavy

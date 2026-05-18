@@ -1,6 +1,6 @@
-# Session 132 — Path B: tcc port, Phase 2 (running inside AdventOS)
+# Session 134 — Path B: tcc port, Phase 2 (running inside AdventOS)
 
-Session 131 vendored TinyCC at `tcc/` and got a host-only build wired
+Session 133 vendored TinyCC at `tcc/` and got a host-only build wired
 up. This session does the much-harder middle part of the port: take
 that same source and produce a `tcc.elf` that loads inside AdventOS
 and runs.
@@ -251,6 +251,6 @@ Whether tcc's `-llibuser` flag wiring works correctly is unverified.
 - `mkfs.py` — ship `tcc.elf` and `thello.c` in the FS.
 - `fs/thello.c` — minimal smoke source.
 - `smoke_tcc.py` — Python smoke test harness.
-- `docs/119-pathB-tcc-phase2.md` — this file.
+- `docs/120-pathB-tcc-phase2.md` — this file.
 - `.gitignore` — `tcc/_obj/` build artifacts.
 - `README.md` — current-session pointer.

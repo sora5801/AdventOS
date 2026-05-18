@@ -97,7 +97,7 @@ USER_PROGRAMS = [
     # Session 90: path-B phase 1 — small C-subset compiler that
     # emits AdventOS-compatible ELF32 binaries (entry at VA 0x40000000).
     ('cc.elf',    'user/_obj/cc.bin',    None),
-    # Session 132: path-B phase 2 — vendored TinyCC ported as a real
+    # Session 134: path-B phase 2 — vendored TinyCC ported as a real
     # C compiler running INSIDE AdventOS. ~386 KiB so notably larger
     # than cc.elf, but supports float, long long, full type system,
     # function-like macros, etc.  Both live alongside; cc is the
@@ -308,7 +308,7 @@ DATA_FILES = [
     # Session 125 — language-corners batch test (comma, do-while, goto,
     # switch, union, multi-dim arrays, sizeof NAME, static locals, etc.).
     ('corners.c', 'fs/corners.c', None),
-    # Session 132: minimal source for the in-AdventOS tcc smoke test.
+    # Session 134: minimal source for the in-AdventOS tcc smoke test.
     ('thello.c',  'fs/thello.c',  None),
 ]
 

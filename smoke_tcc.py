@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Session 132 smoke test: tcc.elf running inside AdventOS.
+Session 134 smoke test: tcc.elf running inside AdventOS.
 
 Boots QEMU, tries /tcc.elf -v to confirm the binary loads and prints
 its version banner. If that works, tries `tcc /hello.c -o /thello.elf`

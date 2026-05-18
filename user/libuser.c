@@ -241,6 +241,42 @@ int sys_audio_play(const void *pcm, int n) {
     return ret;
 }
 
+int sys_getrandom(void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETRANDOM), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_console_write(const void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_CONSOLE_WRITE), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_console_read(void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_CONSOLE_READ), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_balloon_stats(unsigned int out[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_BALLOON_STATS), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_block_info(int dev_idx, struct sys_block_info *out) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -1314,7 +1350,7 @@ void libc_info(uint32_t out[3]) {
     ((void (*)(uint32_t *))LIBC_TABLE[LIBC_FN_LIBC_INFO])(out);
 }
 
-/* Session 132 — FILE * surface for the tcc port. All trampoline
+/* Session 134 — FILE * surface for the tcc port. All trampoline
  * into libc.bin's libc/file.c.  See libc/libc.h for the design notes
  * (read-mode files load whole, write-mode buffer in RAM and flush
  * on fclose, stdin/stdout/stderr are sentinel pointer values). */
@@ -1380,7 +1416,7 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
             LIBC_TABLE[LIBC_FN_VFPRINTF])(f, fmt, ap);
 }
 
-/* Session 132 — stdlib stragglers (qsort / strtoll trampoline through
+/* Session 134 — stdlib stragglers (qsort / strtoll trampoline through
  * libc.bin v2). */
 void qsort(void *base, size_t nm, size_t sz,
            int (*cmp)(const void *, const void *)) {

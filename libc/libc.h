@@ -45,7 +45,7 @@ typedef int                 intptr_t;
  *   +0x400  .text begins (after the 1KiB export table area)
  */
 #define LIBC_MAGIC      0x434C4441u   /* 'ADLC' little-endian */
-/* Session 132 (Path B tcc port phase 2): bumped from 1 -> 2. New
+/* Session 134 (Path B tcc port phase 2): bumped from 1 -> 2. New
  * exports: isxdigit + the FILE * / stdio family (fopen/fclose/fread/
  * fwrite/fseek/ftell/fputs/fputc/vfprintf/ferror/feof/remove/fflush).
  * No existing indices were reordered. */
@@ -144,7 +144,7 @@ struct libc_header {
 #define LIBC_SYS_EXIT         3
 #define LIBC_SYS_WRITE_FD    12
 #define LIBC_SYS_BRK         27
-/* Session 132 — needed by the FILE * layer (fopen/fread/fclose etc.). */
+/* Session 134 — needed by the FILE * layer (fopen/fread/fclose etc.). */
 #define LIBC_SYS_OPEN        10
 #define LIBC_SYS_READ        11
 #define LIBC_SYS_CLOSE       13
@@ -201,7 +201,7 @@ int    vprintf_(const char *fmt, va_list ap);
 int    vsprintf_(char *buf, const char *fmt, va_list ap);
 int    vsnprintf_(char *buf, size_t n, const char *fmt, va_list ap);
 
-/* Session 132 — FILE * surface for the tcc port.
+/* Session 134 — FILE * surface for the tcc port.
  *
  * FILE is a small struct in libc.bin's per-process .data. fopen
  * allocates a slot in a 16-entry static table; fclose releases it.

@@ -86,7 +86,7 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_VSPRINTF]     = vsprintf_,
     [LIBC_FN_VSNPRINTF]    = vsnprintf_,
 
-    /* Session 132 — FILE * + stdio family for the tcc port. */
+    /* Session 134 — FILE * + stdio family for the tcc port. */
     [LIBC_FN_VFPRINTF]     = vfprintf_,
     [LIBC_FN_FOPEN]        = fopen_,
     [LIBC_FN_FCLOSE]       = fclose_,

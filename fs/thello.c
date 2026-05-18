@@ -1,4 +1,4 @@
-/* Session 132 smoke test target for the in-AdventOS tcc.elf.
+/* Session 134 smoke test target for the in-AdventOS tcc.elf.
  * No #include, no libc — just enough to test tcc's parser + codegen
  * + ELF-output path. The resulting ELF won't be loadable by the
  * AdventOS kernel loader yet (tcc emits Linux multi-PT_LOAD ELFs;
