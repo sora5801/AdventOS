@@ -67,4 +67,11 @@ struct wm_event {
 };
 int wm_poll_event(struct wm_window *w, struct wm_event *out);
 
+/* Session 136 — clipboard convenience wrappers.  Forward to
+ * sys_clipboard_set / sys_clipboard_get so client code can pull
+ * just libwm and have everything it needs for paint + input +
+ * clipboard.  Max payload 4096 bytes. */
+int wm_clipboard_set(const void *buf, int len);
+int wm_clipboard_get(void *buf, int cap);
+
 #endif

@@ -538,6 +538,24 @@ int sys_wm_poll_alttab(void) {
     return ret;
 }
 
+/* Session 136 — clipboard. */
+int sys_clipboard_set(const void *buf, int len) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CLIPBOARD_SET), "b"(buf), "c"(len)
+                      : "memory");
+    return ret;
+}
+int sys_clipboard_get(void *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CLIPBOARD_GET), "b"(buf), "c"(cap)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

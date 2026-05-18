@@ -361,11 +361,17 @@ struct sys_limits {
                              * implement rename (caller falls back to
                              * the userspace copy+unlink in mv.c). */
 
-#define SYS_OPEN_A      102 /* (eax=102, ebx=name) -> tmpfs fd (preserves
+/* Session 136 — global single-slot clipboard.  Any task can write
+ * (last-writer-wins) and read.  Max payload 4096 bytes; kernel
+ * kmalloc's a single buffer.  See clipboard.h. */
+#define SYS_CLIPBOARD_SET  102  /* (eax=102, ebx=buf, ecx=len)  -> 0 / -1 */
+#define SYS_CLIPBOARD_GET  103  /* (eax=103, ebx=buf, ecx=cap)  -> stored_len or 0 */
+
+#define SYS_OPEN_A      104 /* (eax=104, ebx=name) -> tmpfs fd (preserves
                              * existing content) or -1. Drives shell `>>`
                              * append redirect. tmpfs_write always appends
                              * to end-of-file, so opening without truncate
-                             * is enough to make `>>` work. Slots 100 / 101
+                             * is enough to make `>>` work. Slots 100-103
                              * already taken (above). */
 
 struct sys_fb_info {

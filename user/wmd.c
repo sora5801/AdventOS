@@ -101,6 +101,8 @@ static const struct launch_entry g_launch_items[] = {
     { "sysinfo", "/wmsysinfo.elf" },
     { "wmps",    "/wmps.elf"     },
     { "wmterm",  "/wmterm.elf"   },
+    { "wmedit",  "/wmedit.elf"   },
+    { "wmcalc",  "/wmcalc.elf"   },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -262,11 +264,29 @@ static void paint_client(struct gfx_ctx *ctx, struct window *w) {
 static void paint_window(struct gfx_ctx *ctx, struct window *w,
                          int has_focus, unsigned int t_sec,
                          unsigned int frame_no) {
-    /* Outer drop-shadow (1 px black to the right and below). Tiny
-     * touch but distinguishes overlapping windows even without
-     * alpha blending. */
-    gfx_fill_rect(ctx, w->x + 2, w->y + w->h, w->w, 2, GFX_BLACK);
-    gfx_fill_rect(ctx, w->x + w->w, w->y + 2, 2, w->h, GFX_BLACK);
+    /* Session 138 — soft drop-shadow.  Six 1-pixel-wide strips
+     * stepping from near-black at the window edge to nearly the
+     * wallpaper colour 6 pixels out.  No alpha blending — we just
+     * pick darker shades of the wallpaper's blue band so the
+     * shadow reads as "depth" against any of the 8 bands.
+     * The shadow is offset by +2 in each axis so the corner
+     * forms a small light-source cue (top-left lit). */
+    {
+        static const unsigned int sh[6] = {
+            0x000308u, 0x040810u, 0x060C16u,
+            0x070E1Au, 0x081020u, 0x091525u,
+        };
+        for (int i = 0; i < 6; i++) {
+            unsigned int c = sh[i];
+            int off = 2 + i;            /* shadow displacement */
+            /* Right strip */
+            gfx_fill_rect(ctx, w->x + w->w + i, w->y + off,
+                          1, w->h, c);
+            /* Bottom strip */
+            gfx_fill_rect(ctx, w->x + off, w->y + w->h + i,
+                          w->w, 1, c);
+        }
+    }
 
     /* Title bar. */
     unsigned int title_bg = has_focus ? w->frame_color : GFX_DARK_GREY;
@@ -912,10 +932,36 @@ int main(int argc, char **argv) {
                         g_resize_anchor_my = ms.y;
                     } else if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
                         /* Start drag if in title bar (but not in
-                         * the close box, already excluded above). */
+                         * the close box, already excluded above).
+                         *
+                         * Session 138 — if the window is currently
+                         * snapped (maximized flag set), un-snap it
+                         * first so the user gets their original
+                         * size back as they drag.  Place the
+                         * window so the cursor stays at the same
+                         * relative position in the *restored*
+                         * title bar. */
+                        struct window *cw = &g_windows[hit];
+                        if (cw->maximized) {
+                            int rel_x = ms.x - cw->x;
+                            int old_w = cw->w;
+                            if (old_w < 1) old_w = 1;
+                            cw->w = cw->saved_w;
+                            cw->h = cw->saved_h;
+                            cw->maximized = 0;
+                            /* Scale rel_x from the snapped width to
+                             * the restored width so the cursor lands
+                             * at the same relative point in the new
+                             * title bar. */
+                            cw->x = ms.x - (rel_x * cw->w / old_w);
+                            if (cw->x < 0) cw->x = 0;
+                            if (cw->x > (int)ctx.width - cw->w)
+                                cw->x = (int)ctx.width - cw->w;
+                            cw->y = ms.y - 5;
+                        }
                         g_drag_idx   = hit;
-                        g_drag_off_x = ms.x - g_windows[hit].x;
-                        g_drag_off_y = ms.y - g_windows[hit].y;
+                        g_drag_off_x = ms.x - cw->x;
+                        g_drag_off_y = ms.y - cw->y;
                     }
                 }
             } else {
@@ -945,6 +991,53 @@ int main(int argc, char **argv) {
             prev_focus_id = new_focus_id;
         }
         if (released) {
+            /* Session 138 — snap-to-edge.  If a title-bar drag is
+             * releasing within SNAP_PX of any screen edge, snap
+             * the window: top → maximize, left → fill-left-half,
+             * right → fill-right-half, bottom → fill-bottom-half.
+             * Saves the pre-snap geometry into saved_* so the
+             * maximize-button restore path still works. */
+            if (g_drag_idx >= 0) {
+                #define SNAP_PX 8
+                struct window *w = &g_windows[g_drag_idx];
+                int fb_w_i = (int)ctx.width;
+                int fb_h_i = (int)ctx.height;
+                int usable_top = 18;              /* below top status bar */
+                int usable_bot = fb_h_i - TASKBAR_H;
+                int usable_h   = usable_bot - usable_top;
+                int do_snap    = 0;
+                int new_x, new_y, new_w, new_h;
+                if (ms.y < usable_top + SNAP_PX) {
+                    /* top → maximize */
+                    new_x = 0;            new_y = usable_top;
+                    new_w = fb_w_i;       new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.x < SNAP_PX) {
+                    /* left → fill-left-half */
+                    new_x = 0;            new_y = usable_top;
+                    new_w = fb_w_i / 2;   new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.x > fb_w_i - SNAP_PX) {
+                    /* right → fill-right-half */
+                    new_x = fb_w_i / 2;   new_y = usable_top;
+                    new_w = fb_w_i / 2;   new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.y > fb_h_i - TASKBAR_H - SNAP_PX) {
+                    /* bottom → fill-bottom-half */
+                    new_x = 0;            new_y = usable_top + usable_h / 2;
+                    new_w = fb_w_i;       new_h = usable_h / 2;
+                    do_snap = 1;
+                }
+                if (do_snap && !w->maximized) {
+                    w->saved_x  = w->x;
+                    w->saved_y  = w->y;
+                    w->saved_w  = w->w;
+                    w->saved_h  = w->h;
+                    w->x = new_x; w->y = new_y;
+                    w->w = new_w; w->h = new_h;
+                    w->maximized = 1;     /* repurposed as "snapped" */
+                }
+            }
             g_drag_idx   = -1;
             g_resize_idx = -1;
         }

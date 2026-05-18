@@ -26,9 +26,11 @@
 #include "vbe.h"
 #include "fbcon.h"
 #include "wm.h"
+#include "clipboard.h"
 #include "ac97.h"
 #include "bkl.h"
 #include "blkdev.h"
+#include "usb_cdc_acm.h"
 
 /* Session 107 — Path C. Tracks the task that currently owns the
  * framebuffer (set by SYS_FB_MAP, cleared by SYS_FB_UNMAP or by
@@ -362,6 +364,30 @@ void syscall_dispatch(struct registers *r) {
             int fd = alloc_fd(t);
             if (fd < 0) { ret = -1; break; }
 
+            /* /dev/ttyACM<n> — USB CDC-ACM device. Intercepted ahead
+             * of VFS because there's no on-disk file at that path; the
+             * descriptor is backed by ring buffers in usb_cdc_acm.c.
+             * Only one digit supported (0..9) — we'd never see more
+             * than MAX_CDC_DEVICES = 2 in practice. */
+            if (name[0] == '/' && name[1] == 'd' && name[2] == 'e' &&
+                name[3] == 'v' && name[4] == '/' && name[5] == 't' &&
+                name[6] == 't' && name[7] == 'y' && name[8] == 'A' &&
+                name[9] == 'C' && name[10] == 'M' &&
+                name[11] >= '0' && name[11] <= '9' && name[12] == 0)
+            {
+                int port = name[11] - '0';
+                if (port < 0 || port >= usb_cdc_acm_port_count()) {
+                    ret = -1;
+                    break;
+                }
+                t->fds[fd].kind    = FD_CDC_ACM;
+                t->fds[fd].obj_idx = port;
+                t->fds[fd].offset  = 0;
+                t->fds[fd].fs_data = 0;
+                ret = fd;
+                break;
+            }
+
             /* VFS dispatch: rootfs catches absolute and cwd-relative
              * paths into /; procfs catches /proc/...; the result's
              * .kind tells us which fd flavor to install. */
@@ -522,6 +548,24 @@ void syscall_dispatch(struct registers *r) {
                 case FD_PTY_S:
                     ret = pty_slave_read(e->obj_idx, buf, n);
                     break;
+                case FD_CDC_ACM: {
+                    /* Block until data or non-block flag. The RX ring
+                     * fills from the cdc-acm polling task every 50 ms,
+                     * so a yield loop is fine — the task isn't busy-
+                     * waiting on the bus, just sleeping. */
+                    if (e->flags & FD_FL_NONBLOCK) {
+                        ret = usb_cdc_acm_read(e->obj_idx, buf, n);
+                        break;
+                    }
+                    int rd;
+                    for (;;) {
+                        rd = usb_cdc_acm_read(e->obj_idx, buf, n);
+                        if (rd != 0) break;
+                        task_yield();
+                    }
+                    ret = rd;
+                    break;
+                }
                 default:
                     ret = -1;
                     break;
@@ -555,6 +599,9 @@ void syscall_dispatch(struct registers *r) {
                     break;
                 case FD_PTY_S:
                     ret = pty_slave_write(e->obj_idx, buf, n);
+                    break;
+                case FD_CDC_ACM:
+                    ret = usb_cdc_acm_write_port(e->obj_idx, buf, n);
                     break;
                 default:
                     ret = -1;
@@ -958,6 +1005,13 @@ void syscall_dispatch(struct registers *r) {
             break;
         case SYS_WM_POLL_ALTTAB:
             ret = wm_poll_alttab(task_current());
+            break;
+        /* Session 136 — clipboard. */
+        case SYS_CLIPBOARD_SET:
+            ret = clipboard_set((const void *)(uintptr_t)a, (int)b);
+            break;
+        case SYS_CLIPBOARD_GET:
+            ret = clipboard_get((void *)(uintptr_t)a, (int)b);
             break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
