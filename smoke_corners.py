@@ -42,6 +42,11 @@ def wait_for(sock, marker, buf, timeout=30):
 # features add new lines as commits go in.
 EXPECTED = [
     "comma            = 30",
+    "b_and_eq         = 6",
+    "b_or_eq          = 22",
+    "b_xor_eq         = 4",
+    "b_shl_eq         = 16",
+    "b_shr_eq         = 2",
 ]
 
 

@@ -27,5 +27,21 @@ int main() {
     v = (10, 20, 30);
     printf("comma            = %d\n", v);       /* 30 */
 
+    /* 2. Bitwise / shift compound assigns. Each is rewritten as
+     *    `x = x OP expr` by the parser. cc has no hex literals,
+     *    so the values are decimal. */
+    int b;
+    b = 15;                                      /* 0b1111 */
+    b &= 6;                                      /* 0b0110 */
+    printf("b_and_eq         = %d\n", b);        /* 6 */
+    b |= 16;
+    printf("b_or_eq          = %d\n", b);        /* 22 */
+    b ^= 18;                                     /* 22 ^ 18 = 4 */
+    printf("b_xor_eq         = %d\n", b);        /* 4 */
+    b <<= 2;
+    printf("b_shl_eq         = %d\n", b);        /* 16 */
+    b >>= 3;
+    printf("b_shr_eq         = %d\n", b);        /* 2 */
+
     return 0;
 }

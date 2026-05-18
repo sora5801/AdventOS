@@ -139,6 +139,8 @@ enum {
     T_AMP, T_PIPE, T_CARET, T_TILDE, T_LSHIFT, T_RSHIFT,
     /* Session 96 — compound operators. */
     T_PLUS_EQ, T_MINUS_EQ, T_STAR_EQ, T_SLASH_EQ, T_PERCENT_EQ,
+    /* Session 125 — bitwise / shift compound operators. */
+    T_AMP_EQ, T_PIPE_EQ, T_CARET_EQ, T_LSHIFT_EQ, T_RSHIFT_EQ,
     T_INC, T_DEC,
     T_QUESTION, T_COLON,
     /* Session 97 — struct member access. */
@@ -738,7 +740,12 @@ static void lex_all(const char *src, int len) {
             case '?': push_tok(T_QUESTION, g_line); g_pos++; break;
             case ':': push_tok(T_COLON,    g_line); g_pos++; break;
             case '~': push_tok(T_TILDE,  g_line); g_pos++; break;
-            case '^': push_tok(T_CARET,  g_line); g_pos++; break;
+            case '^':
+                /* Session 125 — `^=` compound assign. */
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_CARET_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_CARET, g_line); g_pos++; }
+                break;
             case '=':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_EQ, g_line); g_pos += 2;
@@ -750,27 +757,37 @@ static void lex_all(const char *src, int len) {
                 } else { push_tok(T_BANG, g_line); g_pos++; }
                 break;
             case '<':
-                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                /* Session 125 — `<<=` compound shift-assign. */
+                if (g_pos + 2 < g_src_len && g_src[g_pos + 1] == '<' && g_src[g_pos + 2] == '=') {
+                    push_tok(T_LSHIFT_EQ, g_line); g_pos += 3;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_LE, g_line); g_pos += 2;
                 } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '<') {
                     push_tok(T_LSHIFT, g_line); g_pos += 2;
                 } else { push_tok(T_LT, g_line); g_pos++; }
                 break;
             case '>':
-                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                if (g_pos + 2 < g_src_len && g_src[g_pos + 1] == '>' && g_src[g_pos + 2] == '=') {
+                    push_tok(T_RSHIFT_EQ, g_line); g_pos += 3;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_GE, g_line); g_pos += 2;
                 } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '>') {
                     push_tok(T_RSHIFT, g_line); g_pos += 2;
                 } else { push_tok(T_GT, g_line); g_pos++; }
                 break;
             case '&':
+                /* Session 125 — `&=` compound bitwise-and-assign. */
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '&') {
                     push_tok(T_AMP_AMP, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_AMP_EQ, g_line); g_pos += 2;
                 } else { push_tok(T_AMP, g_line); g_pos++; }
                 break;
             case '|':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '|') {
                     push_tok(T_PIPE_PIPE, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_PIPE_EQ, g_line); g_pos += 2;
                 } else { push_tok(T_PIPE, g_line); g_pos++; }
                 break;
             default:
@@ -1551,6 +1568,13 @@ static struct node *parse_stmt(void) {
         else if (nx == T_STAR_EQ)    op = T_STAR;
         else if (nx == T_SLASH_EQ)   op = T_SLASH;
         else if (nx == T_PERCENT_EQ) op = T_PERCENT;
+        /* Session 125 — bitwise / shift compound assigns. Same
+         * rewrite trick as session 96. */
+        else if (nx == T_AMP_EQ)     op = T_AMP;
+        else if (nx == T_PIPE_EQ)    op = T_PIPE;
+        else if (nx == T_CARET_EQ)   op = T_CARET;
+        else if (nx == T_LSHIFT_EQ)  op = T_LSHIFT;
+        else if (nx == T_RSHIFT_EQ)  op = T_RSHIFT;
         if (op) {
             /* Session 96 — rewrite `x op= expr` as `x = x op expr` so
              * we don't need a separate codegen path. Safe because
