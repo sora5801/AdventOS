@@ -50,10 +50,16 @@
 #define P9_Rlerror       7
 #define P9_Tlopen        12
 #define P9_Rlopen        13
+#define P9_Tlcreate      14
+#define P9_Rlcreate      15
 #define P9_Tgetattr      24
 #define P9_Rgetattr      25
 #define P9_Treaddir      40
 #define P9_Rreaddir      41
+#define P9_Tmkdir        72
+#define P9_Rmkdir        73
+#define P9_Tunlinkat     76
+#define P9_Runlinkat     77
 #define P9_Tversion      100
 #define P9_Rversion      101
 #define P9_Tattach       104
@@ -62,8 +68,13 @@
 #define P9_Rwalk         111
 #define P9_Tread         116
 #define P9_Rread         117
+#define P9_Twrite        118
+#define P9_Rwrite        119
 #define P9_Tclunk        120
 #define P9_Rclunk        121
+
+/* Tunlinkat flags. Same values Linux uses. */
+#define P9_AT_REMOVEDIR  0x200
 
 /* Tgetattr request masks (Linux). We always ask for everything. */
 #define P9_GETATTR_ALL   0x00003fffu
@@ -469,6 +480,93 @@ static int p9_readdir_one(struct v9p *v, uint32_t fid, uint64_t offset,
     return 1;
 }
 
+/* ---- write-side operations ------------------------------------- */
+
+/* Tlcreate — create a new file under directory `dfid`. After success
+ * the fid REUSED for `dfid` now refers to the newly-created file,
+ * opened with `flags` (Linux open(2) flags). `mode` is the POSIX
+ * permission bits (e.g. 0644). */
+static int p9_lcreate(struct v9p *v, uint32_t dfid, const char *name,
+                      uint32_t flags, uint32_t mode)
+{
+    struct p9w w = { v->tbuf, 0, P9_MSIZE };
+    int s = hdr_begin(&w, P9_Tlcreate, 0);
+    w_u32(&w, dfid);
+    w_str(&w, name);
+    w_u32(&w, flags);
+    w_u32(&w, mode);
+    w_u32(&w, 0);                 /* gid (we don't track POSIX groups) */
+    hdr_finalize(&w, s);
+
+    int rl = p9_round_trip(v, w.o);
+    if (rl < 0 || p9_check_error(v, rl, "Tlcreate") != 0) return -1;
+    /* Response is [qid:13][iounit:4]; we don't bother parsing. */
+    return 0;
+}
+
+/* Twrite — write `count` bytes from `data` to `fid` at `offset`.
+ * Returns bytes actually written (<= count) or -1 on error. */
+static int p9_write(struct v9p *v, uint32_t fid, uint64_t offset,
+                    uint32_t count, const void *data)
+{
+    /* Cap count so the request fits in msize (header + Twrite fields
+     * = 7 + 4 + 8 + 4 = 23 bytes of overhead). */
+    uint32_t max = v->msize - 23;
+    if (count > max) count = max;
+
+    struct p9w w = { v->tbuf, 0, P9_MSIZE };
+    int s = hdr_begin(&w, P9_Twrite, 0);
+    w_u32(&w, fid);
+    w_u64(&w, offset);
+    w_u32(&w, count);
+    /* Append the data bytes directly. */
+    for (uint32_t i = 0; i < count; i++) w_u8(&w, ((const uint8_t *)data)[i]);
+    hdr_finalize(&w, s);
+
+    int rl = p9_round_trip(v, w.o);
+    if (rl < 0 || p9_check_error(v, rl, "Twrite") != 0) return -1;
+
+    struct p9r r = { v->rbuf, 7, rl };
+    uint32_t n = r_u32(&r);
+    if (n > count) n = count;
+    return (int)n;
+}
+
+/* Tmkdir — create a directory `name` under `dfid` with `mode` perms. */
+static int p9_mkdir(struct v9p *v, uint32_t dfid, const char *name,
+                    uint32_t mode)
+{
+    struct p9w w = { v->tbuf, 0, P9_MSIZE };
+    int s = hdr_begin(&w, P9_Tmkdir, 0);
+    w_u32(&w, dfid);
+    w_str(&w, name);
+    w_u32(&w, mode);
+    w_u32(&w, 0);                 /* gid */
+    hdr_finalize(&w, s);
+
+    int rl = p9_round_trip(v, w.o);
+    if (rl < 0 || p9_check_error(v, rl, "Tmkdir") != 0) return -1;
+    return 0;
+}
+
+/* Tunlinkat — remove `name` from `dfid`. If `is_dir`, pass the
+ * AT_REMOVEDIR flag so the host treats it as rmdir; otherwise this
+ * is an unlink. */
+static int p9_unlinkat(struct v9p *v, uint32_t dfid, const char *name,
+                       int is_dir)
+{
+    struct p9w w = { v->tbuf, 0, P9_MSIZE };
+    int s = hdr_begin(&w, P9_Tunlinkat, 0);
+    w_u32(&w, dfid);
+    w_str(&w, name);
+    w_u32(&w, is_dir ? P9_AT_REMOVEDIR : 0);
+    hdr_finalize(&w, s);
+
+    int rl = p9_round_trip(v, w.o);
+    if (rl < 0 || p9_check_error(v, rl, "Tunlinkat") != 0) return -1;
+    return 0;
+}
+
 /* ---- VFS adapter ------------------------------------------------ */
 
 /* Path-walked-and-opened state we hand back through vfs_inode. Since
@@ -624,17 +722,148 @@ done:
     return found;
 }
 
-/* Write / mkdir not implemented yet — return -1 so VFS reports failure
- * cleanly to userspace. */
-static int v9p_vfs_mkdir(void *fs_data, const char *rel_path) {
-    (void)fs_data; (void)rel_path;
-    return -1;
+/* Split `path` into a parent directory and a basename. Both are
+ * written into caller buffers. Returns 0 on success, -1 if the
+ * basename would be empty or too long. The parent buffer receives
+ * an empty string when there is no slash (= sibling of share root). */
+static int split_parent_basename(const char *path,
+                                 char *parent, int parent_cap,
+                                 char *base,   int base_cap)
+{
+    /* Find the last '/'. */
+    int last_slash = -1;
+    int i = 0;
+    while (path[i]) {
+        if (path[i] == '/') last_slash = i;
+        i++;
+    }
+    int total = i;
+    int base_start = last_slash + 1;
+    int base_len = total - base_start;
+    if (base_len <= 0 || base_len >= base_cap) return -1;
+    /* Copy basename. */
+    for (int j = 0; j < base_len; j++) base[j] = path[base_start + j];
+    base[base_len] = 0;
+    /* Copy parent. */
+    int p_len = last_slash > 0 ? last_slash : 0;
+    if (p_len >= parent_cap) return -1;
+    for (int j = 0; j < p_len; j++) parent[j] = path[j];
+    parent[p_len] = 0;
+    return 0;
 }
+
+static int v9p_vfs_mkdir(void *fs_data, const char *rel_path) {
+    struct v9p *v = (struct v9p *)fs_data;
+    if (!v->in_use) return -1;
+
+    char parent[V9P_PATH_MAX], base[64];
+    if (split_parent_basename(rel_path, parent, sizeof(parent),
+                              base, sizeof(base)) != 0) return -1;
+
+    spin_lock(&v->lock);
+    uint32_t dfid;
+    if (p9_alloc_fid(v, &dfid) != 0) { spin_unlock(&v->lock); return -1; }
+    int rc = -1;
+    int is_dir;
+    if (p9_walk(v, v->root_fid, parent, dfid, &is_dir) != 0) goto done;
+    if (p9_mkdir(v, dfid, base, 0755) != 0)                 goto done;
+    rc = 0;
+done:
+    p9_clunk(v, dfid);
+    p9_free_fid(v, dfid);
+    spin_unlock(&v->lock);
+    return rc;
+}
+
+/* Create / truncate `rel_path` and write the whole buffer to it.
+ *
+ * 9p workflow:
+ *   1. Walk root -> parent directory dfid.
+ *   2. Tlcreate dfid name flags=O_WRONLY|O_TRUNC mode=0644.
+ *      After Tlcreate succeeds, dfid refers to the OPENED new file.
+ *   3. Twrite in P9_MSIZE-sized chunks until all data is sent.
+ *   4. Tclunk dfid.
+ *
+ * On a name that already exists, Tlcreate fails with EEXIST. We
+ * handle that by retrying with Twalk-to-the-file + Tlopen O_TRUNC.
+ *
+ * Linux Tlcreate flags use the standard open(2) bit values:
+ *   O_CREAT  = 0x40, O_TRUNC = 0x200, O_WRONLY = 1
+ * We pass `O_TRUNC | O_WRONLY` and rely on Tlcreate's implicit
+ * O_CREAT|O_EXCL behavior. */
+#define P9_L_O_WRONLY  1
+#define P9_L_O_TRUNC   0x200
+
 static int v9p_vfs_write_all(void *fs_data, const char *rel_path,
                              const void *data, uint32_t n)
 {
-    (void)fs_data; (void)rel_path; (void)data; (void)n;
-    return -1;
+    struct v9p *v = (struct v9p *)fs_data;
+    if (!v->in_use) return -1;
+
+    char parent[V9P_PATH_MAX], base[64];
+    if (split_parent_basename(rel_path, parent, sizeof(parent),
+                              base, sizeof(base)) != 0) return -1;
+
+    spin_lock(&v->lock);
+    uint32_t fid;
+    if (p9_alloc_fid(v, &fid) != 0) { spin_unlock(&v->lock); return -1; }
+
+    int rc = -1;
+    int is_dir;
+    if (p9_walk(v, v->root_fid, parent, fid, &is_dir) != 0) goto done;
+
+    /* Try create-new first. If that fails (file exists or other
+     * error), drop the dir-fid and retry as walk-to-file + open
+     * for write+trunc. */
+    if (p9_lcreate(v, fid, base, P9_L_O_WRONLY | P9_L_O_TRUNC, 0644) != 0) {
+        /* Re-walk: parent fid is now in a weird state, clunk it and
+         * try walking directly to the existing file. */
+        p9_clunk(v, fid);
+        if (p9_walk(v, v->root_fid, rel_path, fid, &is_dir) != 0) goto done;
+        if (p9_lopen(v, fid, P9_L_O_WRONLY | P9_L_O_TRUNC) != 0)  goto done;
+    }
+
+    /* Loop Twrite calls until the whole buffer is sent. */
+    uint32_t off = 0;
+    const uint8_t *p = (const uint8_t *)data;
+    while (off < n) {
+        int w = p9_write(v, fid, off, n - off, p + off);
+        if (w <= 0) goto done;
+        off += (uint32_t)w;
+    }
+    rc = 0;
+
+done:
+    p9_clunk(v, fid);
+    p9_free_fid(v, fid);
+    spin_unlock(&v->lock);
+    return rc;
+}
+
+/* SYS_UNLINK + SYS_RMDIR dispatch path. Walks to the parent and
+ * issues Tunlinkat. Public so syscall.c can call it for paths under
+ * /mnt/9p. Returns 0 on success, -1 on any error. */
+int virtio_9p_unlink_path(const char *rel_path, int is_dir) {
+    struct v9p *v = &g_v9p;
+    if (!v->in_use) return -1;
+
+    char parent[V9P_PATH_MAX], base[64];
+    if (split_parent_basename(rel_path, parent, sizeof(parent),
+                              base, sizeof(base)) != 0) return -1;
+
+    spin_lock(&v->lock);
+    uint32_t dfid;
+    if (p9_alloc_fid(v, &dfid) != 0) { spin_unlock(&v->lock); return -1; }
+    int rc = -1;
+    int is_dir_check;
+    if (p9_walk(v, v->root_fid, parent, dfid, &is_dir_check) != 0) goto done;
+    if (p9_unlinkat(v, dfid, base, is_dir) != 0)                   goto done;
+    rc = 0;
+done:
+    p9_clunk(v, dfid);
+    p9_free_fid(v, dfid);
+    spin_unlock(&v->lock);
+    return rc;
 }
 
 static struct vfs_fs_ops g_v9p_ops;
@@ -668,6 +897,7 @@ void virtio_9p_init(void) {
         virtio_status_failed(v->io);
         return;
     }
+    virtio_install_irq(v->io, v->pci.irq_line, 0, v);
     virtio_status_driver_ok(v->io);
 
     /* Read mount tag from device-specific config space:

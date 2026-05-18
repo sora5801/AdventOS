@@ -95,9 +95,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **120 — Path E phase 3: WSL build + virtio-9p host filesystem**. See [`docs/107-pathE-9p.md`](docs/107-pathE-9p.md) for the deep dive. `build.sh` now auto-detects Linux vs MSYS2 and swaps `ld -m i386pe ↔ elf_i386` + `-fleading-underscore` appropriately, so the same source builds on WSL or Windows. With a WSL/Linux host, `-device virtio-9p-pci,fsdev=hostfs,mount_tag=...,disable-modern=on` exposes a host directory at `/mnt/9p` — `cat`, `ls`, and multi-level path resolution all work end-to-end over 9P2000.L.
+Current session: **121 — Path E phase 4: 9p writes + IRQ-driven virtio**. See [`docs/108-pathE-9p-write-and-irq.md`](docs/108-pathE-9p-write-and-irq.md). `/mnt/9p` is now fully read-write (Tlcreate / Twrite / Tmkdir / Tunlinkat). All six virtio drivers moved off `pit_sleep` polling onto PCI INTx via a shared-line dispatcher in `kernel/virtio.c` — RX latency drops from ~10ms to microseconds and the polling tasks are gone.
 
 Recent session deep dives:
+- [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
 - [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
@@ -157,7 +158,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–120 covered virtio-blk/net/rng/console/balloon/9p + USB CDC-ACM + AC97 consumer + WSL build path. Still candidate: 9p writes (Tlcreate/Twrite), IRQ-driven virtio completion, USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–121 covered virtio-blk/net/rng/console/balloon/9p (read+write) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio. Still candidate: USB CDC-ECM, virtio-scsi, e1000 NIC, 9p rename, full TTY integration of CDC-ACM.
 
 ## License
 

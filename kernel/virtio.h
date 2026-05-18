@@ -161,4 +161,21 @@ void     virtio_submit(uint16_t io_base, struct virtqueue *vq, uint16_t head);
 int      virtio_wait_used(uint16_t io_base, struct virtqueue *vq,
                           uint32_t timeout_ms);
 
+/* Install a PCI INTx handler for a virtio device. The optional `fn`
+ * is called from IRQ context on every interrupt where this device's
+ * ISR-status bit 0 is set (= "queue had completions"). Used by
+ * virtio-net / virtio-console for RX drain. Pass fn = NULL for
+ * sync-only drivers (blk / rng / 9p / balloon) — the handler still
+ * reads VIRTIO_PCI_ISR to clear the latch so the line doesn't keep
+ * firing, but does no other work; the caller's hlt-based wait sees
+ * used.idx advance and proceeds.
+ *
+ * Multiple devices can share a PCI IRQ line. The first install on
+ * a given IRQ installs a master dispatcher into isr_register_irq;
+ * subsequent installs just register additional slots. The
+ * dispatcher iterates slots on each IRQ and only calls `fn` for
+ * slots whose ISR fired. */
+void     virtio_install_irq(uint16_t io_base, int irq,
+                            void (*fn)(void *), void *cookie);
+
 #endif

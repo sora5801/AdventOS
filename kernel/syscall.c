@@ -730,6 +730,19 @@ void syscall_dispatch(struct registers *r) {
                 path[i] = upath[i];
             }
             path[i] = 0;
+            /* /mnt/9p paths route to the 9p driver's Tunlinkat. */
+            if (path[0] == '/' && path[1] == 'm' && path[2] == 'n' &&
+                path[3] == 't' && path[4] == '/' && path[5] == '9' &&
+                path[6] == 'p' && (path[7] == '/' || path[7] == 0))
+            {
+                extern int virtio_9p_unlink_path(const char *, int);
+                /* +1 to skip past "/mnt/9p"; if path is "/mnt/9p"
+                 * itself (no trailing slash) we'd pass "" which the
+                 * 9p side rejects in split_parent_basename. */
+                const char *rel = path[7] == '/' ? path + 8 : path + 7;
+                ret = virtio_9p_unlink_path(rel, /*is_dir=*/0);
+                break;
+            }
             ret = fs_unlink(path);
             break;
         }
@@ -745,6 +758,15 @@ void syscall_dispatch(struct registers *r) {
                 path[i] = upath[i];
             }
             path[i] = 0;
+            if (path[0] == '/' && path[1] == 'm' && path[2] == 'n' &&
+                path[3] == 't' && path[4] == '/' && path[5] == '9' &&
+                path[6] == 'p' && (path[7] == '/' || path[7] == 0))
+            {
+                extern int virtio_9p_unlink_path(const char *, int);
+                const char *rel = path[7] == '/' ? path + 8 : path + 7;
+                ret = virtio_9p_unlink_path(rel, /*is_dir=*/1);
+                break;
+            }
             ret = fs_rmdir(path);
             break;
         }
