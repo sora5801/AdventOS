@@ -86,6 +86,7 @@ static const struct launch_entry g_launch_items[] = {
     { "wmclock", "/wmclock.elf" },
     { "wmpaint", "/wmpaint.elf" },
     { "wmpair",  "/wmpair.elf"  },
+    { "wmfiles", "/wmfiles.elf" },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
