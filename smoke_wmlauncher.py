@@ -168,12 +168,14 @@ def main():
 
         # Click the first launcher item (wmhello).  Items go from
         # y = h - TASKBAR_H - N_LAUNCH_ITEMS * LAUNCH_ITEM_H - 4
-        # = 768 - 28 - 4*22 - 4 = 648.  Item 0: y=648..669, center
-        # y=659.  x = 4..164, center x=84.
-        # Cursor at (26, 762).  Delta to (84, 659): (+58, -103).
-        # 10 events of (+6, -10) → (+60, -100) → (86, 662). Close.
+        # = 768 - 28 - 5*22 - 4 = 626 (session 123 grew the catalog
+        # from 4 to 5 items).  Item 0: y=626..647, centre y=636.
+        # x = 4..164, centre x=84.
+        # Cursor at (26, 762).  Delta to (84, 636): (+58, -126).
+        # 10 events of (+6, -13) → (+60, -130) → (86, 632). Inside
+        # item 0.
         print("[+] clicking 'wmhello' item")
-        click_qmp(q, qbuf, 6, -10, 10)
+        click_qmp(q, qbuf, 6, -13, 10)
 
         # Give wmhello time to fork+exec+register+paint.
         time.sleep(4.0)

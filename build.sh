@@ -70,6 +70,24 @@ USER_CFLAGS=(
     -mno-stack-arg-probe          # don't emit __chkstk for big frames
     -nostdlib -nostartfiles
     -O2 -std=gnu11
+    # Session 125 considered enabling -ffunction-sections + --gc-sections
+    # for user programs (same trick as the kernel — session 112), but
+    # two latent issues kept it on the bench:
+    #   1. libuser.c uses indirection through LIBC_TABLE (a fixed-VA
+    #      function-pointer table populated by libc.bin at runtime).
+    #      --gc-sections can't see those references and drops
+    #      putchar / sys_write / etc., leaving them as undefined
+    #      symbols silently resolved to 0 by the PE/COFF linker.
+    #   2. When a process that holds the FB (wmd) fork+exec's a WM
+    #      client, the inherited FB mapping at 0x50000000 goes
+    #      through paging_destroy_user_pd on exec, which then
+    #      pmm_free_page's MMIO addresses.  The bug is latent in
+    #      larger binaries but triggers reliably once gc-sections
+    #      shrinks wmhello (smoke_wmlauncher then sees wmhello's
+    #      taskbar button appear but the surface stays blank).
+    # Both are fixable but out of scope here; tracked for a future
+    # session.  User programs link the full libuser / libgfx / libwm
+    # objects unchanged for now.
     -Wall -Wextra -Wno-unused-parameter
     -Iuser
 )
