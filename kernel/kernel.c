@@ -50,6 +50,9 @@
 #include "blkdev.h"
 #include "virtio_blk.h"
 #include "virtio_net.h"
+#include "virtio_rng.h"
+#include "virtio_console.h"
+#include "virtio_balloon.h"
 
 /* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
  * pinned to BSP. The BKL machinery + race-fixed task creation are
@@ -207,6 +210,18 @@ void kmain(uint32_t boot_drive) {
     virtio_blk_init();
     kputs("done\n");
 
+    /* virtio-rng / -console / -balloon: more paravirtualized devices.
+     * All silently no-op when not present. */
+    kputs("[boot] probing virtio-rng... ");
+    virtio_rng_init();
+    kputs("done\n");
+    kputs("[boot] probing virtio-console... ");
+    virtio_console_init();
+    kputs("done\n");
+    kputs("[boot] probing virtio-balloon... ");
+    virtio_balloon_init();
+    kputs("done\n");
+
     /* Block cache must be live BEFORE fs_init — fs.c reads its
      * superblock through bcache_read on the first call. */
     kputs("[boot] initializing block cache... ");
@@ -344,6 +359,8 @@ void kmain(uint32_t boot_drive) {
     usb_start_polling();
     usb_cdc_acm_start_polling();
     /* virtio_net_start_polling already fired above before DHCP. */
+    virtio_console_start_polling();
+    virtio_balloon_start_task();
 
     /* If a USB Mass Storage device showed up during USB enumeration,
      * try to mount it as an additional AdventFS instance at /mnt/usb.

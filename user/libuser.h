@@ -133,6 +133,12 @@ typedef unsigned int   size_t;
 #define SYS_WM_EVENT_PUSH  94
 #define SYS_WM_EVENT_POLL  95
 
+/* Session 119 — Path E phase 2 (virtio-rng / -console / -balloon). */
+#define SYS_GETRANDOM             96
+#define SYS_VIRTIO_CONSOLE_WRITE  97
+#define SYS_VIRTIO_CONSOLE_READ   98
+#define SYS_VIRTIO_BALLOON_STATS  99
+
 /* Session 70: syscall sandbox.
  *
  * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
@@ -356,6 +362,13 @@ int      sys_smp_stats(unsigned int out[8]);
  * device. The buffer is COPIED into kernel staging — caller can
  * reuse on return. */
 int      sys_audio_play(const void *pcm, int n);
+
+/* virtio-rng + virtio-console + virtio-balloon syscalls (Path E
+ * second batch, session 119). */
+int      sys_getrandom        (void *buf, int n);
+int      sys_virtio_console_write(const void *buf, int n);
+int      sys_virtio_console_read (void *buf, int n);
+int      sys_virtio_balloon_stats(unsigned int out[4]);
 
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns

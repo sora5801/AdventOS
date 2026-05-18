@@ -48,6 +48,7 @@
  * targeted by this driver.) */
 #define VIRTIO_LEGACY_NET        0x1000
 #define VIRTIO_LEGACY_BLK        0x1001
+#define VIRTIO_LEGACY_BALLOON    0x1002
 #define VIRTIO_LEGACY_CONSOLE    0x1003
 #define VIRTIO_LEGACY_RNG        0x1005
 
