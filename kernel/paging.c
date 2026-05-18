@@ -1,6 +1,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "string.h"
+#include "vbe.h"
 
 /* x86 32-bit, 4 KiB pages, no PSE/PAE. Layout:
  *
@@ -185,6 +186,25 @@ uint32_t *paging_clone_user_pd(uint32_t *parent, uint32_t *data_pages_out) {
         child[i] = parent[i];
     }
 
+    /* Session 126 — single-owner FB.  When a task that owns the
+     * VBE FB forks, the child must NOT inherit those mappings:
+     * - cloning would memcpy MMIO into fresh RAM (a snapshot of the
+     *   screen at fork time, not a live mirror) and the child could
+     *   then write to it without affecting the FB,
+     * - on later exec or exit, the cloned RAM is freed normally
+     *   (paging_destroy already handles that — see the matching
+     *   skip-MMIO loop below),
+     * - and g_fb_owner stays a single pointer, so semantically the
+     *   child never had the FB anyway.
+     * Skip any PTE whose physical addr lies in [fb_phys, fb_phys+
+     * fb_size). */
+    uint32_t fb_lo = 0, fb_hi = 0;
+    const struct vbe_state *v = vbe_state();
+    if (v && v->enabled) {
+        fb_lo = v->fb_phys & (uint32_t)PAGE_MASK;
+        fb_hi = (v->fb_phys + v->fb_size + 0xFFFu) & (uint32_t)PAGE_MASK;
+    }
+
     uint32_t data_pages = 0;
     for (uint32_t i = 8; i < 1024; i++) {
         if (!(parent[i] & PTE_PRESENT)) continue;
@@ -201,7 +221,13 @@ uint32_t *paging_clone_user_pd(uint32_t *parent, uint32_t *data_pages_out) {
             uint32_t pte = parent_pt[j];
             if (!(pte & PTE_PRESENT)) continue;
 
-            void *src_page = (void *)(uintptr_t)(pte & (uint32_t)PAGE_MASK);
+            /* Session 126 — skip FB pages (see comment above). */
+            uint32_t parent_phys = pte & (uint32_t)PAGE_MASK;
+            if (fb_lo && parent_phys >= fb_lo && parent_phys < fb_hi) {
+                continue;
+            }
+
+            void *src_page = (void *)(uintptr_t)parent_phys;
             void *dst_page = pmm_alloc_page();
             if (!dst_page) {
                 /* Free what we already allocated in this PT. The outer
@@ -234,6 +260,23 @@ uint32_t *paging_clone_user_pd(uint32_t *parent, uint32_t *data_pages_out) {
 
 void paging_destroy_user_pd(uint32_t *pd) {
     if (!pd) return;
+
+    /* Session 126 — don't return MMIO pages to the PMM bitmap.
+     * VBE FB pages get mapped into a user PD via SYS_FB_MAP, and a
+     * fork-then-exec cycle will reach this destroy call with the
+     * inherited FB mapping still present.  Their physical addresses
+     * are in VRAM, not RAM the PMM allocated; pmm_free_page would
+     * happily mark them "free" in the bitmap and a later allocation
+     * could hand out a chunk of VRAM as if it were RAM.  Skip
+     * pmm_free_page for any PTE whose phys lies in [fb_phys ..
+     * fb_phys+fb_size). */
+    uint32_t fb_lo = 0, fb_hi = 0;
+    const struct vbe_state *v = vbe_state();
+    if (v && v->enabled) {
+        fb_lo = v->fb_phys & (uint32_t)PAGE_MASK;
+        fb_hi = (v->fb_phys + v->fb_size + 0xFFFu) & (uint32_t)PAGE_MASK;
+    }
+
     /* Skip PDEs 0..7 — those reference page tables shared with the
      * kernel master PD. ALSO skip any high PDE whose value matches
      * the kernel master PD's PDE — that's a "mirror by reference"
@@ -250,7 +293,12 @@ void paging_destroy_user_pd(uint32_t *pd) {
         uint32_t *pt = (uint32_t *)(uintptr_t)(pd[i] & (uint32_t)PAGE_MASK);
         for (uint32_t j = 0; j < 1024; j++) {
             if (pt[j] & PTE_PRESENT) {
-                pmm_free_page((void *)(uintptr_t)(pt[j] & (uint32_t)PAGE_MASK));
+                uint32_t phys = pt[j] & (uint32_t)PAGE_MASK;
+                if (fb_lo && phys >= fb_lo && phys < fb_hi) {
+                    /* MMIO FB page — unmap but DON'T free. */
+                    continue;
+                }
+                pmm_free_page((void *)(uintptr_t)phys);
             }
         }
         pmm_free_page(pt);

@@ -146,6 +146,13 @@ struct task {
      * when the user-side malloc calls sys_brk. */
     uint32_t      heap_brk;
 
+    /* Session 122 — bump allocator for WM-surface VAs.  Each
+     * SYS_WM_CREATE call advances this by enough pages for the new
+     * surface, so a single task can own multiple windows without
+     * overlapping mappings.  Starts at 0 (sentinel) and is set to
+     * WM_SURFACE_VA_BASE on the first WM allocation. */
+    uint32_t      next_wm_va;
+
     /* Working directory (session 25). Index of the directory entry
      * in the global FS table that this task's relative paths resolve
      * against; FS_DIR_ROOT (= 0xFF, defined in fs.h) means the root.

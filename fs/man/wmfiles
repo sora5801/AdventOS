@@ -1,0 +1,29 @@
+NAME
+    wmfiles - tiny file-manager WM client (Path C phase 21)
+
+SYNOPSIS
+    wmfiles [SECONDS]
+
+DESCRIPTION
+    Open a 400x300 window showing the entries in the current
+    working directory.  Click a row to select it, or use the
+    arrow keys (after click-focusing wmfiles so it receives the
+    keyboard stream).
+
+    Keyboard (focus required):
+      Up / Down arrow   move the selection
+      Enter             cd into the selected entry (if a dir)
+      Backspace         cd ..
+      r / R             reload the entry list
+      q / Q / Esc       close the window
+
+    Arrow keys arrive as the standard ANSI CSI sequences
+    ESC '[' 'A'/'B'/'C'/'D'; wmfiles parses them with a tiny
+    state machine across consecutive WM_EV_KEY events.
+
+    No scrollbar: an over-long directory listing just clips at
+    the bottom of the window.  Reload (r) after creating new
+    files outside wmfiles.
+
+SEE ALSO
+    wmd(1), wmtype(1)

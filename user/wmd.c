@@ -34,6 +34,17 @@
 #define MAX_WINDOWS 8
 #define TITLE_H    18
 #define CURSOR_R   8
+/* Session 118 — bottom taskbar height.  Reserved real-estate at
+ * y = ctx.height - TASKBAR_H .. ctx.height.  Buttons are uniform
+ * width within that strip. */
+#define TASKBAR_H  28
+#define TASKBAR_BTN_W  140
+#define TASKBAR_BTN_PAD  4
+/* Session 119 — Start button on the left edge of the taskbar
+ * plus the launcher popup that opens above it. */
+#define START_BTN_W  64
+#define LAUNCH_ITEM_H 22
+#define LAUNCH_W    160
 
 #define KIND_CLOCK   0
 #define KIND_GRADIENT 1
@@ -63,9 +74,49 @@ static int g_window_count;
 static int g_z_counter = 1;
 
 /* Drag state. window_idx == -1 means no drag. */
+/* Session 119 — app launcher catalog.  Keep paths in lockstep with
+ * mkfs.py's `files` table. */
+struct launch_entry {
+    const char *label;
+    const char *path;
+};
+static const struct launch_entry g_launch_items[] = {
+    { "wmhello", "/wmhello.elf" },
+    { "wmtype",  "/wmtype.elf"  },
+    { "wmclock", "/wmclock.elf" },
+    { "wmpaint", "/wmpaint.elf" },
+    { "wmpair",  "/wmpair.elf"  },
+    { "wmfiles", "/wmfiles.elf" },
+    { "sysinfo", "/wmsysinfo.elf" },
+    { "wmps",    "/wmps.elf"     },
+};
+#define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
+static int g_launcher_open;
+
+/* Session 124 — right-click window context menu.  Open when a
+ * RIGHT-click lands on a client window's title bar; closes on the
+ * next click anywhere.  Targets a window by client_id so it
+ * survives slot-array compaction. */
+struct ctx_menu_state {
+    int          open;
+    int          x, y;          /* top-left of popup */
+    unsigned int target_id;
+};
+static struct ctx_menu_state g_ctx_menu;
+
+#define CTXMENU_W       100
+#define CTXMENU_ITEM_H  18
+#define CTXMENU_N_ITEMS 2
+
+static const char *g_ctx_labels[CTXMENU_N_ITEMS] = {
+    "Raise",
+    "Close",
+};
+
 static int g_drag_idx = -1;
 static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
+static int g_prev_right;       /* session 124 — right-button edge */
 
 static int my_atoi_str(const char *s) { return atoi(s); }
 
@@ -252,6 +303,212 @@ static int hit_test(int px, int py) {
     return -1;
 }
 
+/* Session 118 — taskbar.  Iterate the CLIENT windows in
+ * registration order (i.e. the order they appear in g_windows[]),
+ * give each one a fixed-width button.  Session 119 — the first
+ * START_BTN_W pixels are reserved for the Start button.  Session
+ * 121 — the last 132 px are reserved for the system clock; stop
+ * iterating before we collide with it. */
+static int taskbar_hit(int fb_w, int fb_h, int px, int py) {
+    if (py < fb_h - TASKBAR_H || py >= fb_h) return -1;
+    int x = START_BTN_W + TASKBAR_BTN_PAD;
+    int right_limit = fb_w - 132 - TASKBAR_BTN_PAD;
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].kind != KIND_CLIENT) continue;
+        if (x + TASKBAR_BTN_W > right_limit) break;
+        int x2 = x + TASKBAR_BTN_W;
+        if (px >= x && px < x2) return i;
+        x = x2 + TASKBAR_BTN_PAD;
+    }
+    return -1;
+}
+
+/* Session 119 — was the click in the Start button at the very
+ * left of the taskbar? */
+static int start_button_hit(int fb_w, int fb_h, int px, int py) {
+    (void)fb_w;
+    if (py < fb_h - TASKBAR_H + 4 || py >= fb_h - 4) return 0;
+    if (px < 4 || px >= START_BTN_W - 4) return 0;
+    return 1;
+}
+
+/* Session 119 — when the launcher is open, was the click on one
+ * of its items?  Returns the item index (0..N) or -1. */
+static int launcher_hit(int fb_h, int px, int py) {
+    if (!g_launcher_open) return -1;
+    int ly = fb_h - TASKBAR_H - N_LAUNCH_ITEMS * LAUNCH_ITEM_H - 4;
+    int lx = 4;
+    if (px < lx || px >= lx + LAUNCH_W) return -1;
+    if (py < ly || py >= ly + N_LAUNCH_ITEMS * LAUNCH_ITEM_H) return -1;
+    return (py - ly) / LAUNCH_ITEM_H;
+}
+
+/* Session 127 — procedural desktop wallpaper.  Renders a subtle
+ * "starfield-ish" diagonal-gradient pattern across the FB before
+ * any window paints.  Replaces the flat 0x0A1828 fill that wmd had
+ * shipped with since session 111.  Stays cheap (a single pass of
+ * gfx_fill_rect bands plus a sparse seeded-pseudo-random dot
+ * pattern) so it doesn't impact the 60-fps frame budget.
+ *
+ * The pattern is deterministic — no rng state — so the smoke
+ * tests get a stable bg to sample. */
+static void paint_wallpaper(struct gfx_ctx *ctx) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+
+    /* Vertical gradient — 8 bands of subtly different blue,
+     * centred on the legacy 0x0A1828 colour so existing smoke
+     * tests that sample the desktop bg with a small tolerance
+     * still see colours that pass. */
+    int bands = 8;
+    int band_h = fb_h / bands;
+    if (band_h <= 0) band_h = 1;
+    for (int i = 0; i < bands; i++) {
+        int t = i - bands / 2;            /* -4..+3 */
+        int r = 0x0A + t / 2;
+        int g = 0x18 + t;
+        int b = 0x28 + t;
+        unsigned int color = ((unsigned)r << 16) | ((unsigned)g << 8)
+                           | (unsigned)b;
+        int y = i * band_h;
+        int h = (i == bands - 1) ? (fb_h - y) : band_h;
+        gfx_fill_rect(ctx, 0, y, fb_w, h, color);
+    }
+
+    /* Subtle "stars" — a deterministic sparse dot grid that
+     * traces a moiré-like diagonal pattern.  Approximately 1 star
+     * per 256 px, weighted toward the centre by a simple xor
+     * mask. */
+    for (int y = 24; y < fb_h - 32; y += 16) {
+        for (int x = 12; x < fb_w; x += 16) {
+            unsigned int h = ((unsigned int)x * 73u
+                            + (unsigned int)y * 197u) & 0xFFu;
+            if (h < 32) {
+                unsigned int v = 0x40 + h;
+                unsigned int color = (v << 16) | (v << 8) | (v + 32);
+                gfx_put_pixel(ctx, x, y, color);
+            }
+        }
+    }
+}
+
+static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+    int y    = fb_h - TASKBAR_H;
+    /* Bar background. */
+    gfx_fill_rect(ctx, 0, y, fb_w, TASKBAR_H, 0x182030u);
+    gfx_line(ctx, 0, y, fb_w - 1, y, GFX_GREY);
+
+    /* Session 119 — Start button on the very left. */
+    int sby = y + 4;
+    int sbh = TASKBAR_H - 8;
+    unsigned int sfill = g_launcher_open ? GFX_GREEN : 0x205030u;
+    gfx_fill_rect(ctx, 4, sby, START_BTN_W - 8, sbh, sfill);
+    gfx_rect(ctx, 4, sby, START_BTN_W - 8, sbh, GFX_WHITE);
+    gfx_text(ctx, 4 + 6, sby + 5, "Start",
+             GFX_WHITE, GFX_TRANSPARENT);
+
+    /* Session 121 — clock on the right side of the taskbar.
+     * 2x font for HH:MM (10 chars × 16 px = 160 px wide).  We
+     * reserve 132 px on the right so the leftmost char starts at
+     * x = fb_w - 132 + 4.  Per-window buttons stop short of this
+     * reservation. */
+    int clock_w = 132;
+    int clock_x = fb_w - clock_w;
+    {
+        unsigned int ts = sys_time();
+        unsigned int min = (ts / 60u) % 60u;
+        unsigned int hr  = (ts / 3600u) % 24u;
+        char buf[6];
+        buf[0] = '0' + (char)((hr / 10) % 10);
+        buf[1] = '0' + (char)(hr % 10);
+        buf[2] = ':';
+        buf[3] = '0' + (char)(min / 10);
+        buf[4] = '0' + (char)(min % 10);
+        buf[5] = 0;
+        /* Centre vertically: bar is TASKBAR_H tall (28), 2x font is
+         * 16 px → top offset = (28 - 16) / 2 = 6. */
+        gfx_text_n(ctx, clock_x + 4, y + 6, buf, 2,
+                   GFX_WHITE, GFX_TRANSPARENT);
+    }
+
+    /* Per-window button.  Starts after the Start button.  Stops
+     * before the clock reservation so labels never collide with
+     * digits. */
+    int bx = START_BTN_W + TASKBAR_BTN_PAD;
+    int by = y + 4;
+    int bh = TASKBAR_H - 8;
+    int btn_right_limit = clock_x - TASKBAR_BTN_PAD;
+    for (int i = 0; i < g_window_count; i++) {
+        struct window *w = &g_windows[i];
+        if (w->kind != KIND_CLIENT) continue;
+        if (bx + TASKBAR_BTN_W > btn_right_limit) break;
+        int is_focused = (i == focused_idx);
+        unsigned int fill = is_focused ? w->frame_color : 0x303848u;
+        gfx_fill_rect(ctx, bx, by, TASKBAR_BTN_W, bh, fill);
+        gfx_rect(ctx, bx, by, TASKBAR_BTN_W, bh,
+                 is_focused ? GFX_WHITE : GFX_GREY);
+        /* Truncate title to fit (~16 chars at 8 px each). */
+        gfx_text(ctx, bx + 6, by + 5, w->title,
+                 GFX_WHITE, GFX_TRANSPARENT);
+        bx += TASKBAR_BTN_W + TASKBAR_BTN_PAD;
+    }
+}
+
+/* Session 124 — right-click context menu painter + hit-test. */
+static void paint_ctx_menu(struct gfx_ctx *ctx) {
+    if (!g_ctx_menu.open) return;
+    int x = g_ctx_menu.x;
+    int y = g_ctx_menu.y;
+    int h = CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+    /* Shadow + body. */
+    gfx_fill_rect(ctx, x + 2, y + h, CTXMENU_W, 2, GFX_BLACK);
+    gfx_fill_rect(ctx, x + CTXMENU_W, y + 2, 2, h, GFX_BLACK);
+    gfx_fill_rect(ctx, x, y, CTXMENU_W, h, 0x202830u);
+    gfx_rect    (ctx, x, y, CTXMENU_W, h, GFX_WHITE);
+    for (int i = 0; i < CTXMENU_N_ITEMS; i++) {
+        int iy = y + i * CTXMENU_ITEM_H;
+        if (i > 0) gfx_line(ctx, x + 1, iy, x + CTXMENU_W - 2, iy,
+                            0x404850u);
+        gfx_text(ctx, x + 8, iy + 5, g_ctx_labels[i],
+                 GFX_WHITE, GFX_TRANSPARENT);
+    }
+}
+
+static int ctx_menu_hit(int px, int py) {
+    if (!g_ctx_menu.open) return -1;
+    int x = g_ctx_menu.x;
+    int y = g_ctx_menu.y;
+    int h = CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+    if (px < x || px >= x + CTXMENU_W) return -1;
+    if (py < y || py >= y + h) return -1;
+    return (py - y) / CTXMENU_ITEM_H;
+}
+
+/* Session 119 — popup over the Start button when the launcher is
+ * open.  Drawn AFTER paint_taskbar so it sits on top. */
+static void paint_launcher(struct gfx_ctx *ctx) {
+    if (!g_launcher_open) return;
+    int fb_h = (int)ctx->height;
+    int ly = fb_h - TASKBAR_H - N_LAUNCH_ITEMS * LAUNCH_ITEM_H - 4;
+    int lx = 4;
+    int lh = N_LAUNCH_ITEMS * LAUNCH_ITEM_H;
+    /* Drop shadow. */
+    gfx_fill_rect(ctx, lx + 2, ly + lh, LAUNCH_W, 2, GFX_BLACK);
+    gfx_fill_rect(ctx, lx + LAUNCH_W, ly + 2, 2, lh, GFX_BLACK);
+    /* Body. */
+    gfx_fill_rect(ctx, lx, ly, LAUNCH_W, lh, 0x202830u);
+    gfx_rect    (ctx, lx, ly, LAUNCH_W, lh, GFX_WHITE);
+    for (int i = 0; i < N_LAUNCH_ITEMS; i++) {
+        int iy = ly + i * LAUNCH_ITEM_H;
+        if (i > 0) gfx_line(ctx, lx + 1, iy, lx + LAUNCH_W - 2, iy,
+                            0x404850u);
+        gfx_text(ctx, lx + 10, iy + 7, g_launch_items[i].label,
+                 GFX_WHITE, GFX_TRANSPARENT);
+    }
+}
+
 static int in_titlebar(struct window *w, int px, int py) {
     return px >= w->x && px < w->x + w->w &&
            py >= w->y && py < w->y + TITLE_H;
@@ -359,8 +616,22 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
 
 int main(int argc, char **argv) {
     int seconds = 30;
-    if (argc >= 2) seconds = my_atoi_str(argv[1]);
-    if (seconds <= 0) seconds = 30;
+    int show_demos = 1;
+    /* Session 123 — argv parsing: positional SECONDS plus an
+     * optional --clean flag to suppress the four daemon-internal
+     * demonstration windows from session 111.  Demos default ON
+     * for backward compatibility with the smoke-test suite that
+     * verifies their presence; --clean gives end users a tidy
+     * desktop without them. */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '-' && a[1] == '-') {
+            if (a[2] == 'c') show_demos = 0;
+        } else {
+            int v = my_atoi_str(a);
+            if (v > 0) seconds = v;
+        }
+    }
 
     struct gfx_ctx ctx;
     if (gfx_init_db(&ctx, FB_VA) < 0) {
@@ -378,7 +649,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    init_demo_windows(ctx.width, ctx.height);
+    if (show_demos) init_demo_windows(ctx.width, ctx.height);
 
     unsigned int t0 = sys_time();
     int total_ticks = seconds * 60;
@@ -407,7 +678,94 @@ int main(int argc, char **argv) {
         int pressed  = left && !g_prev_left;
         int released = !left && g_prev_left;
 
+        /* Session 124 — right-button edge for the context menu. */
+        int right = (ms.buttons & 0x02) ? 1 : 0;
+        int right_pressed = right && !g_prev_right;
+        g_prev_right = right;
+
+        if (right_pressed) {
+            /* If the menu is already open, close it. */
+            if (g_ctx_menu.open) {
+                g_ctx_menu.open = 0;
+            } else {
+                int hit = hit_test(ms.x, ms.y);
+                if (hit >= 0 && g_windows[hit].kind == KIND_CLIENT
+                    && in_titlebar(&g_windows[hit], ms.x, ms.y)) {
+                    g_ctx_menu.open      = 1;
+                    g_ctx_menu.target_id = g_windows[hit].client_id;
+                    g_ctx_menu.x         = ms.x;
+                    g_ctx_menu.y         = ms.y;
+                    if (g_ctx_menu.x + CTXMENU_W > (int)ctx.width)
+                        g_ctx_menu.x = (int)ctx.width - CTXMENU_W;
+                    if (g_ctx_menu.y + CTXMENU_N_ITEMS * CTXMENU_ITEM_H
+                        > (int)ctx.height)
+                        g_ctx_menu.y = (int)ctx.height
+                            - CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+                }
+            }
+        }
+
         if (pressed) {
+            /* Session 124 — context-menu item click intercept. */
+            if (g_ctx_menu.open) {
+                int item = ctx_menu_hit(ms.x, ms.y);
+                /* Find target window by client_id. */
+                int target_idx = -1;
+                for (int i = 0; i < g_window_count; i++) {
+                    if (g_windows[i].kind == KIND_CLIENT
+                        && g_windows[i].client_id == g_ctx_menu.target_id) {
+                        target_idx = i; break;
+                    }
+                }
+                if (item == 0 && target_idx >= 0) {
+                    /* Raise. */
+                    g_z_counter++;
+                    g_windows[target_idx].raised = g_z_counter;
+                    focused = target_idx;
+                } else if (item == 1 && target_idx >= 0) {
+                    /* Close. */
+                    struct sys_wm_event ev = {0};
+                    ev.type = WM_EV_CLOSE;
+                    sys_wm_event_push(g_ctx_menu.target_id, &ev);
+                }
+                g_ctx_menu.open = 0;
+                goto after_press_hit;
+            }
+            /* Session 119 — launcher popup intercept.  If the popup
+             * is open and the click landed on an item, fork+exec
+             * the chosen program.  If the click is anywhere else,
+             * close the popup. */
+            if (g_launcher_open) {
+                int li = launcher_hit((int)ctx.height, ms.x, ms.y);
+                if (li >= 0) {
+                    int pid = sys_fork();
+                    if (pid == 0) {
+                        const char *argv[2] = { g_launch_items[li].path, 0 };
+                        sys_exec(g_launch_items[li].path, argv);
+                        sys_exit(127);   /* exec failed */
+                    }
+                }
+                g_launcher_open = 0;
+                goto after_press_hit;
+            }
+            if (start_button_hit((int)ctx.width, (int)ctx.height,
+                                 ms.x, ms.y)) {
+                g_launcher_open = 1;
+                goto after_press_hit;
+            }
+            /* Session 118 — taskbar buttons live below all
+             * windows in z order.  Check them BEFORE the normal
+             * hit_test so a button click always raises the right
+             * window even if it's behind another one. */
+            int tb_hit = taskbar_hit((int)ctx.width, (int)ctx.height,
+                                     ms.x, ms.y);
+            if (tb_hit >= 0) {
+                g_z_counter++;
+                g_windows[tb_hit].raised = g_z_counter;
+                focused = tb_hit;
+                /* Don't trigger raise via hit_test below. */
+                goto after_press_hit;
+            }
             int hit = hit_test(ms.x, ms.y);
             if (hit >= 0) {
                 /* Session 116 — close-button intercept.  The
@@ -444,6 +802,7 @@ int main(int argc, char **argv) {
             } else {
                 focused = -1;
             }
+        after_press_hit:;
         }
         /* Session 117 — push FOCUS / UNFOCUS edges to client
          * windows when the *click-focused* window changes.  Use
@@ -576,13 +935,30 @@ int main(int argc, char **argv) {
             sys_wm_event_push(g_windows[focused].client_id, &ev);
         }
 
-        /* Compose the frame. */
-        gfx_clear(&ctx, 0x0A1828u);  /* deep blue desktop bg */
+        /* Compose the frame.  Session 127 — procedural wallpaper
+         * replaces the flat dark-blue fill from session 111. */
+        paint_wallpaper(&ctx);
 
         /* Top status bar across the screen. */
         gfx_fill_rect(&ctx, 0, 0, (int)ctx.width, 18, GFX_DARK_GREY);
         gfx_text(&ctx, 8, 5, "wmd - AdventOS Path C session 111",
                  GFX_WHITE, GFX_TRANSPARENT);
+        /* Session 124 — show the focused window's title on the
+         * right side of the top bar (when there is one).  Aligned
+         * to roughly column = fb_w/2 so it doesn't overlap the
+         * left-side wmd label. */
+        if (focused >= 0 && focused < g_window_count) {
+            struct window *fw = &g_windows[focused];
+            char fbuf[44];
+            int n = 0;
+            const char *p = "focus: ";
+            while (*p && n < (int)sizeof(fbuf) - 1) fbuf[n++] = *p++;
+            for (int i = 0; fw->title[i] && n < (int)sizeof(fbuf) - 1; i++)
+                fbuf[n++] = fw->title[i];
+            fbuf[n] = 0;
+            gfx_text(&ctx, (int)ctx.width / 2 + 80, 5, fbuf,
+                     GFX_CYAN, GFX_TRANSPARENT);
+        }
 
         int order[MAX_WINDOWS];
         z_order(order);
@@ -591,6 +967,18 @@ int main(int argc, char **argv) {
             paint_window(&ctx, &g_windows[idx],
                          idx == focused, t_sec, (unsigned int)tick);
         }
+
+        /* Session 118 — taskbar painted on top of windows so it
+         * stays visible.  Window decorations can extend into the
+         * taskbar region during drag; that's a UI smell but the
+         * taskbar gets the last word on its strip. */
+        paint_taskbar(&ctx, focused);
+        /* Session 119 — launcher popup is drawn on top of the
+         * taskbar when open. */
+        paint_launcher(&ctx);
+        /* Session 124 — right-click context menu on top of
+         * everything (last paint wins). */
+        paint_ctx_menu(&ctx);
 
         /* Cursor: red if dragging, otherwise white. */
         unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;

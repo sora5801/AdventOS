@@ -32,46 +32,10 @@ static void make_surface_ctx(struct gfx_ctx *ctx, struct wm_window *w) {
     ctx->fb_size  = w->w * w->h * 4;
 }
 
-/* Render a single character at (x, y) at 2x scale by emitting a 2x2
- * filled rect for each set bit in the 8x8 font glyph. */
-static void draw_char_2x(struct wm_window *w, struct gfx_ctx *sctx,
-                         int x, int y, char c, unsigned int rgb) {
-    (void)sctx;
-    /* Trick: use libgfx's gfx_glyph to scratch-render to a tiny
-     * private buffer, then 2x-expand into our surface.  Simpler:
-     * inline the 8x8 font lookup ourselves.  But libgfx doesn't
-     * expose the raw glyph data, so go the scratch route. */
-    unsigned int scratch[8 * 8];
-    struct gfx_ctx s2;
-    s2.fb      = (volatile unsigned char *)scratch;
-    s2.fb_real = s2.fb;
-    s2.back    = 0;
-    s2.width   = 8;
-    s2.height  = 8;
-    s2.pitch   = 8 * 4;
-    s2.bpp     = 32;
-    s2.fb_size = 8 * 8 * 4;
-    /* Zero scratch. */
-    for (int i = 0; i < 64; i++) scratch[i] = 0;
-    gfx_glyph(&s2, 0, 0, c, rgb, GFX_TRANSPARENT);
-    for (int yy = 0; yy < 8; yy++) {
-        for (int xx = 0; xx < 8; xx++) {
-            unsigned int p = scratch[yy * 8 + xx];
-            if (p == 0) continue;
-            wm_put_pixel(w, x + 2*xx,     y + 2*yy,     rgb);
-            wm_put_pixel(w, x + 2*xx + 1, y + 2*yy,     rgb);
-            wm_put_pixel(w, x + 2*xx,     y + 2*yy + 1, rgb);
-            wm_put_pixel(w, x + 2*xx + 1, y + 2*yy + 1, rgb);
-        }
-    }
-}
-
-static void draw_text_2x(struct wm_window *w, struct gfx_ctx *sctx,
-                         int x, int y, const char *s, unsigned int rgb) {
-    for (int i = 0; s[i]; i++) {
-        draw_char_2x(w, sctx, x + i * 16, y, s[i], rgb);
-    }
-}
+/* Session 120 — was a custom 2x scratch-buffer expander; replaced
+ * by libgfx's new gfx_text_n which takes a scale param.  The wmd
+ * surface uses a synthetic gfx_ctx so gfx_text_n writes directly
+ * into the shared pixel buffer with the same per-pixel cost. */
 
 /* Format hh:mm:ss into buf.  ts = seconds since epoch.  Mode 0 = 24h,
  * 1 = 12h (with " AM" / " PM" suffix).  Buffer must hold 13 chars. */
@@ -152,7 +116,7 @@ int main(int argc, char **argv) {
         int text_w = len * 16;
         int x = (WIN_W - text_w) / 2;
         int y = 32;
-        draw_text_2x(&win, &sctx, x, y, tbuf, GFX_GREEN);
+        gfx_text_n(&sctx, x, y, tbuf, 2, GFX_GREEN, GFX_TRANSPARENT);
 
         /* Footer with the raw timestamp. */
         char foot[40]; int n = 0;

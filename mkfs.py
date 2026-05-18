@@ -110,6 +110,14 @@ USER_PROGRAMS = [
     # Session 115: path-C phase 9 — clock + paint apps.
     ('wmclock.elf', 'user/_obj/wmclock.bin', None),
     ('wmpaint.elf', 'user/_obj/wmpaint.bin', None),
+    # Session 122: path-C phase 16 — multi-window-per-client demo.
+    ('wmpair.elf',  'user/_obj/wmpair.bin',  None),
+    # Session 128: path-C phase 21 — file-manager client.
+    ('wmfiles.elf', 'user/_obj/wmfiles.bin', None),
+    # Session 129: path-C phase 22 — live system-info dashboard.
+    ('wmsysinfo.elf','user/_obj/wmsysinfo.bin', None),
+    # Session 130: path-C phase 23 — process viewer.
+    ('wmps.elf',     'user/_obj/wmps.bin',      None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -255,6 +263,10 @@ DATA_FILES = [
     ('wmtype',  'fs/man/wmtype',  'man'), # session 114
     ('wmclock', 'fs/man/wmclock', 'man'), # session 115
     ('wmpaint', 'fs/man/wmpaint', 'man'), # session 115
+    ('wmpair',  'fs/man/wmpair',  'man'), # session 122
+    ('wmfiles', 'fs/man/wmfiles', 'man'), # session 128
+    ('wmsysinfo','fs/man/wmsysinfo','man'),# session 129
+    ('wmps',    'fs/man/wmps',    'man'),  # session 130
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
@@ -284,6 +296,12 @@ DATA_FILES = [
     ('vararg.c',  'fs/vararg.c',  None),
     # Session 106 — struct-by-value demo.
     ('sbv.c',     'fs/sbv.c',     None),
+    # Session 121 — Path B Phase 4 capstone: SBV returns + static/extern
+    # + function-pointer typedef syntax, in one program.
+    ('capstone.c', 'fs/capstone.c', None),
+    # Session 125 — language-corners batch test (comma, do-while, goto,
+    # switch, union, multi-dim arrays, sizeof NAME, static locals, etc.).
+    ('corners.c', 'fs/corners.c', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

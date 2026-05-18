@@ -1,0 +1,22 @@
+NAME
+    wmpair - multi-window WM client demo (Path C phase 16)
+
+SYNOPSIS
+    wmpair [SECONDS]
+
+DESCRIPTION
+    Open TWO WM windows from a single process to demonstrate
+    session-122's per-task VA bump allocator.  Both surfaces are
+    mapped at distinct user VAs in the same task; the kernel-side
+    WM table tracks them independently and wmd composites both.
+
+    pair-A: teal background, white tick counter
+    pair-B: magenta background, yellow tick counter
+
+    Closing either window via its WM close-X exits the whole
+    program (both surfaces are torn down).
+
+    Exit after SECONDS (default 20).
+
+SEE ALSO
+    wmd(1), wmhello(1)

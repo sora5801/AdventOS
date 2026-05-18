@@ -193,3 +193,45 @@ void gfx_text(struct gfx_ctx *ctx, int x, int y, const char *s,
         gfx_glyph(ctx, x + i * FONT_W, y, s[i], fg, bg);
     }
 }
+
+/* Session 120 — scaled glyph.  Each source pixel becomes a
+ * scale*scale block.  Uses put_packed in a tight inner loop;
+ * gfx_fill_rect would be cleaner for the block but the per-pixel
+ * call costs nothing measurable at typical sizes and avoids re-
+ * packing the colour every block. */
+void gfx_glyph_n(struct gfx_ctx *ctx, int x, int y, char c,
+                 int scale, unsigned int fg, unsigned int bg) {
+    if (scale <= 0) return;
+    if (scale == 1) { gfx_glyph(ctx, x, y, c, fg, bg); return; }
+    unsigned int uc = (unsigned char)c;
+    if (uc < FONT_FIRST_CH || uc > FONT_LAST_CH) uc = '?';
+    const uint8_t *glyph = font8x8[uc - FONT_FIRST_CH];
+    unsigned int pfg = gfx_pack(ctx, fg);
+    int do_bg = (bg != GFX_TRANSPARENT);
+    unsigned int pbg = do_bg ? gfx_pack(ctx, bg) : 0;
+    for (int r = 0; r < FONT_H; r++) {
+        uint8_t bits = glyph[r];
+        for (int col = 0; col < FONT_W; col++) {
+            unsigned int p;
+            if (bits & (1u << col)) p = pfg;
+            else if (do_bg)         p = pbg;
+            else                    continue;
+            int x0 = x + col * scale;
+            int y0 = y + r * scale;
+            for (int dy = 0; dy < scale; dy++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    put_packed(ctx, x0 + dx, y0 + dy, p);
+                }
+            }
+        }
+    }
+}
+
+void gfx_text_n(struct gfx_ctx *ctx, int x, int y, const char *s,
+                int scale, unsigned int fg, unsigned int bg) {
+    if (!s || scale <= 0) return;
+    int step = FONT_W * scale;
+    for (int i = 0; s[i]; i++) {
+        gfx_glyph_n(ctx, x + i * step, y, s[i], scale, fg, bg);
+    }
+}

@@ -1,0 +1,27 @@
+NAME
+    wmps - process viewer WM client (Path C phase 23)
+
+SYNOPSIS
+    wmps [SECONDS]
+
+DESCRIPTION
+    Open a 420x320 window listing the running processes (pid,
+    state, name) — the same data as the CLI `ps` reads from
+    /proc/<pid>/status.  Refreshes automatically every 1 second.
+
+    Keyboard (focus required):
+      Up / Down arrow   move selection
+      r / R             refresh immediately
+      q / Q / Esc       quit
+
+    Clicking a row selects it.  Selection is visual only — no
+    actions yet (a future session could add 'k' to send SIGKILL
+    via sys_kill once we wire SYS_KILL through the focused
+    keystroke stream).
+
+    Three columns: PID (left), STATE (middle), NAME (right).
+    Column widths are hand-padded — the libgfx 8x8 font is
+    monospace so the columns line up.
+
+SEE ALSO
+    wmd(1), wmsysinfo(1), wmfiles(1), ps(1)

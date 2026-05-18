@@ -64,15 +64,20 @@ static int my_strlen(const char *s) {
 /* ---- parser -------------------------------------------------------- */
 
 /* Tokenize `line` in place on whitespace. Fills `out` with up to
- * MAX_ARGS pointers + NULL terminator. Returns argc. */
+ * MAX_ARGS pointers + NULL terminator. Returns argc.
+ *
+ * Treats \r as whitespace so CRLF-terminated inittab files (Git's
+ * autocrlf on Windows checkouts is the common cause) parse the same
+ * as LF — without this, the trailing \r ends up appended to the last
+ * token and every fs_open later fails. */
 static int tokenize(char *line, char **out) {
     int n = 0;
     char *p = line;
     while (*p && n < MAX_ARGS) {
-        while (*p == ' ' || *p == '\t') p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
         if (!*p) break;
         out[n++] = p;
-        while (*p && *p != ' ' && *p != '\t') p++;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r') p++;
         if (*p) { *p = 0; p++; }
     }
     out[n] = 0;

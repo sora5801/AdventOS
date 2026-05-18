@@ -1,0 +1,23 @@
+NAME
+    wmsysinfo - live system info dashboard (Path C phase 22)
+
+SYNOPSIS
+    wmsysinfo [SECONDS]
+
+DESCRIPTION
+    Open a 400x260 window showing live kernel diagnostics
+    refreshed every 500 ms:
+
+      pid                 wmsysinfo's own pid
+      current cpu         which CPU this poll ran on
+      sys_time (epoch s)  kernel-corrected wall clock
+      wmsysinfo uptime s  seconds since the program started
+      heap brk            current sys_brk pointer (hex)
+      framebuffer         WxH @ Nbpp (from sys_fb_info)
+      cpu 0..3            per-CPU sched-tick counters
+                          (from sys_smp_stats)
+
+    Press q / Q / Esc to quit.  Also closes via the WM's red X.
+
+SEE ALSO
+    wmd(1), wmfiles(1), wmclock(1)
