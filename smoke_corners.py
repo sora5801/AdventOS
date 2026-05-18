@@ -51,6 +51,9 @@ EXPECTED = [
     "break_continue   = 19",
     "union_as_int     = 42",
     "union_as_str     = ok",
+    "sizeof_x         = 4",
+    "sizeof_view      = 4",
+    "sizeof_u         = 4",
 ]
 
 

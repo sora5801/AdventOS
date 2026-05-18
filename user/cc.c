@@ -848,6 +848,11 @@ static int  global_declare(const char *name, int size, int kind);
 static int  global_find(const char *name);
 /* Session 97 — struct helpers. */
 static int  global_declare_struct(const char *name, int size, int kind, int meta);
+/* Session 125 — local lookup forward decls (used by parse_primary's
+ * `sizeof NAME` codegen). */
+static int  local_find(const char *name);
+static int  local_kind(const char *name);
+static int  local_meta(const char *name);
 
 /* Session 97 — struct registry. Each struct type has a name, a list
  * of fields (with offsets and kinds), and a total size. Field kinds
@@ -1046,6 +1051,7 @@ enum {
     N_DO_WHILE,      /* do stmt while (cond);  — body in a, cond in b */
     N_BREAK,         /* break;     — jump to end of enclosing loop/switch */
     N_CONTINUE,      /* continue;  — jump to top/cond of enclosing loop */
+    N_SIZEOF_NAME,   /* sizeof NAME — folded at codegen when locals are bound */
 };
 
 struct node {
@@ -1134,9 +1140,15 @@ static struct node *parse_primary(void) {
          *   sizeof(char *)         -> 4
          *   sizeof(struct TAG)     -> g_structs[idx].size
          *   sizeof(struct TAG *)   -> 4
-         * No `sizeof EXPR` form yet (would need expression type info). */
+         *
+         * Session 125 — also accept `sizeof NAME` and `sizeof(NAME)`
+         * for scalar / pointer / struct-value variables. Arrays are
+         * deliberately NOT supported (cc doesn't track array length
+         * past the parse-time decl; recovering it would require an
+         * extra field on local_slot/global_info). Use `N * sizeof(int)`
+         * for array byte counts, or a #define for the length. */
         g_tk++;
-        expect(T_LPAREN, "'('");
+        int has_paren = accept(T_LPAREN);
         int sz;
         if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
             g_tk++;
@@ -1156,11 +1168,34 @@ static struct node *parse_primary(void) {
             g_tk++;
             if (accept(T_STAR)) sz = 4;
             else                sz = 1;
+        } else if (tk_cur()->kind == T_NAME) {
+            /* Session 125 — sizeof NAME. typedef-NAMEs resolve at parse
+             * time (the typedef registry is populated during parse);
+             * variable NAMEs defer to codegen via N_SIZEOF_NAME because
+             * the local/global symbol tables aren't populated yet. */
+            int ti = typedef_find(tk_cur()->name);
+            if (ti >= 0) {
+                int kk = g_typedefs[ti].kind;
+                int mm = g_typedefs[ti].meta;
+                g_tk++;
+                (void)accept(T_STAR);
+                if (kk == LK_STRUCT && mm >= 0 && mm < g_n_structs) sz = g_structs[mm].size;
+                else                                                sz = 4;
+            } else {
+                /* Defer to codegen. Build an N_SIZEOF_NAME node. */
+                struct node *n = new_node(N_SIZEOF_NAME);
+                int k = 0;
+                while (tk_cur()->name[k]) { n->name[k] = tk_cur()->name[k]; k++; }
+                n->name[k] = 0;
+                g_tk++;
+                if (has_paren) expect(T_RPAREN, "')'");
+                return n;
+            }
         } else {
-            die_at(tk_cur()->line, "sizeof: expected type", 0);
+            die_at(tk_cur()->line, "sizeof: expected type or NAME", 0);
             sz = 0;
         }
-        expect(T_RPAREN, "')'");
+        if (has_paren) expect(T_RPAREN, "')'");
         struct node *n = new_node(N_NUM);
         n->num = sz;
         return n;
@@ -3847,6 +3882,31 @@ static void gen_expr(struct node *n) {
              * then evaluates b. The whole expression's value is b. */
             gen_expr(n->a);   /* side-effects only; result in eax discarded */
             gen_expr(n->b);   /* result stays in eax */
+            return;
+        }
+        case N_SIZEOF_NAME: {
+            /* Session 125 — sizeof NAME, resolved at codegen because
+             * the locals/globals symbol tables aren't populated until
+             * gen_func runs. */
+            int sz;
+            int off = local_find(n->name);
+            int kk, mm;
+            if (off != 0) {
+                kk = local_kind(n->name);
+                mm = local_meta(n->name);
+            } else {
+                int gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "sizeof: unknown name", n->name);
+                kk = g_globals[gi].kind;
+                mm = g_globals[gi].meta;
+            }
+            if (kk == LK_STRUCT && mm >= 0 && mm < g_n_structs)
+                sz = g_structs[mm].size;
+            else if (kind_is_array(kk))
+                die_at(n->line, "sizeof of array variable not supported (use N * sizeof(elem))", 0);
+            else
+                sz = 4;
+            e_mov_eax_imm(sz);
             return;
         }
         case N_UN: {

@@ -86,5 +86,12 @@ int main() {
     u.as_str = "ok";                              /* same storage rewritten */
     printf("union_as_str     = %s\n", u.as_str); /* ok */
 
+    /* 6. sizeof NAME (and sizeof(NAME)) — scalars + struct values.
+     *    Array NAMEs aren't supported; use a literal length. */
+    int x;
+    printf("sizeof_x         = %d\n", sizeof x);       /* 4 */
+    printf("sizeof_view      = %d\n", sizeof(union view));  /* 4 */
+    printf("sizeof_u         = %d\n", sizeof(u));      /* 4 */
+
     return 0;
 }
