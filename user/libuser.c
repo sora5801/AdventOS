@@ -268,6 +268,15 @@ int sys_virtio_console_read(void *buf, int n) {
     return ret;
 }
 
+int sys_rename(const char *oldp, const char *newp) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_RENAME), "b"(oldp), "c"(newp)
+                      : "memory");
+    return ret;
+}
+
 int sys_virtio_balloon_stats(unsigned int out[4]) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -517,6 +526,14 @@ int sys_wm_event_poll(unsigned int window_id,
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_WM_EVENT_POLL), "b"(window_id), "c"(out)
+                      : "memory");
+    return ret;
+}
+int sys_wm_poll_alttab(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_ALTTAB)
                       : "memory");
     return ret;
 }

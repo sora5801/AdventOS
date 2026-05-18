@@ -41,6 +41,13 @@ int main(int argc, char **argv) {
     const char *src = argv[1];
     const char *dst = argv[2];
 
+    /* Atomic rename first — works for both paths under /mnt/9p where
+     * the 9P driver issues Trenameat.  Other filesystems return -1
+     * and we fall through to the copy+unlink path below. */
+    if (sys_rename(src, dst) == 0) {
+        return 0;
+    }
+
     if (sys_fs_size(dst) >= 0) {
         say_err("destination exists:", dst);
         return 1;

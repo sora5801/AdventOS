@@ -348,15 +348,25 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
+/* Session 135 — Alt+Tab routing.  USB-HID posts on Alt+Tab via
+ * the in-kernel `wm_post_alttab` helper.  Wmd polls via this
+ * syscall once per frame.  Returns 1 if at least one Alt+Tab
+ * press is pending (and decrements the counter), else 0. */
+#define SYS_WM_POLL_ALTTAB       100
+
+#define SYS_RENAME      101 /* (eax=101, ebx=old_path, ecx=new_path) ->
+                             * 0 / -1.  For paths under /mnt/9p the
+                             * driver issues an atomic 9P Trenameat;
+                             * for AdventFS paths the kernel does NOT
+                             * implement rename (caller falls back to
+                             * the userspace copy+unlink in mv.c). */
+
 #define SYS_OPEN_A      102 /* (eax=102, ebx=name) -> tmpfs fd (preserves
                              * existing content) or -1. Drives shell `>>`
                              * append redirect. tmpfs_write always appends
                              * to end-of-file, so opening without truncate
-                             * is enough to make `>>` work.
-                             *
-                             * Slots 100 / 101 belong to SYS_WM_POLL_ALTTAB
-                             * and SYS_RENAME (added on origin/main while
-                             * this branch was in flight). */
+                             * is enough to make `>>` work. Slots 100 / 101
+                             * already taken (above). */
 
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */

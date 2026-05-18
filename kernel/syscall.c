@@ -956,6 +956,9 @@ void syscall_dispatch(struct registers *r) {
             ret = b ? wm_poll_event(task_current(), (uint32_t)a,
                                     (struct sys_wm_event *)(uintptr_t)b) : -1;
             break;
+        case SYS_WM_POLL_ALTTAB:
+            ret = wm_poll_alttab(task_current());
+            break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
             extern int virtio_rng_available(void);
@@ -1004,6 +1007,36 @@ void syscall_dispatch(struct registers *r) {
             uint32_t *uout = (uint32_t *)(uintptr_t)a;
             if (!uout || (uintptr_t)uout >= 0xC0000000u) { ret = -1; break; }
             ret = virtio_balloon_get_stats(uout);
+            break;
+        }
+        case SYS_RENAME: {
+            /* AdventFS proper has no rename op (the on-disk format doesn't
+             * support directory-entry mutation cheaply). Only the 9p
+             * filesystem supports atomic rename via Trenameat; everything
+             * else returns -1 so userspace falls back to copy+unlink. */
+            const char *uold = (const char *)(uintptr_t)a;
+            const char *unew = (const char *)(uintptr_t)b;
+            if (!uold || !unew) { ret = -1; break; }
+            char oldp[128], newp[128];
+            int  i;
+            for (i = 0; i < (int)sizeof(oldp) - 1 && uold[i]; i++) oldp[i] = uold[i];
+            oldp[i] = 0;
+            for (i = 0; i < (int)sizeof(newp) - 1 && unew[i]; i++) newp[i] = unew[i];
+            newp[i] = 0;
+            /* Both paths must live under /mnt/9p for the atomic rename
+             * to work — Trenameat is single-filesystem. */
+            int old_is_9p = (oldp[0] == '/' && oldp[1] == 'm' && oldp[2] == 'n' &&
+                             oldp[3] == 't' && oldp[4] == '/' && oldp[5] == '9' &&
+                             oldp[6] == 'p' && oldp[7] == '/');
+            int new_is_9p = (newp[0] == '/' && newp[1] == 'm' && newp[2] == 'n' &&
+                             newp[3] == 't' && newp[4] == '/' && newp[5] == '9' &&
+                             newp[6] == 'p' && newp[7] == '/');
+            if (old_is_9p && new_is_9p) {
+                extern int virtio_9p_rename_path(const char *, const char *);
+                ret = virtio_9p_rename_path(oldp + 8, newp + 8);
+            } else {
+                ret = -1;
+            }
             break;
         }
         case SYS_PTRACE: {

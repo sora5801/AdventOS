@@ -73,4 +73,11 @@ int  wm_pop_message(struct task *caller, struct sys_wm_msg *out);
  * still owns get torn down and a destroy message queued for wmd. */
 void wm_on_task_exit(struct task *t);
 
+/* Session 135 — Alt+Tab routing.  USB-HID calls wm_post_alttab()
+ * when the user presses Alt+Tab; wmd polls wm_poll_alttab() once
+ * per frame.  Decoupled from the main keyboard ring so the shell
+ * (or any other reader) can't intercept the sentinel byte. */
+void wm_post_alttab(void);
+int  wm_poll_alttab(struct task *caller);
+
 #endif

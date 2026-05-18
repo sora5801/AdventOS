@@ -79,6 +79,11 @@ struct wm_state {
 static struct task    *g_wm_owner;
 static struct wm_state *g_state;
 
+/* Session 135 — Alt+Tab counter.  Bumped by usb_hid when the user
+ * presses Alt+Tab; decremented by wmd's per-frame poll.  Capped at
+ * a small max so a stuck-keyboard never overflows. */
+static volatile unsigned int g_alttab_pending;
+
 static int  ensure_state(void) {
     if (g_state) return 0;
     g_state = (struct wm_state *)kmalloc(sizeof(*g_state));
@@ -341,6 +346,20 @@ int wm_poll_event(struct task *caller, uint32_t window_id,
     *out = w->events[w->ev_head];
     w->ev_head = (w->ev_head + 1u) % WM_EVENT_QUEUE_DEPTH;
     w->ev_size--;
+    return 1;
+}
+
+/* Session 135 — usb_hid pushes here on Alt+Tab; wmd pulls once
+ * per frame.  No buffering — just a counter, so wmd doesn't see
+ * a stale press the very next frame after release. */
+void wm_post_alttab(void) {
+    if (g_alttab_pending < 8) g_alttab_pending++;
+}
+
+int wm_poll_alttab(struct task *caller) {
+    if (g_wm_owner != caller) return 0;
+    if (g_alttab_pending == 0) return 0;
+    g_alttab_pending--;
     return 1;
 }
 
