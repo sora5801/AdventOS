@@ -21,7 +21,12 @@ SECTIONS
     . = 0x40000000;
 
     .text : SUBALIGN(4) {
-        *(.startup)               /* _start lives here, must be first */
+        /* Session 132 — KEEP() the .startup section so --gc-sections
+         * doesn't drop _start.  ENTRY(_start) marks the symbol as a
+         * GC root, but only KEEP() guarantees the *section* survives
+         * with its required first-in-.text placement (the kernel
+         * loader assumes e_entry = 0x40000000). */
+        KEEP(*(.startup))         /* _start lives here, must be first */
         *(.text*)
         *(.gnu.linkonce.t.*)
     }
@@ -33,6 +38,15 @@ SECTIONS
     }
 
     .data : SUBALIGN(4) {
+        /* Session 132 — 4-byte anchor that survives --gc-sections.
+         * Without it, programs with no live .data input sections
+         * (e.g. init, which uses only zero-init BSS globals) end
+         * up with the OUTPUT .data section as NOBITS — the folded
+         * .bss bytes are no longer PROGBITS-promoted because there
+         * was no PROGBITS input to mix them with.  The anchor pads
+         * .data start by 4 bytes but keeps the output loadable. */
+        LONG(0)
+
         *(.data*)
         *(.gnu.linkonce.d.*)
 
