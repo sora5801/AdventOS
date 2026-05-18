@@ -361,6 +361,12 @@ struct sys_limits {
                              * implement rename (caller falls back to
                              * the userspace copy+unlink in mv.c). */
 
+/* Session 136 — global single-slot clipboard.  Any task can write
+ * (last-writer-wins) and read.  Max payload 4096 bytes; kernel
+ * kmalloc's a single buffer.  See clipboard.h. */
+#define SYS_CLIPBOARD_SET  102  /* (eax=102, ebx=buf, ecx=len)  -> 0 / -1 */
+#define SYS_CLIPBOARD_GET  103  /* (eax=103, ebx=buf, ecx=cap)  -> stored_len or 0 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

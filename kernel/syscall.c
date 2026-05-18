@@ -26,6 +26,7 @@
 #include "vbe.h"
 #include "fbcon.h"
 #include "wm.h"
+#include "clipboard.h"
 #include "ac97.h"
 #include "bkl.h"
 #include "blkdev.h"
@@ -979,6 +980,13 @@ void syscall_dispatch(struct registers *r) {
             break;
         case SYS_WM_POLL_ALTTAB:
             ret = wm_poll_alttab(task_current());
+            break;
+        /* Session 136 — clipboard. */
+        case SYS_CLIPBOARD_SET:
+            ret = clipboard_set((const void *)(uintptr_t)a, (int)b);
+            break;
+        case SYS_CLIPBOARD_GET:
+            ret = clipboard_get((void *)(uintptr_t)a, (int)b);
             break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
