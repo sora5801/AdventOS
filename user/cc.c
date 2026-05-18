@@ -2341,8 +2341,62 @@ static void e_lea_eax_ebp(int off_from_ebp) {
     }
 }
 
+/* Session 122 — EBX-targeted variants used by the smart-codegen
+ * register-allocator pass. They mirror the EAX-targeted ones above so
+ * a binop's RHS can be loaded directly into EBX without going through
+ * EAX (skipping push/pop on the common simple-RHS case). */
+
+/* mov ebx, [ebp + disp] */
+static void e_load_local_ebx(int off_from_ebp) {
+    if (off_from_ebp >= -128 && off_from_ebp <= 127) {
+        emit_b(0x8b); emit_b(0x5d); emit_b((unsigned char)(off_from_ebp & 0xff));
+    } else {
+        emit_b(0x8b); emit_b(0x9d); emit_d((unsigned)off_from_ebp);
+    }
+}
+
+/* lea ebx, [ebp + disp] */
+static void e_lea_ebx_ebp(int off_from_ebp) {
+    if (off_from_ebp >= -128 && off_from_ebp <= 127) {
+        emit_b(0x8d); emit_b(0x5d); emit_b((unsigned char)(off_from_ebp & 0xff));
+    } else {
+        emit_b(0x8d); emit_b(0x9d); emit_d((unsigned)off_from_ebp);
+    }
+}
+
+/* mov ebx, [imm32]   →  8b 1d imm32  (no special EBX-from-memoffs32 form;
+ * use modrm). Returns file offset of the imm32 for fixup-recording. */
+static int e_mov_ebx_at_abs(void) {
+    emit_b(0x8b); emit_b(0x1d);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+
+/* mov ebx, imm32 with offset returned for fixup. Used for &global and
+ * function-address loads into EBX. */
+static int e_mov_ebx_imm_for_fixup(void) {
+    emit_b(0xbb);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+
 /* mov eax, [eax]  →  8b 00  (dword load through eax) */
 static void e_load_eax_at_eax(void) { emit_b(0x8b); emit_b(0x00); }
+
+/* Session 122 — mov eax, [eax + disp]. Used to collapse the
+ * "deref-with-offset" pattern (e.g. N_ARROW: `(*p).field` =
+ * `*(p + field_off)`) into a single addressed load. */
+static void e_load_eax_at_eax_disp(int disp) {
+    if (disp == 0) {
+        emit_b(0x8b); emit_b(0x00);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_b(0x8b); emit_b(0x40); emit_b((unsigned char)(disp & 0xff));
+    } else {
+        emit_b(0x8b); emit_b(0x80); emit_d((unsigned)disp);
+    }
+}
 
 /* movzx eax, byte [eax]  →  0f b6 00  (byte load, zero-extended) */
 static void e_loadb_eax_at_eax(void) { emit_b(0x0f); emit_b(0xb6); emit_b(0x00); }
@@ -3147,6 +3201,99 @@ static int expr_ptr_elem_size(struct node *n) {
     return 0;
 }
 
+/* ---- Session 122 — register-allocator helpers --------------------- *
+ *
+ * The default codegen evaluates every binop with a push/pop round-trip
+ * around EAX:
+ *
+ *     gen_expr(lhs)   ; eax = lhs
+ *     push eax
+ *     gen_expr(rhs)   ; eax = rhs (clobbers eax)
+ *     mov  ebx, eax   ; ebx = rhs
+ *     pop  eax        ; eax = lhs (restored)
+ *     <op>            ; eax = lhs op rhs
+ *
+ * For the *very* common case where one operand is "simple" — an
+ * N_NUM, N_STR, N_ADDR_OF, or N_NAME that loads from a fixed local
+ * /global slot — we can compute the simple side directly into EBX
+ * without touching EAX. That saves a push + pop (2 bytes) per binop,
+ * which compounds quickly. The same pattern shows up in N_INDEX,
+ * N_INDEX_ASSIGN, N_DEREF_ASSIGN, and N_INDEX_MEMBER_ASSIGN.
+ *
+ * `is_simple_load` says whether `gen_simple_into_ebx` can handle the
+ * node. The helper is intentionally narrow — it only fires on cases
+ * where we can guarantee EAX is preserved. Anything that *might*
+ * clobber EAX (calls, nested binops, derefs, indexing) falls back to
+ * the push/pop path. */
+static int is_simple_load(struct node *n) {
+    if (!n) return 0;
+    if (n->kind == N_NUM)     return 1;
+    if (n->kind == N_STR)     return 1;
+    if (n->kind == N_NAME)    return 1;
+    if (n->kind == N_ADDR_OF) return 1;
+    return 0;
+}
+
+/* Emit a load of `n` into EBX. Mirrors the EAX-targeted code paths
+ * in gen_expr's N_NUM / N_STR / N_NAME / N_ADDR_OF cases. Caller has
+ * checked is_simple_load(n). */
+static void gen_simple_into_ebx(struct node *n) {
+    if (n->kind == N_NUM) {
+        e_mov_ebx_imm(n->num);
+        return;
+    }
+    if (n->kind == N_STR) {
+        if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many string fixups");
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        g_str_fixups[g_n_str_fixups].code_off = imm_off;
+        g_str_fixups[g_n_str_fixups].str_idx  = n->num;
+        g_n_str_fixups++;
+        return;
+    }
+    if (n->kind == N_NAME) {
+        int off = local_find(n->name);
+        if (off != 0) {
+            int k = local_kind(n->name);
+            if (kind_is_array(k)) e_lea_ebx_ebp(off);
+            else                  e_load_local_ebx(off);
+            return;
+        }
+        int gi = global_find(n->name);
+        if (gi >= 0) {
+            if (kind_is_array(g_globals[gi].kind)) {
+                int imm_off = e_mov_ebx_imm_for_fixup();
+                record_glob_fixup(imm_off, gi);
+            } else {
+                int imm_off = e_mov_ebx_at_abs();
+                record_glob_fixup(imm_off, gi);
+            }
+            return;
+        }
+        /* Function name decays to its VA. */
+        int fi = func_find(n->name);
+        if (fi < 0) fi = func_intern(n->name, -1);
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        record_addr_fixup(imm_off, fi);
+        return;
+    }
+    if (n->kind == N_ADDR_OF) {
+        int off = local_find(n->name);
+        if (off != 0) { e_lea_ebx_ebp(off); return; }
+        int gi = global_find(n->name);
+        if (gi >= 0) {
+            int imm_off = e_mov_ebx_imm_for_fixup();
+            record_glob_fixup(imm_off, gi);
+            return;
+        }
+        int fi = func_find(n->name);
+        if (fi < 0) fi = func_intern(n->name, -1);
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        record_addr_fixup(imm_off, fi);
+        return;
+    }
+    die_at(n->line, "gen_simple_into_ebx: not a simple node", 0);
+}
+
 static void gen_expr(struct node *n) {
     if (!n) { e_mov_eax_imm(0); return; }
     switch (n->kind) {
@@ -3293,26 +3440,46 @@ static void gen_expr(struct node *n) {
             if (fi < 0) die_at(n->line, "no such field", n->field_name);
             int field_off  = g_structs[sidx].fields[fi].offset;
             int field_kind = g_structs[sidx].fields[fi].kind;
-            /* Base address into eax. */
-            if (is_arrow) {
+            (void)field_kind;
+            /* Session 122 — collapse the base-address + field-offset +
+             * deref chain into a single addressed load where possible.
+             *
+             *   N_MEMBER local:   mov eax, [ebp + off + field_off]
+             *                     (was lea+add+load = 3+5+2 = 10 bytes;
+             *                      now 3-6 bytes depending on disp size)
+             *
+             *   N_ARROW local:    mov eax, [ebp + off]      (load ptr)
+             *                     mov eax, [eax + field_off] (deref+off)
+             *                     (was 3+5+2 = 10 bytes; now 3 + 2-6).
+             *
+             * Globals are similar but field_off is folded into the
+             * fixup target VA at patch time. */
+            if (!is_arrow) {
+                /* Member: address = base + field_off, then dereference. */
+                if (is_local) {
+                    /* mov eax, [ebp + off + field_off] — one instruction. */
+                    int total = off + field_off;
+                    e_load_local(total);
+                } else {
+                    /* Globals: load through [GLOBAL_VA + field_off].
+                     * Encode as mov eax, [imm32]; the fixup adds
+                     * `field_off` on top of the global's VA so the
+                     * final imm32 is GLOBAL_VA + field_off. */
+                    if (field_off == 0) {
+                        emit_load_global(gi);
+                    } else {
+                        emit_b(0xa1);
+                        int imm_off = g_code_len;
+                        emit_d((unsigned)field_off);  /* base is the field_off; fixup ADDS the VA */
+                        record_glob_fixup(imm_off, gi);
+                    }
+                }
+            } else {
+                /* Arrow: load pointer, then deref-with-offset. */
                 if (is_local) e_load_local(off);
                 else          emit_load_global(gi);
-            } else {
-                if (is_local) e_lea_eax_ebp(off);
-                else          emit_addrof_global(gi);
+                e_load_eax_at_eax_disp(field_off);
             }
-            /* Add field offset. */
-            if (field_off != 0) {
-                /* add eax, imm32  →  05 imm32  (special EAX form). */
-                emit_b(0x05); emit_d((unsigned)field_off);
-            }
-            /* Load width — char/byte vs dword. We currently store all
-             * fields at 4-byte slots, so all reads are dword unless the
-             * field is explicitly char-pointer-ish (which means the
-             * field VALUE is itself a pointer — still 4 bytes). Byte
-             * loads only matter for `char field;` someday — not in scope. */
-            (void)field_kind;
-            e_load_eax_at_eax();
             return;
         }
         case N_INDEX_MEMBER: {
@@ -3507,12 +3674,39 @@ static void gen_expr(struct node *n) {
             }
             /* Standard arithmetic / comparison: compute LHS in eax,
              * push; compute RHS in eax; pop LHS into ebx -> reorder
-             * so that the op operates on (eax = LHS, ebx = RHS). */
-            gen_expr(n->a);
-            e_push_eax();
-            gen_expr(n->b);
-            e_mov_ebx_eax();
-            e_pop_eax();
+             * so that the op operates on (eax = LHS, ebx = RHS).
+             *
+             * Session 122 — register-allocator fast paths:
+             *
+             *   (a) RHS is simple (NUM/STR/NAME/ADDR_OF): load directly
+             *       into EBX after computing LHS in EAX. Saves a
+             *       push+pop pair (2 bytes) per binop.
+             *   (b) LHS is simple AND RHS would otherwise need push/pop:
+             *       compute RHS first into EAX, move to EBX, then load
+             *       LHS into EAX. Saves the same 2 bytes.
+             *
+             * Both paths require neither side to clobber the other; the
+             * simple-load helpers guarantee they don't touch the
+             * non-target register, so the guarantee follows from
+             * is_simple_load. */
+            if (is_simple_load(n->b)) {
+                gen_expr(n->a);
+                gen_simple_into_ebx(n->b);
+            } else if (is_simple_load(n->a)) {
+                gen_expr(n->b);
+                e_mov_ebx_eax();
+                /* Load LHS into EAX without disturbing EBX. The
+                 * existing N_NUM/N_NAME/N_ADDR_OF/N_STR codegen for the
+                 * EAX side doesn't touch EBX — that's by inspection
+                 * of the N_NAME, N_NUM, N_STR, N_ADDR_OF cases above. */
+                gen_expr(n->a);
+            } else {
+                gen_expr(n->a);
+                e_push_eax();
+                gen_expr(n->b);
+                e_mov_ebx_eax();
+                e_pop_eax();
+            }
             switch (n->op) {
                 case T_PLUS:    e_add_eax_ebx();   break;
                 case T_MINUS:   e_sub_eax_ebx();   break;
@@ -3802,16 +3996,35 @@ static void gen_stmt(struct node *n) {
             if (fi < 0) die_at(n->line, "no such field", n->field_name);
             int field_off = g_structs[sidx].fields[fi].offset;
 
+            /* Session 122 — fast paths that collapse the addressed-store
+             * into a single instruction.
+             *
+             *   N_MEMBER_ASSIGN local:   mov [ebp + off + field_off], eax
+             *   N_MEMBER_ASSIGN global:  mov [GLOBAL_VA + field_off], eax
+             *
+             * For N_ARROW_ASSIGN we still need EBX to hold the pointer,
+             * so we keep the existing push/pop path — RHS could clobber
+             * EAX freely. */
+            if (!is_arrow) {
+                gen_expr(n->a);          /* eax = rhs */
+                if (is_local) {
+                    e_store_local(off + field_off);
+                } else {
+                    /* mov [imm32], eax with fixup that adds field_off. */
+                    emit_b(0xa3);
+                    int imm_off = g_code_len;
+                    emit_d((unsigned)field_off);
+                    record_glob_fixup(imm_off, gi);
+                }
+                return;
+            }
+            /* Arrow path — keep original push/pop until we have an
+             * EBX-disp store helper. */
             gen_expr(n->a);          /* eax = rhs */
             e_push_eax();
             /* Compute destination address into eax. */
-            if (is_arrow) {
-                if (is_local) e_load_local(off);
-                else          emit_load_global(gi);
-            } else {
-                if (is_local) e_lea_eax_ebp(off);
-                else          emit_addrof_global(gi);
-            }
+            if (is_local) e_load_local(off);
+            else          emit_load_global(gi);
             if (field_off != 0) {
                 emit_b(0x05); emit_d((unsigned)field_off);
             }
@@ -4834,7 +5047,18 @@ int main(int argc, char **argv) {
     for (int i = 0; i < g_n_glob_fixups; i++) {
         int gi = g_glob_fixups[i].glob_idx;
         unsigned int va = (unsigned int)g_data_pool_base_va + (unsigned int)g_globals[gi].offset;
-        patch_d(g_glob_fixups[i].code_off, va);
+        /* Session 122 — read the current imm32 as an ADDEND. Existing
+         * call sites emit emit_d(0) so addend is zero (no change). The
+         * N_MEMBER global fast path emits emit_d(field_off) so the
+         * final patched value is GLOBAL_VA + field_off — one addressed
+         * load instead of mov-load-add-load. */
+        int code_off = g_glob_fixups[i].code_off;
+        unsigned int addend =
+              (unsigned int)g_code[code_off + 0]
+            | ((unsigned int)g_code[code_off + 1] << 8)
+            | ((unsigned int)g_code[code_off + 2] << 16)
+            | ((unsigned int)g_code[code_off + 3] << 24);
+        patch_d(code_off, va + addend);
     }
 
     if (write_elf(out_path, g_code_len) < 0) return 1;
