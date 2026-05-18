@@ -70,6 +70,17 @@ int tmpfs_create(const char *name) {
     return -1;
 }
 
+int tmpfs_create_append(const char *name) {
+    /* Existing file: keep size + data, just bump refs. */
+    int idx = find_by_name(name);
+    if (idx >= 0) {
+        g_tmp[idx].refs++;
+        return idx;
+    }
+    /* Missing: behave exactly like tmpfs_create (fresh empty file). */
+    return tmpfs_create(name);
+}
+
 void tmpfs_close(int idx) {
     if (!valid(idx)) return;
     if (g_tmp[idx].refs > 0) g_tmp[idx].refs--;

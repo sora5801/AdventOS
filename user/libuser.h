@@ -139,6 +139,10 @@ typedef unsigned int   size_t;
 #define SYS_VIRTIO_CONSOLE_READ   98
 #define SYS_VIRTIO_BALLOON_STATS  99
 
+/* Path A polish — `>>` append-mode tmpfs open. 100 / 101 are taken by
+ * SYS_WM_POLL_ALTTAB and SYS_RENAME respectively on origin/main. */
+#define SYS_OPEN_A               102
+
 /* Session 70: syscall sandbox.
  *
  * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
@@ -573,6 +577,7 @@ int      sys_serial_inject(const char *bytes, int n);
 int      sys_pipe   (int fds[2]);
 int      sys_dup2   (int oldfd, int newfd);
 int      sys_open_w (const char *name);
+int      sys_open_a (const char *name);
 
 /* Signals.
  *   kill(pid, sig)            queues sig in pid's pending set

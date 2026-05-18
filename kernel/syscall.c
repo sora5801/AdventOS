@@ -198,6 +198,7 @@ const char *syscall_name(unsigned num) {
         case SYS_UNLINK:          return "SYS_UNLINK";
         case SYS_RMDIR:           return "SYS_RMDIR";
         case SYS_TTY_GET_CURSOR:  return "SYS_TTY_GET_CURSOR";
+        case SYS_OPEN_A:          return "SYS_OPEN_A";
         default:                  return "SYS_???";
     }
 }
@@ -406,6 +407,30 @@ void syscall_dispatch(struct registers *r) {
             if (fd < 0) { ret = -1; break; }
 
             int tmp_idx = tmpfs_create(name);
+            if (tmp_idx < 0) { ret = -1; break; }
+
+            t->fds[fd].kind    = FD_TMPFS;
+            t->fds[fd].obj_idx = tmp_idx;
+            t->fds[fd].offset  = 0;
+            ret = fd;
+            break;
+        }
+        case SYS_OPEN_A: {
+            /* Append-mode tmpfs open. Same as SYS_OPEN_W except an
+             * existing tmpfile keeps its bytes — tmpfs_write always
+             * appends, so writes after this open land at end-of-file
+             * (POSIX `>>` semantics). */
+            const char *uname = (const char *)(uintptr_t)a;
+            char name[FS_NAME_MAX + 1];
+            int  i;
+            for (i = 0; i < FS_NAME_MAX && uname[i]; i++) name[i] = uname[i];
+            name[i] = 0;
+
+            struct task *t = task_current();
+            int fd = alloc_fd(t);
+            if (fd < 0) { ret = -1; break; }
+
+            int tmp_idx = tmpfs_create_append(name);
             if (tmp_idx < 0) { ret = -1; break; }
 
             t->fds[fd].kind    = FD_TMPFS;
@@ -1117,8 +1142,12 @@ void syscall_dispatch(struct registers *r) {
             path[i] = 0;
 
             /* Walk uargv (NULL-terminated user pointer array), copy
-             * each string into a kmalloc'd buf. Cap at 16 args. */
-            #define EXEC_MAX_ARGS 16
+             * each string into a kmalloc'd buf. Cap at 128 args so
+             * shell glob expansions (e.g. `ls *.elf` against a /
+             * with 70+ binaries) survive without truncation. The
+             * bookkeeping cost is one kmalloc per arg, capped by
+             * the pointer-array stack size (128 * 4 = 512 bytes). */
+            #define EXEC_MAX_ARGS 128
             char *argv_kbufs[EXEC_MAX_ARGS] = {0};
             int   argc = 0;
             if (uargv) {

@@ -348,6 +348,16 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
+#define SYS_OPEN_A      102 /* (eax=102, ebx=name) -> tmpfs fd (preserves
+                             * existing content) or -1. Drives shell `>>`
+                             * append redirect. tmpfs_write always appends
+                             * to end-of-file, so opening without truncate
+                             * is enough to make `>>` work.
+                             *
+                             * Slots 100 / 101 belong to SYS_WM_POLL_ALTTAB
+                             * and SYS_RENAME (added on origin/main while
+                             * this branch was in flight). */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

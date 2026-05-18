@@ -873,6 +873,15 @@ int sys_open_w(const char *name) {
     return ret;
 }
 
+int sys_open_a(const char *name) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_OPEN_A), "b"(name)
+                      : "memory");
+    return ret;
+}
+
 int sys_kill(int pid, int sig) {
     int ret;
     __asm__ volatile ("int $0x80"
