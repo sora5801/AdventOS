@@ -284,6 +284,9 @@ DATA_FILES = [
     ('vararg.c',  'fs/vararg.c',  None),
     # Session 106 — struct-by-value demo.
     ('sbv.c',     'fs/sbv.c',     None),
+    # Session 121 — Path B Phase 4 capstone: SBV returns + static/extern
+    # + function-pointer typedef syntax, in one program.
+    ('capstone.c', 'fs/capstone.c', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

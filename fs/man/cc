@@ -67,8 +67,22 @@ IMPLEMENTED
     Functions      int NAME(int p1, int p2, ...) { body }
                    Params may be int, char, int*, char*, struct T *,
                    or struct T (by value) — sessions 92, 97, 106.
+                   Return types: int [*], char [*], typedef-name, or
+                   struct T (by value) — Session 121.
                    Forward references work — codegen patches
                    call sites after parsing.
+
+    Storage-class  static NAME ...    accepted no-op modifier      (Session 121)
+                                      (everything in cc is already
+                                       translation-unit-private; the
+                                       keyword exists so source files
+                                       written for real C still parse).
+                   extern RET NAME(ARGS);   function prototype     (Session 121)
+                                      Registers signature info up-front
+                                      so call sites see correct param
+                                      kinds and return-type info even
+                                      when the definition is later or
+                                      lives in another file.
 
     Struct-by-value call (session 106):
                    int f(struct point p) { return p.x + p.y; }
@@ -78,6 +92,22 @@ IMPLEMENTED
                    Callee receives a real copy; mutations don't leak
                    back to the caller. Mixed int + struct + int param
                    lists work with cumulative ebp offsets.
+
+    Struct-by-value return (Session 121):
+                   struct point make_point(int x, int y) {
+                       struct point p; p.x=x; p.y=y; return p;
+                   }
+                   struct point p; p = make_point(3, 4);
+                   ABI: caller pushes &dest as a hidden first arg
+                   (sits at [ebp+8] in the callee); real params start
+                   at [ebp+12]. `return STRUCT_LOCAL;` becomes
+                   rep movsd into the hidden destination. Allowed RHS
+                   shapes for SBV calls: assignment to a struct lvalue
+                   (`p = func(...);`) and tail-forward inside another
+                   SBV function (`return func(...);` reuses the
+                   caller's dest with no intermediate copy). The
+                   bare-expression form `func(...)` is not supported
+                   — no destination to write to.
 
     Function ptrs  int *fp;          a function pointer (stored as int*)
                                                        (session 98)
@@ -121,6 +151,17 @@ IMPLEMENTED
                                             a type alias usable in local,
                                             global, param, and return-type
                                             positions.
+
+                   typedef RET (*NAME)(ARGS);                       (Session 121)
+                                            Function-pointer typedef.
+                                            Internally aliases to LK_INT_PTR
+                                            (cc's existing function-ptr
+                                            representation), so you can
+                                            use NAME as a local-var or
+                                            param type and indirect-call
+                                            through it. The ARGS list is
+                                            consumed for syntax but not
+                                            typechecked.
 
     Preprocessor   #define NAME body        single-line object macros
                    #undef  NAME             remove a macro
@@ -200,17 +241,18 @@ DELIBERATELY NOT IMPLEMENTED
     - ++/-- on arr[i], *p, or expressions (NAME only)
     - assignment as an expression (a = b is a statement)
     - comma operator
-    - function prototypes (forward function declarations).
-      Cross-file calls work without them because cc resolves
-      `call rel32` via fixups regardless of declaration order.
-    - struct value RETURNING (use pointer-out args instead). Passing
-      by value works (session 106).
     - char-sized struct fields (every field is 4 bytes)
     - struct nesting (only struct *T is allowed as a field type)
     - sizeof on an expression (only sizeof(TYPE) is supported)
     - union
-    - declared function-pointer types `int (*fp)(int)` syntax
-      (function pointers exist; you just spell them `int *fp`)
+    - struct value RETURNS as a bare expression. SBV returns work
+      only when assigned to a struct lvalue or tail-forwarded from
+      another SBV function (Session 121).
+    - SBV returns sourcing from a global struct in the `return STRUCT;`
+      RHS — `lea [ebp+off]` only; not extended to globals.
+    - SBV calls inside other expressions like `f(g(...))` where
+      g returns a struct — only direct `lhs = g(...);` and
+      `return g(...);` are supported.
     - calling a function pointer directly off an expression
       (e.g. `arr[i](5)` — load into a local first, then call)
     - multi-file compilation (linker)
@@ -270,6 +312,10 @@ EXAMPLES
     Sample at /sbv.c demonstrates struct-by-value function args:
     magnitude_sq, reverse_p (verifying caller's copy unchanged),
     sum_triple (multi-field), between (int + struct + int mixed).
+    Sample at /capstone.c demonstrates the session-121 trio:
+    struct-by-value returns (`struct point make_point(int, int)`),
+    static/extern (`extern int squared(int);`, `static int s_add(...)`),
+    and function-pointer typedefs (`typedef int (*op_t)(int, int);`).
 
 EXIT STATUS
     0   compile succeeded
