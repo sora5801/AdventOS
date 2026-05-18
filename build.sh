@@ -249,7 +249,7 @@ GFX_PROGS=(gfx mouse wmd)
 # libuser. libwm wraps the SYS_WM_* protocol; libgfx is pulled in
 # because clients may want font/glyph helpers later (none used by
 # wmhello today, but the per-program ELF size is small).
-WMCLIENT_PROGS=(wmhello wmtype wmclock wmpaint wmpair wmfiles wmsysinfo wmps)
+WMCLIENT_PROGS=(wmhello wmtype wmclock wmpaint wmpair wmfiles wmsysinfo wmps wmterm)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.
