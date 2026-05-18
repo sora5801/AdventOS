@@ -93,9 +93,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **131 — Path B tcc port, Phase 1 foundation**. See [`docs/118-pathB-tcc-foundation.md`](docs/118-pathB-tcc-foundation.md) for the deep dive. Vendors TinyCC 0.9.28rc at `tcc/`, strips down to the i386 + ELF subset (~22 .c/.h files, ~1.8 MB), wires a host-only build into `build.sh` (step `[5f/7]`). `tcc.exe` is 685 KiB, identifies itself as `tcc version 0.9.28rc-adventos (i386 Linux)` and emits valid i386 ELF object files. Phase 2 (cross-compile to `tcc.elf` + add the ~30 libc functions tcc needs to libuser) is multi-session work; the audit + plan lives in [`tcc/README.AdventOS`](tcc/README.AdventOS).
+Current session: **132 — Path B tcc port, Phase 2 (running inside AdventOS)**. See [`docs/119-pathB-tcc-phase2.md`](docs/119-pathB-tcc-phase2.md) for the deep dive. Cross-compiles tcc with `USER_CFLAGS` and ships it as `/tcc.elf` (386 KiB) inside the OS image. Two-thirds of tcc's flow runs end-to-end: `tcc -v`, `tcc -h`, and `tcc -E` (preprocess) all work; `tcc -c` (full compile) wedges in the codegen→write path. The libc surface expanded with the FILE * / stdio family (fopen/fclose/fread/fwrite/fseek/fprintf/sprintf/snprintf/etc.) in `libc/file.c`, qsort/strtoll/strerror in `libc/stdlib.c+string.c`, and a buffered POSIX-fd layer + setjmp/longjmp/errno/environ in `user/libuser.c`. `LIBC_VERSION` bumps 1 → 2 with new exports at unused indices.
 
 Recent session deep dives:
+- [Session 132 — Path B tcc port, Phase 2 (running inside AdventOS)](docs/119-pathB-tcc-phase2.md)
 - [Session 131 — Path B tcc port, Phase 1 foundation](docs/118-pathB-tcc-foundation.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)

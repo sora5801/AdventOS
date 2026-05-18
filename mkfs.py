@@ -308,6 +308,8 @@ DATA_FILES = [
     # Session 125 — language-corners batch test (comma, do-while, goto,
     # switch, union, multi-dim arrays, sizeof NAME, static locals, etc.).
     ('corners.c', 'fs/corners.c', None),
+    # Session 132: minimal source for the in-AdventOS tcc smoke test.
+    ('thello.c',  'fs/thello.c',  None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
