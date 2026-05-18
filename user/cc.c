@@ -124,6 +124,7 @@ static void die_at(int line, const char *what, const char *detail) {
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
+    T_BREAK, T_CONTINUE,    /* session 125 */
     T_STRUCT,    /* session 97 */
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
@@ -280,7 +281,9 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
-    if (my_streq(s, "do"))     return T_DO;     /* session 125 */
+    if (my_streq(s, "do"))     return T_DO;       /* session 125 */
+    if (my_streq(s, "break"))  return T_BREAK;    /* session 125 */
+    if (my_streq(s, "continue"))return T_CONTINUE; /* session 125 */
     if (my_streq(s, "return")) return T_RETURN;
     if (my_streq(s, "for"))    return T_FOR;
     return T_NAME;
@@ -1035,6 +1038,8 @@ enum {
     /* Session 125 — language-corners batch. */
     N_COMMA,         /* a, b — evaluate a, return b */
     N_DO_WHILE,      /* do stmt while (cond);  — body in a, cond in b */
+    N_BREAK,         /* break;     — jump to end of enclosing loop/switch */
+    N_CONTINUE,      /* continue;  — jump to top/cond of enclosing loop */
 };
 
 struct node {
@@ -1556,6 +1561,18 @@ static struct node *parse_stmt(void) {
         expect(T_RPAREN, "')'");
         n->b = parse_stmt();
         return n;
+    }
+    /* Session 125 — break/continue statements. The codegen enforces
+     * "must be inside a loop"; parser just builds the node. */
+    if (t == T_BREAK) {
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return new_node(N_BREAK);
+    }
+    if (t == T_CONTINUE) {
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return new_node(N_CONTINUE);
     }
     /* Session 125 — `do stmt while (cond);`. Body in n->a, cond in n->b. */
     if (t == T_DO) {
@@ -3952,6 +3969,59 @@ static void gen_expr(struct node *n) {
     die_at(n->line, "unsupported expr kind", 0);
 }
 
+/* Session 125 — loop context stack for break/continue codegen.
+ *
+ * Each enclosing while/do-while/for/switch pushes a loop_ctx so
+ * break/continue inside the body can record patch-later jump
+ * placeholders. Break is always a forward jump (to after the loop);
+ * continue is a backward jump for while (to top) or a forward jump
+ * for do-while (to the cond eval at the bottom).
+ *
+ * Switch (added in feature 9/11) uses break too — N_SWITCH pushes
+ * a loop ctx with cont_target_known = 0 so continue can't be used
+ * inside a bare switch (matches C semantics). */
+#define MAX_LOOP_CTX        16
+#define MAX_BREAKS_PER_LOOP 32
+struct loop_ctx {
+    int  break_jmps[MAX_BREAKS_PER_LOOP];
+    int  n_break_jmps;
+    int  cont_jmps[MAX_BREAKS_PER_LOOP];
+    int  n_cont_jmps;
+    int  cont_target;            /* absolute code_off; -1 if not yet known */
+    int  is_switch;              /* 1 = switch, 0 = real loop. switch only handles break. */
+};
+static struct loop_ctx g_loop_ctx[MAX_LOOP_CTX];
+static int             g_n_loop_ctx;
+
+static struct loop_ctx *loop_push(int cont_target, int is_switch) {
+    if (g_n_loop_ctx >= MAX_LOOP_CTX) die("loop nesting too deep");
+    struct loop_ctx *c = &g_loop_ctx[g_n_loop_ctx++];
+    c->n_break_jmps  = 0;
+    c->n_cont_jmps   = 0;
+    c->cont_target   = cont_target;
+    c->is_switch     = is_switch;
+    return c;
+}
+
+static void loop_pop(void) {
+    if (g_n_loop_ctx <= 0) die("loop_pop with empty stack");
+    g_n_loop_ctx--;
+}
+
+static struct loop_ctx *loop_top(void) {
+    return g_n_loop_ctx > 0 ? &g_loop_ctx[g_n_loop_ctx - 1] : 0;
+}
+
+/* Find the nearest enclosing loop_ctx that accepts continue. switch
+ * frames are skipped (continue inside `switch (...) { while (...) ...
+ * continue; ... }` belongs to the while, not the switch). */
+static struct loop_ctx *loop_top_for_continue(void) {
+    for (int i = g_n_loop_ctx - 1; i >= 0; i--) {
+        if (!g_loop_ctx[i].is_switch) return &g_loop_ctx[i];
+    }
+    return 0;
+}
+
 static void gen_stmt(struct node *n) {
     if (!n) return;
     switch (n->kind) {
@@ -4427,10 +4497,21 @@ static void gen_stmt(struct node *n) {
             gen_expr(n->a);
             e_test_eax_eax();
             int jz = e_jz_rel32();
+            /* Session 125 — push loop ctx so break/continue inside the
+             * body find the right targets. Continue jumps back to
+             * `top` (cond eval). Break jumps forward to the end. */
+            struct loop_ctx *lc = loop_push(top, 0);
             gen_stmt(n->b);
+            /* Patch any continue jumps to the top (cond eval). */
+            for (int i = 0; i < lc->n_cont_jmps; i++)
+                patch_d(lc->cont_jmps[i], (unsigned)(top - (lc->cont_jmps[i] + 4)));
             int jback = e_jmp_rel32();
             patch_d(jback, (unsigned)(top - (jback + 4)));
             patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
+            /* Patch break jumps to the end of the loop. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i], (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
             return;
         }
         case N_DO_WHILE: {
@@ -4440,16 +4521,56 @@ static void gen_stmt(struct node *n) {
              *
              *   top:
              *     body
-             *     cond → eax
-             *     test eax, eax
-             *     jnz top
-             */
+             *     cond_eval:        <- continue lands here
+             *       cond → eax
+             *       test eax, eax
+             *       jnz top
+             *     end:              <- break lands here
+             *
+             * cont_target is initially -1; patched to cond_eval after
+             * body emit. */
             int top = g_code_len;
+            struct loop_ctx *lc = loop_push(-1, 0);
             gen_stmt(n->a);
+            int cond_pos = g_code_len;
+            /* Patch continue jumps to point at cond eval. */
+            for (int i = 0; i < lc->n_cont_jmps; i++)
+                patch_d(lc->cont_jmps[i], (unsigned)(cond_pos - (lc->cont_jmps[i] + 4)));
             gen_expr(n->b);
             e_test_eax_eax();
             int jnz = e_jnz_rel32();
             patch_d(jnz, (unsigned)(top - (jnz + 4)));
+            /* Patch break jumps to end. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i], (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
+            return;
+        }
+        case N_BREAK: {
+            /* Find nearest enclosing loop or switch. */
+            struct loop_ctx *lc = loop_top();
+            if (!lc) die_at(n->line, "break outside loop/switch", 0);
+            if (lc->n_break_jmps >= MAX_BREAKS_PER_LOOP)
+                die_at(n->line, "too many breaks in one loop", 0);
+            int jb = e_jmp_rel32();
+            lc->break_jmps[lc->n_break_jmps++] = jb;
+            return;
+        }
+        case N_CONTINUE: {
+            /* Find nearest enclosing real loop (skip switch frames). */
+            struct loop_ctx *lc = loop_top_for_continue();
+            if (!lc) die_at(n->line, "continue outside loop", 0);
+            if (lc->cont_target >= 0) {
+                /* Backward continue (while) — patch immediately. */
+                int jc = e_jmp_rel32();
+                patch_d(jc, (unsigned)(lc->cont_target - (jc + 4)));
+            } else {
+                /* Forward continue (do-while) — record for patch later. */
+                if (lc->n_cont_jmps >= MAX_BREAKS_PER_LOOP)
+                    die_at(n->line, "too many continues in one loop", 0);
+                int jc = e_jmp_rel32();
+                lc->cont_jmps[lc->n_cont_jmps++] = jc;
+            }
             return;
         }
         case N_EXPR_STMT:

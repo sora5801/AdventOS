@@ -48,6 +48,7 @@ EXPECTED = [
     "b_shl_eq         = 16",
     "b_shr_eq         = 2",
     "do_while_sum     = 15",
+    "break_continue   = 19",
 ]
 
 

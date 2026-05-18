@@ -55,5 +55,19 @@ int main() {
     } while (i <= 5);
     printf("do_while_sum     = %d\n", sum);      /* 1+2+3+4+5 = 15 */
 
+    /* 4. break + continue. Sum 1..10 but skip multiples of 3 (continue)
+     *    and stop at 8 (break). 1+2+4+5+7 = 19. */
+    int bsum;
+    bsum = 0;
+    int j;
+    j = 0;
+    while (j < 10) {
+        j += 1;
+        if (j == 8) break;
+        if (j % 3 == 0) continue;
+        bsum += j;
+    }
+    printf("break_continue   = %d\n", bsum);     /* 1+2+4+5+7 = 19 */
+
     return 0;
 }
