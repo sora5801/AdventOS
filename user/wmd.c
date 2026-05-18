@@ -281,16 +281,19 @@ static int hit_test(int px, int py) {
 /* Session 118 — taskbar.  Iterate the CLIENT windows in
  * registration order (i.e. the order they appear in g_windows[]),
  * give each one a fixed-width button.  Session 119 — the first
- * START_BTN_W pixels are reserved for the Start button. */
+ * START_BTN_W pixels are reserved for the Start button.  Session
+ * 121 — the last 132 px are reserved for the system clock; stop
+ * iterating before we collide with it. */
 static int taskbar_hit(int fb_w, int fb_h, int px, int py) {
     if (py < fb_h - TASKBAR_H || py >= fb_h) return -1;
     int x = START_BTN_W + TASKBAR_BTN_PAD;
+    int right_limit = fb_w - 132 - TASKBAR_BTN_PAD;
     for (int i = 0; i < g_window_count; i++) {
         if (g_windows[i].kind != KIND_CLIENT) continue;
+        if (x + TASKBAR_BTN_W > right_limit) break;
         int x2 = x + TASKBAR_BTN_W;
         if (px >= x && px < x2) return i;
         x = x2 + TASKBAR_BTN_PAD;
-        if (x > fb_w - TASKBAR_BTN_W) break;
     }
     return -1;
 }
@@ -332,13 +335,41 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     gfx_text(ctx, 4 + 6, sby + 5, "Start",
              GFX_WHITE, GFX_TRANSPARENT);
 
-    /* Per-window button.  Starts after the Start button. */
+    /* Session 121 — clock on the right side of the taskbar.
+     * 2x font for HH:MM (10 chars × 16 px = 160 px wide).  We
+     * reserve 132 px on the right so the leftmost char starts at
+     * x = fb_w - 132 + 4.  Per-window buttons stop short of this
+     * reservation. */
+    int clock_w = 132;
+    int clock_x = fb_w - clock_w;
+    {
+        unsigned int ts = sys_time();
+        unsigned int min = (ts / 60u) % 60u;
+        unsigned int hr  = (ts / 3600u) % 24u;
+        char buf[6];
+        buf[0] = '0' + (char)((hr / 10) % 10);
+        buf[1] = '0' + (char)(hr % 10);
+        buf[2] = ':';
+        buf[3] = '0' + (char)(min / 10);
+        buf[4] = '0' + (char)(min % 10);
+        buf[5] = 0;
+        /* Centre vertically: bar is TASKBAR_H tall (28), 2x font is
+         * 16 px → top offset = (28 - 16) / 2 = 6. */
+        gfx_text_n(ctx, clock_x + 4, y + 6, buf, 2,
+                   GFX_WHITE, GFX_TRANSPARENT);
+    }
+
+    /* Per-window button.  Starts after the Start button.  Stops
+     * before the clock reservation so labels never collide with
+     * digits. */
     int bx = START_BTN_W + TASKBAR_BTN_PAD;
     int by = y + 4;
     int bh = TASKBAR_H - 8;
+    int btn_right_limit = clock_x - TASKBAR_BTN_PAD;
     for (int i = 0; i < g_window_count; i++) {
         struct window *w = &g_windows[i];
         if (w->kind != KIND_CLIENT) continue;
+        if (bx + TASKBAR_BTN_W > btn_right_limit) break;
         int is_focused = (i == focused_idx);
         unsigned int fill = is_focused ? w->frame_color : 0x303848u;
         gfx_fill_rect(ctx, bx, by, TASKBAR_BTN_W, bh, fill);
@@ -348,7 +379,6 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
         gfx_text(ctx, bx + 6, by + 5, w->title,
                  GFX_WHITE, GFX_TRANSPARENT);
         bx += TASKBAR_BTN_W + TASKBAR_BTN_PAD;
-        if (bx > fb_w - TASKBAR_BTN_W) break;
     }
 }
 

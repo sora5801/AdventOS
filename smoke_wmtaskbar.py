@@ -131,11 +131,12 @@ def main():
         qbuf = b""
 
         # FB is 1024x768.  Taskbar at y = 768 - 28 .. 768 → 740..767.
-        # Strip background at y = 750 (middle).
-        # First client button: x = TASKBAR_BTN_PAD = 4, width 140.
-        # Button at x = 4..143, y = 744..763 (top 4 + height 20).
-        # Button center: (74, 753).
-        button_cx, button_cy = 74, 753
+        # First client button: x = 64+4 = 68, width 140, y=744..763.
+        # Sample point: x = 138 (right side of button, past the
+        # 7-char title "wmhello" + a few chars of spacing — well
+        # clear of any rendered glyph), y = 753 (vertical centre of
+        # button).
+        button_cx, button_cy = 138, 753
 
         # Before-click screendump: button should be DARK SLATE.
         print("[+] before-click screendump")
@@ -144,15 +145,13 @@ def main():
         print(f"    {SHOT_BEFORE}")
 
         # Move cursor onto the taskbar button.  Start at (512, 384).
-        # Target ≈ (74, 753).  Delta (-438, +369).  Each rel event is
-        # scaled inside QEMU; use 30 events of (-15, +13) → delta
-        # (-450, +390) → (62, 774).  Actually that's too far down.
-        # Try 25 events of (-18, +15) → (-450, +375) → (62, 759).
+        # Target ≈ button center (138, 753).  Delta (-374, +369).
+        # 21 events of (-18, +18) → (-378, +378) → (134, 762).
         print("[+] moving cursor to taskbar button")
-        for i in range(25):
+        for i in range(21):
             qmp_cmd(q, qbuf, "input-send-event", {"events": [
                 {"type": "rel", "data": {"axis": "x", "value": -18}},
-                {"type": "rel", "data": {"axis": "y", "value": 15}},
+                {"type": "rel", "data": {"axis": "y", "value": 18}},
             ]})
             qbuf = b""
             time.sleep(0.05)
