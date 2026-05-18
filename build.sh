@@ -178,6 +178,31 @@ mkdir -p libwm/_obj
 LIBWM_OBJS=(libwm/_obj/libwm.o)
 echo "        libwm.o = $(stat -c%s libwm/_obj/libwm.o) bytes"
 
+# Session 131 (Path B Phase 1 of the tcc port): build a HOST copy of
+# tcc.  This is a Phase 1 stepping-stone — Phase 2 cross-compiles tcc
+# with USER_CFLAGS for tcc.elf running INSIDE AdventOS, and that's
+# a multi-session libuser-expansion project. The host build verifies
+# the source we vendored is internally consistent and useful as a
+# reference. See tcc/README.AdventOS for the integration plan.
+#
+# Skipped silently if tcc/ isn't present (don't break the build for
+# folks who don't want the extra 1.8MB source tree).
+if [ -d tcc ] && [ -f tcc/tcc.c ]; then
+    echo "[5f/7] build host tcc (Phase 1 — i386 ELF cross-compiler)"
+    # Generate tccdefs_.h from include/tccdefs.h via the c2str helper.
+    # Only re-run when the input changes.
+    if [ ! -f tcc/tccdefs_.h ] || [ tcc/include/tccdefs.h -nt tcc/tccdefs_.h ]; then
+        "$CC" -DC2STR tcc/conftest.c -o tcc/c2str.exe
+        tcc/c2str.exe tcc/include/tccdefs.h tcc/tccdefs_.h >/dev/null
+    fi
+    # One-source build: tcc.c #includes libtcc.c which transitively
+    # includes every other source. ONE_SOURCE + TCC_TARGET_I386 are
+    # the only -D flags strictly required.
+    "$CC" -DONE_SOURCE -DTCC_TARGET_I386 -w -O2 \
+        -Itcc -o tcc/tcc.exe tcc/tcc.c
+    echo "        tcc.exe = $(stat -c%s tcc/tcc.exe) bytes (i386 cross-compiler)"
+fi
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c

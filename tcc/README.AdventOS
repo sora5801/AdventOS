@@ -1,0 +1,124 @@
+tcc port for AdventOS — Phase 1 foundation
+============================================
+
+This directory is a vendored copy of TinyCC (mob branch, version
+0.9.28rc) from https://repo.or.cz/tinycc.git, stripped down to the
+i386 + ELF subset we need.
+
+Files removed from upstream (Phase 1 trim):
+  arm-*.c / arm-*.h            — ARM backend
+  arm64-*.c / arm64-*.h        — ARM64 backend
+  c67-*.c / c67-*.h            — TI C67 DSP backend
+  riscv64-*.c / riscv64-*.h    — RISC-V backend
+  x86_64-*.c / x86_64-*.h      — x86_64 backend
+  il-gen.c, il-opcodes.h       — .NET IL backend
+  coff.h                       — COFF format
+  tcccoff.c                    — TI C67 COFF output
+  tccpe.c                      — Windows PE/COFF output
+  tccmacho.c                   — Apple Mach-O output
+  win32/                       — Windows port
+  tests/                       — 1.2 MB test corpus (out of scope)
+  tcc-doc.texi, config.texi    — texinfo docs (need makeinfo)
+
+What remains (~22 .c/.h files, ~1.8 MB):
+  Core:
+    tcc.c, tcc.h, libtcc.c, libtcc.h, tcclib.h
+    tccpp.c    — preprocessor
+    tccgen.c   — code generation (the big one, 275K)
+    tccelf.c   — ELF output (141K)
+    tccasm.c   — inline assembly
+    tccdbg.c   — debug info (DWARF/stabs)
+    tccrun.c   — `-run` mode (jit + relocate-and-jump)
+    tcctools.c — `ar`, `strip` subcommands
+    conftest.c — host autoconf probe
+  i386 backend:
+    i386-gen.c, i386-link.c, i386-asm.c
+    i386-asm.h, i386-tok.h
+  Shared headers:
+    elf.h, dwarf.h, stab.h, tcctok.h
+  Subtrees:
+    include/ — tcc-shipped C headers (stddef.h, stdarg.h, tccdefs.h)
+    lib/     — libtcc1 runtime helpers (64-bit shifts, soft-float, etc.)
+    examples/
+
+Status: Phase 1 — vendored + host-buildable. Not running in AdventOS
+yet.
+
+==============================================================
+Phase 2 work plan (next session) — get tcc.elf running inside AdventOS
+==============================================================
+
+Goal: `cc /hello.c -o /hello.elf` inside AdventOS works with tcc.
+
+Steps:
+
+1. Cross-compile tcc with the AdventOS user toolchain
+   (gcc -m32 -ffreestanding -nostdlib -nostartfiles ...).
+
+2. Provide the libc surface tcc needs. Audited from upstream:
+
+    From <stdio.h>:
+       fopen, fclose, fread, fwrite, fputs, fputc, fseek, ftell,
+       fprintf, sprintf, snprintf, ferror, feof, remove
+    From <stdlib.h>:
+       malloc, calloc, realloc, free, exit, abort, atoi, strtol,
+       strtoll, getenv, qsort, system
+    From <string.h>:
+       strlen, strcpy, strncpy, strcat, strncat, strcmp, strncmp,
+       strchr, strrchr, strstr, memcpy, memmove, memset, memcmp,
+       strdup, strerror
+    From <ctype.h>:
+       isdigit, isalnum, isalpha, isspace, isupper, islower, isxdigit,
+       tolower, toupper
+    From <errno.h>:
+       errno (TLS-ish global; just a global int for cc)
+    From <setjmp.h>:
+       setjmp, longjmp  (used by -run mode error recovery; can stub)
+    From <unistd.h>:
+       getcwd, unlink, access, sysconf
+    From <fcntl.h>:
+       O_RDONLY etc. macros (just defines)
+    From <sys/stat.h>:
+       struct stat, stat (used to check file existence)
+    From <time.h>:
+       time(NULL) for the predefined __DATE__ / __TIME__ macros
+
+   libuser already provides: malloc, free, memcpy, memset, strlen,
+   strcmp, atoi, printf, exit (via sys_exit). The rest need
+   implementation — see [`docs/116-pathB-tcc-foundation.md`] for the
+   per-function size estimate (most are ~20-line wrappers around
+   existing syscalls).
+
+3. Patch tcc's ELF output stage (tccelf.c) so emitted binaries match
+   AdventOS's format:
+   - entry VA = 0x40000000 (not 0x08048000 / Linux default)
+   - single PT_LOAD segment, no PT_DYNAMIC / PT_INTERP
+   - no dynamic symbol table, no GOT/PLT
+   The kernel's elf.c loader only honours PT_LOAD and maps it RWX;
+   anything else is ignored. tcc's --static + -Wl,-Ttext=0x40000000
+   gets close but still emits dynamic-link plumbing.
+
+4. Ensure tcc-emitted binaries pick up start.o (provides _start that
+   calls main). Either link start.o by default in tcc's driver, or
+   inject the _start prologue into tcc's libtcc1 runtime.
+
+5. Provide tcc's runtime helpers (libtcc1) as a static archive that
+   AdventOS-compiled programs can link against.  tcc emits calls to
+   __divdi3, __moddi3, etc. for 64-bit arithmetic on i386.
+
+6. Smoke test: run tcc.elf inside AdventOS on a small program,
+   verify the output is a runnable cap.elf-style binary.
+
+7. Doc + ship.
+
+==============================================================
+Why not just keep cc?
+==============================================================
+
+cc (AdventOS's from-scratch compiler) handles ~80% of real C in
+~6000 lines. tcc adds: float/double, long long, full type system,
+function-like macros, _Generic, designated initializers, VLAs,
+inline assembly, and proper standards conformance. The tradeoff is
+~50× more compiler code in the tree and a hard libc dependency.
+Both compilers can coexist; cc stays as the always-works,
+no-external-deps backstop.
