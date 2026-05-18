@@ -41,19 +41,24 @@ SECTIONS
 
     /* Bytes of the ring-3 programs we ship with the kernel. Each gets
      * its own short-named section so the kernel can find and copy them
-     * out independently. Section names kept <= 8 chars (PE/COFF). */
+     * out independently. Section names kept <= 8 chars (PE/COFF).
+     *
+     * KEEP() wraps the wildcards so --gc-sections (session 112) doesn't
+     * drop them — they're referenced only via linker-defined symbols
+     * (_up1_start etc.), which don't count as section references in
+     * the PE/COFF GC graph. */
     . = ALIGN(0x1000);
     .up1 : SUBALIGN(4)
     {
         _up1_start = .;
-        *(.up1*)
+        KEEP(*(.up1*))
         _up1_end = .;
     }
     . = ALIGN(0x1000);
     .up2 : SUBALIGN(4)
     {
         _up2_start = .;
-        *(.up2*)
+        KEEP(*(.up2*))
         _up2_end = .;
     }
 

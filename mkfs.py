@@ -34,9 +34,9 @@ EHDR_SIZE         = 52
 PHDR_SIZE         = 32
 
 FS_NAME_MAX       = 16
-FS_MAX_FILES      = 128         # session 73; must match kernel/fs.h
+FS_MAX_FILES      = 160         # session 112; must match kernel/fs.h
 FS_ENTRY_SIZE     = 32          # name(16) + start(4) + size(4) + type(1) + parent(1) + 6 reserved
-FS_SUPER_SECTORS  = 9           # 1 header + 8 entry sectors (128 * 32 = 4096B); must match kernel/fs.h
+FS_SUPER_SECTORS  = 11          # 1 header + 10 entry sectors (160 * 32 = 5120B); must match kernel/fs.h
 
 FS_TYPE_FREE      = 0
 FS_TYPE_FILE      = 1
@@ -103,6 +103,8 @@ USER_PROGRAMS = [
     ('mouse.elf', 'user/_obj/mouse.bin', None),
     # Session 111: path-C phase 5 — window manager daemon (compositor).
     ('wmd.elf',   'user/_obj/wmd.bin',   None),
+    # Session 112: path-C phase 6 — sample WM client.
+    ('wmhello.elf', 'user/_obj/wmhello.bin', None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -244,6 +246,7 @@ DATA_FILES = [
     ('gfx',   'fs/man/gfx',   'man'),     # session 107
     ('mouse', 'fs/man/mouse', 'man'),     # session 109
     ('wmd',   'fs/man/wmd',   'man'),     # session 111
+    ('wmhello', 'fs/man/wmhello', 'man'), # session 112
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were

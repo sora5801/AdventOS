@@ -294,6 +294,21 @@ struct sys_limits {
                                 * the mouse driver isn't ready.
                                 * Session 109. */
 
+/* Session 112 — WM client protocol. The window manager daemon (wmd)
+ * calls SYS_WM_BIND once to register as the compositor.  Clients
+ * call SYS_WM_CREATE to allocate a shared-memory pixel surface;
+ * those pages get mapped into BOTH the client and wmd at distinct
+ * VAs, so the client paints and wmd reads zero-copy.  Wmd polls
+ * SYS_WM_POLL each frame to drain "new window" and "destroyed
+ * window" events. */
+#define SYS_WM_BIND       90   /* (eax=90) -> 0 / -1 already-bound.   */
+#define SYS_WM_CREATE     91   /* (eax=91, ebx=struct sys_wm_create*) */
+#define SYS_WM_POLL       92   /* (eax=92, ebx=struct sys_wm_msg*)
+                                * -> 1 if msg was returned, 0 if no
+                                *    pending event, -1 if caller isn't
+                                *    the bound WM. */
+#define SYS_WM_DESTROY    93   /* (eax=93, ebx=window_id) -> 0/-1     */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */
@@ -307,6 +322,43 @@ struct sys_mouse_state {
     int32_t   x;             /* absolute X within FB, clamped */
     int32_t   y;             /* absolute Y within FB, clamped */
     uint32_t  buttons;       /* bit 0 = left, bit 1 = right, bit 2 = middle */
+};
+
+/* Session 112 — WM client ABI.
+ *
+ *   SYS_WM_CREATE: caller writes (title, w, h) before the call; the
+ *     kernel fills in `id` and `pixels_va`. The pixel surface is
+ *     w*h*4 bytes of packed 0x00RRGGBB pixels (pitch = w*4). The
+ *     kernel allocates pages out of pmm and maps them into the
+ *     caller at `pixels_va`; the same physical pages are mapped
+ *     into wmd's address space and delivered to wmd via the next
+ *     SYS_WM_POLL.
+ *
+ *   SYS_WM_POLL: wmd-only. Drains one queued message.
+ *     msg.op == 1 : new window. Fields are valid: id, owner_pid, w,
+ *                   h, wmd_va (where wmd should read pixels), title.
+ *     msg.op == 2 : destroyed. Only id and owner_pid are valid; wmd
+ *                   should drop the window from its list.
+ *
+ *   SYS_WM_DESTROY: caller passes the window_id it owns. Pages are
+ *     unmapped from both PDs and freed; a destroy message is queued
+ *     for wmd. */
+struct sys_wm_create {
+    char        title[32];   /* in:  ASCII, NUL-terminated or truncated */
+    uint32_t    w;           /* in:  surface width in pixels  */
+    uint32_t    h;           /* in:  surface height in pixels */
+    uint32_t    id;          /* out: window id (>= 1)         */
+    uint32_t    pixels_va;   /* out: client-side surface VA   */
+};
+
+struct sys_wm_msg {
+    uint32_t    op;          /* 1 = open, 2 = destroy */
+    uint32_t    id;
+    uint32_t    owner_pid;
+    uint32_t    w;
+    uint32_t    h;
+    uint32_t    wmd_va;      /* read surface here (op=1 only)  */
+    char        title[32];
 };
 
 

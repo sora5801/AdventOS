@@ -57,10 +57,16 @@
  * Session 100 considered bumping to 160 for the multi-file cc demo
  * but the +2 KiB of super-block buffer pushed kernel .bss past the
  * 0xA0000 VGA RAM boundary. Kept at 128; trimmed older demo source
- * files from mkfs.py instead. */
-#define FS_SUPER_SECTORS        9u
+ * files from mkfs.py instead.
+ *
+ * Session 112 — bumped to 160 because path-C added wmd, wmhello,
+ * gfx + mouse demos + man pages. After --gc-sections shaved ~21 KiB
+ * off kernel.bin, the extra 1 KiB of super-block buffer fits with
+ * room to spare. FS_SUPER_SECTORS bumped 9 -> 11 to cover the
+ * 5120-byte entry table. Old fs.img files are incompatible. */
+#define FS_SUPER_SECTORS        11u
 #define FS_NAME_MAX             16
-#define FS_MAX_FILES            128
+#define FS_MAX_FILES            160
 #define FS_ENTRY_SIZE           32
 #define FS_MAGIC                "ADVENTFS"
 

@@ -25,6 +25,7 @@
 #include "smp.h"
 #include "vbe.h"
 #include "fbcon.h"
+#include "wm.h"
 #include "ac97.h"
 #include "bkl.h"
 #include "blkdev.h"
@@ -860,6 +861,23 @@ void syscall_dispatch(struct registers *r) {
             }
             break;
         }
+        /* Session 112 — WM client protocol. See kernel/wm.c for
+         * the per-syscall semantics; the dispatcher is just a thin
+         * passthrough. */
+        case SYS_WM_BIND:
+            ret = wm_bind(task_current());
+            break;
+        case SYS_WM_CREATE:
+            ret = a ? wm_create_window(task_current(),
+                       (struct sys_wm_create *)(uintptr_t)a) : -1;
+            break;
+        case SYS_WM_POLL:
+            ret = a ? wm_pop_message(task_current(),
+                       (struct sys_wm_msg *)(uintptr_t)a) : -1;
+            break;
+        case SYS_WM_DESTROY:
+            ret = wm_destroy_window(task_current(), (uint32_t)a);
+            break;
         case SYS_PTRACE: {
             /* Multiplexed ptrace dispatch (session 57). See the op
              * comments in syscall.h for what each one does; the heavy

@@ -431,6 +431,40 @@ int sys_mouse_poll(struct sys_mouse_state *out) {
     return ret;
 }
 
+/* Session 112 — Path C WM client protocol. */
+int sys_wm_bind(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_BIND)
+                      : "memory");
+    return ret;
+}
+int sys_wm_create(struct sys_wm_create *args) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_CREATE), "b"(args)
+                      : "memory");
+    return ret;
+}
+int sys_wm_poll(struct sys_wm_msg *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL), "b"(out)
+                      : "memory");
+    return ret;
+}
+int sys_wm_destroy(unsigned int window_id) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_DESTROY), "b"(window_id)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

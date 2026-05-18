@@ -1,0 +1,26 @@
+NAME
+    wmhello - sample WM client (Path C phase 6)
+
+SYNOPSIS
+    wmhello [SECONDS]
+
+DESCRIPTION
+    Demonstrates the smallest possible client of the session-112
+    WM protocol. Opens a 220x140 window via SYS_WM_CREATE, paints
+    a moving colored square + animated background, presents the
+    surface to wmd each frame, and exits after SECONDS (default 10).
+
+    The compositor must be running first. Typical usage:
+
+       (start `wmd 30` in one shell)
+       wmhello 8           # opens, animates, closes
+
+    The window appears with a cyan title bar containing the title
+    "wmhello"; wmd places it at a deterministic per-client offset.
+
+EXIT STATUS
+    0  on normal exit (timer elapsed, window closed)
+    1  if SYS_WM_CREATE fails — usually means no wmd is running
+
+SEE ALSO
+    wmd(1), gfx(1), mouse(1)

@@ -1,38 +1,45 @@
 /*
- * wmd.c — session 111 / Path C phase 5 window manager daemon.
+ * wmd.c — sessions 111 + 112 window manager daemon.
  *
  *   wmd [seconds]      grab the framebuffer, composite a handful
- *                      of internal demo windows, drive a mouse
- *                      cursor on top.  Run for SECONDS, default 30.
+ *                      of internal demo windows AND any client
+ *                      surfaces registered via SYS_WM_CREATE.
+ *                      Run for SECONDS, default 30.
  *
- * No client protocol yet — that lands in session 112. This daemon
- * paints a fixed set of windows out of its own pixel buffers so we
- * can demonstrate compositing + window decorations + mouse-driven
- * z-order changes + click-and-drag on title bars, all without yet
- * needing IPC for client surface sharing.
+ * Session 111 introduced compositing of in-process "demo" windows
+ * (clock / gradient / text / bars).  Session 112 adds the WM client
+ * protocol: external programs allocate shared pixel surfaces via
+ * sys_wm_create; wmd polls sys_wm_poll each tick to discover new
+ * surfaces and blit them into the compositor's frame.
  *
  * Each tick:
- *   1. poll mouse, handle press/release/drag
- *   2. clear backbuffer (root window background)
- *   3. for each window bottom-to-top: paint decoration + content
- *   4. paint cursor on top
- *   5. gfx_present
+ *   1. drain sys_wm_poll → add / remove client-backed windows
+ *   2. poll mouse, handle press/release/drag
+ *   3. clear backbuffer (root window background)
+ *   4. for each window bottom-to-top: paint decoration + content
+ *      (content for kind=CLIENT is a per-pixel blit from the shared
+ *      32-bpp surface)
+ *   5. paint cursor on top
+ *   6. gfx_present
  *
  * Compositing model is back-to-front blit; no per-window damage
  * tracking yet (every tick = full repaint of every window). Cheap
  * because the windows are small and the backbuffer is RAM.
- *
- * Path C status after this: we now have multiple "windows" on the
- * same screen at the same time. Next: real client surfaces (112).
  */
 
 #include "libuser.h"
 #include "../libgfx/libgfx.h"
 
 #define FB_VA      0x50000000u
-#define MAX_WINDOWS 6
+#define MAX_WINDOWS 8
 #define TITLE_H    18
 #define CURSOR_R   8
+
+#define KIND_CLOCK   0
+#define KIND_GRADIENT 1
+#define KIND_TEXT    2
+#define KIND_BARS    3
+#define KIND_CLIENT  4
 
 struct window {
     int  x, y;          /* top-left of decoration */
@@ -40,8 +47,15 @@ struct window {
     char title[28];
     unsigned int frame_color;
     unsigned int content_color;
-    int  kind;          /* 0=clock, 1=gradient, 2=text, 3=color-bars */
+    int  kind;
     int  raised;        /* z-order: higher = on top */
+
+    /* For KIND_CLIENT only: pointer to the shared 32-bpp surface
+     * mapped by the kernel into our PD at wm_create_window time.
+     * Pitch is `surface_w * 4` (packed). */
+    unsigned int  client_id;
+    unsigned int *client_pixels;
+    unsigned int  surface_w, surface_h;
 };
 
 static struct window g_windows[MAX_WINDOWS];
@@ -141,6 +155,29 @@ static void paint_bars(struct gfx_ctx *ctx, struct window *w) {
     }
 }
 
+/* Session 112 — paint a client-backed window's interior by per-pixel
+ * blitting the shared 32-bpp surface into the backbuffer. The
+ * surface dimensions are surface_w x surface_h; if they don't match
+ * the window's content area (w-2, h-TITLE_H-2), the difference is
+ * left as the content-color background fill that paint_window
+ * already wrote. */
+static void paint_client(struct gfx_ctx *ctx, struct window *w) {
+    if (!w->client_pixels) return;
+    int dest_x = w->x + 1;
+    int dest_y = w->y + TITLE_H;
+    int max_w = w->w - 2;
+    int max_h = w->h - TITLE_H - 1;
+    int blit_w = (int)w->surface_w < max_w ? (int)w->surface_w : max_w;
+    int blit_h = (int)w->surface_h < max_h ? (int)w->surface_h : max_h;
+    for (int yy = 0; yy < blit_h; yy++) {
+        const unsigned int *row = w->client_pixels
+                                + (unsigned int)yy * w->surface_w;
+        for (int xx = 0; xx < blit_w; xx++) {
+            gfx_put_pixel(ctx, dest_x + xx, dest_y + yy, row[xx]);
+        }
+    }
+}
+
 /* Paint a single window's frame + title bar + content. */
 static void paint_window(struct gfx_ctx *ctx, struct window *w,
                          int has_focus, unsigned int t_sec,
@@ -166,10 +203,11 @@ static void paint_window(struct gfx_ctx *ctx, struct window *w,
     gfx_fill_rect(ctx, w->x + 1, w->y + TITLE_H,
                   w->w - 2, w->h - TITLE_H - 1, w->content_color);
     switch (w->kind) {
-        case 0: paint_clock(ctx, w, t_sec, frame_no); break;
-        case 1: paint_gradient(ctx, w); break;
-        case 2: paint_text(ctx, w); break;
-        case 3: paint_bars(ctx, w); break;
+        case KIND_CLOCK:    paint_clock(ctx, w, t_sec, frame_no); break;
+        case KIND_GRADIENT: paint_gradient(ctx, w); break;
+        case KIND_TEXT:     paint_text(ctx, w); break;
+        case KIND_BARS:     paint_bars(ctx, w); break;
+        case KIND_CLIENT:   paint_client(ctx, w); break;
         default: break;
     }
 }
@@ -243,6 +281,69 @@ static void init_demo_windows(unsigned int fb_w, unsigned int fb_h) {
     g_windows[3].kind = 3;
     g_windows[3].raised = 4;
     {const char *t = "Color bars"; int i=0; while(t[i] && i<27){g_windows[3].title[i]=t[i];i++;} g_windows[3].title[i]=0;}
+
+    /* Subsequent click-to-raise / WM-CREATE bumps need to go ABOVE
+     * the four demo windows, so bring g_z_counter up to the highest
+     * raised value we just assigned. */
+    g_z_counter = 4;
+}
+
+/* Session 112 — find a g_windows[] entry by its client id (assigned
+ * by the kernel and returned in sys_wm_msg).  Returns NULL if no
+ * such slot. */
+static struct window *find_window_by_client_id(unsigned int id) {
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].kind == KIND_CLIENT &&
+            g_windows[i].client_id == id) return &g_windows[i];
+    }
+    return 0;
+}
+
+/* Drain any pending WM messages; returns the number processed.
+ * Called once per tick. */
+static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
+    int n = 0;
+    for (;;) {
+        struct sys_wm_msg m;
+        int r = sys_wm_poll(&m);
+        if (r <= 0) break;
+        n++;
+        if (m.op == 1) {
+            /* Open. Place the new window at a deterministic offset
+             * so multiple test clients don't all overlap. */
+            if (g_window_count >= MAX_WINDOWS) continue;
+            struct window *w = &g_windows[g_window_count++];
+            int total_w = (int)m.w + 4;          /* +2px border each side */
+            int total_h = (int)m.h + TITLE_H + 2;
+            int slot = g_window_count - 1;
+            w->x = 100 + slot * 60;
+            w->y = 200 + slot * 40;
+            if (w->x + total_w > (int)fb_w - 8) w->x = (int)fb_w - 8 - total_w;
+            if (w->y + total_h > (int)fb_h - 8) w->y = (int)fb_h - 8 - total_h;
+            w->w = total_w;
+            w->h = total_h;
+            for (int i = 0; i < 27 && m.title[i]; i++) w->title[i] = m.title[i];
+            w->title[27] = 0;
+            w->frame_color   = GFX_CYAN;
+            w->content_color = GFX_BLACK;
+            w->kind          = KIND_CLIENT;
+            g_z_counter++;
+            w->raised = g_z_counter;
+            w->client_id     = m.id;
+            w->client_pixels = (unsigned int *)(uintptr_t)m.wmd_va;
+            w->surface_w     = m.w;
+            w->surface_h     = m.h;
+        } else if (m.op == 2) {
+            /* Destroy. Compact the array. */
+            struct window *w = find_window_by_client_id(m.id);
+            if (!w) continue;
+            int idx = (int)(w - g_windows);
+            for (int i = idx; i < g_window_count - 1; i++)
+                g_windows[i] = g_windows[i + 1];
+            g_window_count--;
+        }
+    }
+    return n;
 }
 
 int main(int argc, char **argv) {
@@ -256,6 +357,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Session 112 — claim the WM role so client SYS_WM_CREATE calls
+     * find a compositor.  If another wmd is already running, exit
+     * gracefully (the FB grab above would have already failed in
+     * that case but be explicit). */
+    if (sys_wm_bind() < 0) {
+        printf("wmd: another window manager is already bound\n");
+        gfx_release(&ctx);
+        return 1;
+    }
+
     init_demo_windows(ctx.width, ctx.height);
 
     unsigned int t0 = sys_time();
@@ -264,6 +375,10 @@ int main(int argc, char **argv) {
     g_prev_left = 0;
 
     for (int tick = 0; tick < total_ticks; tick++) {
+        /* Session 112 — drain WM client events first so newly-
+         * registered windows appear on this frame. */
+        drain_wm_messages(ctx.width, ctx.height);
+
         struct sys_mouse_state ms;
         if (sys_mouse_poll(&ms) < 0) break;
         unsigned int t_now = sys_time();

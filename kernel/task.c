@@ -1056,6 +1056,13 @@ void task_exit_current(int exit_code) {
         fbcon_set_enabled(1);
     }
 
+    /* Session 112 — Path C. Drop any WM bindings and client window
+     * registrations owned by this task. Order matters: must run
+     * BEFORE paging_destroy_user_pd (which would otherwise free
+     * pages that wmd still maps, or vice versa). */
+    extern void wm_on_task_exit(struct task *);
+    wm_on_task_exit(t);
+
     /* Close everything we still have open. Critical for pipes:
      * without this, a child that exits without explicitly close()'ing
      * its pipe-write end would leave write_refs > 0 forever and the

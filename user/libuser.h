@@ -123,6 +123,13 @@ typedef unsigned int   size_t;
 #define SYS_FB_UNMAP       88    /* session 107: release FB ownership */
 #define SYS_MOUSE_POLL     89    /* session 109: read mouse state */
 
+/* Session 112 — WM client protocol. See struct sys_wm_create /
+ * struct sys_wm_msg below for the payloads. */
+#define SYS_WM_BIND        90
+#define SYS_WM_CREATE      91
+#define SYS_WM_POLL        92
+#define SYS_WM_DESTROY     93
+
 /* Session 70: syscall sandbox.
  *
  * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
@@ -446,6 +453,45 @@ struct sys_mouse_state {
     unsigned int buttons;
 };
 int      sys_mouse_poll  (struct sys_mouse_state *out);
+
+/* Session 112 — WM client protocol surface.
+ *
+ *   sys_wm_bind()        : claim the WM role for the calling task.
+ *                          0 on success, -1 if another task is
+ *                          already bound.  Called by wmd at startup.
+ *   sys_wm_create(args)  : client allocates a window. Fill in
+ *                          args->title, args->w, args->h; on success
+ *                          (return 0), args->id is the window id and
+ *                          args->pixels_va is the userspace VA of
+ *                          the surface (w*h*4 packed 0x00RRGGBB).
+ *   sys_wm_poll(out)     : wmd-only. Returns 1 if a message was
+ *                          dequeued, 0 if none pending, -1 on auth
+ *                          failure.
+ *   sys_wm_destroy(id)   : client releases its window. 0 / -1.
+ *
+ * Pixel format is ALWAYS 32-bit packed 0x00RRGGBB regardless of the
+ * underlying framebuffer bpp; the WM does any format conversion at
+ * composite time. */
+struct sys_wm_create {
+    char         title[32];
+    unsigned int w;
+    unsigned int h;
+    unsigned int id;          /* out */
+    unsigned int pixels_va;   /* out */
+};
+struct sys_wm_msg {
+    unsigned int op;          /* 1 = open, 2 = destroy */
+    unsigned int id;
+    unsigned int owner_pid;
+    unsigned int w;
+    unsigned int h;
+    unsigned int wmd_va;
+    char         title[32];
+};
+int      sys_wm_bind     (void);
+int      sys_wm_create   (struct sys_wm_create *args);
+int      sys_wm_poll     (struct sys_wm_msg *out);
+int      sys_wm_destroy  (unsigned int window_id);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

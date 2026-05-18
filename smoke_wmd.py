@@ -76,7 +76,7 @@ def main():
         "-m", "32", "-smp", "1",
         "-vga", "std",
         "-display", "none",
-        "-serial", f"tcp:127.0.0.1:{SERIAL_PORT},server=on,wait=off",
+        "-serial", f"tcp:127.0.0.1:{SERIAL_PORT},server=on,wait=on",
         "-qmp", f"tcp:127.0.0.1:{QMP_PORT},server=on,wait=off",
         "-device", "piix3-usb-uhci,id=usb0",
         "-device", "usb-kbd,bus=usb0.0",

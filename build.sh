@@ -20,6 +20,15 @@ CFLAGS=(
                                   # fs_write_super_inst after FS_MAX_FILES=128)
     -nostdlib -nostartfiles
     -O2 -std=gnu11
+    # Session 112 — function-level sectioning so --gc-sections at
+    # link time drops unreferenced functions (dead -Wunused-function
+    # chaff).  Keeps the kernel image under the VGA-RAM 0xA0000
+    # ceiling after the WM syscall additions.  WITHOUT -fdata-sections
+    # because the PE/COFF backend folds .bss* into .data under
+    # --gc-sections, which would blow up kernel.bin (BSS doesn't take
+    # disk space; promoting it to .data does).  Function sections are
+    # enough on their own.
+    -ffunction-sections
     -Wall -Wextra -Wno-unused-parameter
     -Iinclude -Ikernel
 )
@@ -94,7 +103,7 @@ fi
 echo "        boot.bin = $boot_size bytes"
 
 echo "[4/7] link kernel"
-"$LD" -m i386pe -T linker_kernel.ld -o kernel/kernel.elf "${KERNEL_OBJS[@]}"
+"$LD" -m i386pe -T linker_kernel.ld --gc-sections -o kernel/kernel.elf "${KERNEL_OBJS[@]}"
 "$OBJCOPY" -O binary -j .text -j .rdata -j .data -j .up1 -j .up2 kernel/kernel.elf kernel/kernel.bin
 echo "        kernel.bin = $(stat -c%s kernel/kernel.bin) bytes"
 
@@ -141,6 +150,16 @@ mkdir -p libgfx/_obj
 LIBGFX_OBJS=(libgfx/_obj/libgfx.o)
 echo "        libgfx.o = $(stat -c%s libgfx/_obj/libgfx.o) bytes"
 
+# Session 112 — libwm — Path C client wrapper for SYS_WM_*. Tiny
+# (one source file, ~60 lines). Linked into WM client programs
+# (currently just `wmhello`); not linked into wmd itself (wmd talks
+# to the kernel directly via sys_wm_bind/poll).
+echo "[5e/7] build libwm (static, linked into WM client programs)"
+mkdir -p libwm/_obj
+"$CC" "${USER_CFLAGS[@]}" -c -o libwm/_obj/libwm.o libwm/libwm.c
+LIBWM_OBJS=(libwm/_obj/libwm.o)
+echo "        libwm.o = $(stat -c%s libwm/_obj/libwm.o) bytes"
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
@@ -167,6 +186,11 @@ USER_PROGS=(hello sh echo httpd ed init
 # Session 108+: graphics programs link in libgfx on top of libuser.
 # Same separate-list pattern as the JSON / agent / crypto buckets.
 GFX_PROGS=(gfx mouse wmd)
+# Session 112 — WM client programs link libwm + libgfx on top of
+# libuser. libwm wraps the SYS_WM_* protocol; libgfx is pulled in
+# because clients may want font/glyph helpers later (none used by
+# wmhello today, but the per-program ELF size is small).
+WMCLIENT_PROGS=(wmhello)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.
@@ -258,6 +282,23 @@ for name in "${GFX_PROGS[@]}"; do
     "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBGFX_OBJS[@]}"
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    nm "user/_obj/${name}.elf" \
+        | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
+        > "user/_obj/${name}.syms"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+# Session 112 — WM client programs. Link libwm in addition to
+# libgfx + libuser. Same shape as GFX_PROGS otherwise.
+for name in "${WMCLIENT_PROGS[@]}"; do
+    src="user/${name}.c"
+    if [ ! -f "$src" ]; then continue; fi
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
+        "${LIBGFX_OBJS[@]}" "${LIBWM_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
     nm "user/_obj/${name}.elf" \
