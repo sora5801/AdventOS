@@ -43,5 +43,17 @@ int main() {
     b >>= 3;
     printf("b_shr_eq         = %d\n", b);        /* 2 */
 
+    /* 3. do-while loop. Runs body at least once even when cond is
+     *    false on first eval. */
+    int sum;
+    sum = 0;
+    int i;
+    i = 1;
+    do {
+        sum += i;
+        i += 1;
+    } while (i <= 5);
+    printf("do_while_sum     = %d\n", sum);      /* 1+2+3+4+5 = 15 */
+
     return 0;
 }

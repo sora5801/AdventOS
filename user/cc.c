@@ -123,7 +123,7 @@ static void die_at(int line, const char *what, const char *detail) {
 
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
-    T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
+    T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
     T_STRUCT,    /* session 97 */
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
@@ -280,6 +280,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
+    if (my_streq(s, "do"))     return T_DO;     /* session 125 */
     if (my_streq(s, "return")) return T_RETURN;
     if (my_streq(s, "for"))    return T_FOR;
     return T_NAME;
@@ -1033,6 +1034,7 @@ enum {
     N_PROGRAM,
     /* Session 125 — language-corners batch. */
     N_COMMA,         /* a, b — evaluate a, return b */
+    N_DO_WHILE,      /* do stmt while (cond);  — body in a, cond in b */
 };
 
 struct node {
@@ -1553,6 +1555,20 @@ static struct node *parse_stmt(void) {
         n->a = parse_expr();
         expect(T_RPAREN, "')'");
         n->b = parse_stmt();
+        return n;
+    }
+    /* Session 125 — `do stmt while (cond);`. Body in n->a, cond in n->b. */
+    if (t == T_DO) {
+        g_tk++;
+        struct node *n = new_node(N_DO_WHILE);
+        n->a = parse_stmt();
+        if (tk_cur()->kind != T_WHILE)
+            die_at(tk_cur()->line, "expected 'while' after do-body", 0);
+        g_tk++;
+        expect(T_LPAREN, "'('");
+        n->b = parse_expr();
+        expect(T_RPAREN, "')'");
+        expect(T_SEMI, "';'");
         return n;
     }
     if (t == T_LBRACE) return parse_block();
@@ -4415,6 +4431,25 @@ static void gen_stmt(struct node *n) {
             int jback = e_jmp_rel32();
             patch_d(jback, (unsigned)(top - (jback + 4)));
             patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
+            return;
+        }
+        case N_DO_WHILE: {
+            /* Session 125 — `do { body } while (cond);` runs the body
+             * at least once, then loops back if the condition is true.
+             * Body in n->a, cond in n->b.
+             *
+             *   top:
+             *     body
+             *     cond → eax
+             *     test eax, eax
+             *     jnz top
+             */
+            int top = g_code_len;
+            gen_stmt(n->a);
+            gen_expr(n->b);
+            e_test_eax_eax();
+            int jnz = e_jnz_rel32();
+            patch_d(jnz, (unsigned)(top - (jnz + 4)));
             return;
         }
         case N_EXPR_STMT:
