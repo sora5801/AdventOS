@@ -1409,11 +1409,16 @@ void abort(void) {
  * int that the libc layer never sets — strerror is paged off this. */
 int errno = 0;
 
+/* POSIX `environ` — empty by convention.  tcc references this for
+ * environment dumping but doesn't dereference it when empty. */
+static char *_empty_environ[1] = { (char *)0 };
+char **environ = _empty_environ;
+
 /* time(NULL) — wall-clock seconds.  tcc uses this to seed __DATE__
  * and __TIME__ predefined macros.  The arg, if non-NULL, gets the
- * same value stored through it. */
-unsigned int time(unsigned int *out) {
-    unsigned int t = sys_time();
+ * same value stored through it. POSIX signature: time_t time(time_t *). */
+time_t time(time_t *out) {
+    time_t t = (time_t)sys_time();
     if (out) *out = t;
     return t;
 }

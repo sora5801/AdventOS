@@ -47,3 +47,4 @@ qe.log
 qemu.log
 serial.log
 s*.log
+tcc/_obj/

@@ -479,6 +479,38 @@ echo "sizes: kernel.bin $kernel_size/$kernel_budget ($(pct $kernel_size $kernel_
      " agent.tools.json $manifest_size/$AGENTD_MANIFEST_MAX ($(pct $manifest_size $AGENTD_MANIFEST_MAX)%)" \
      " agentd.bin $agentd_size/$AGENTD_BIN_MAX ($(pct $agentd_size $AGENTD_BIN_MAX)%)"
 
+# Session 132 (Path B Phase 2 of the tcc port): CROSS-compile tcc for
+# AdventOS so it runs inside the OS. Uses our libuser+libc.bin libc
+# surface; stub system headers in tcc/adventos-include/ keep gcc from
+# pulling in the host Windows ucrt.  See docs/119-pathB-tcc-phase2.md.
+#
+# Two -D flags disable subsystems we don't need:
+#   CONFIG_TCC_SEMLOCK=0  — single-threaded, no pthread sem_t needed
+#   CONFIG_TCC_BACKTRACE=0 — no signal-handler-based crash dumps
+# CONFIG_TCC_STATIC=1 keeps tcc from referencing dlopen at link time.
+if [ -d tcc ] && [ -f tcc/tcc.c ] && [ -d tcc/adventos-include ]; then
+    echo "[5g/7] cross-compile tcc.elf (Phase 2 — tcc running inside AdventOS)"
+    mkdir -p tcc/_obj
+    "$CC" "${USER_CFLAGS[@]}" \
+        -nostdinc \
+        -U_WIN32 -U_WIN64 -U__WIN32__ -U__WIN32 -U__MINGW32__ -U__MINGW64__ \
+        -DTCC_TARGET_I386 -DONE_SOURCE -DCONFIG_TCC_STATIC=1 \
+        -DCONFIG_TCC_PREDEFS=1 -DCONFIG_TCC_SEMLOCK=0 \
+        -DCONFIG_TCC_BACKTRACE=0 \
+        -DTCC_VERSION='"0.9.28adventos"' \
+        -include tcc/adventos-include/adventos-libc.h \
+        -Iuser -Itcc/adventos-include -Itcc -Itcc/include \
+        -w -c -o tcc/_obj/tcc-cross.o tcc/tcc.c
+    "$CC" "${USER_CFLAGS[@]}" -w \
+        -c -o tcc/_obj/softfp_stubs.o tcc/adventos-include/softfp_stubs.c
+    "$LD" -m i386pe -T user/user.ld -o tcc/_obj/tcc.elf \
+        user/_obj/start.o tcc/_obj/tcc-cross.o user/_obj/libuser.o \
+        tcc/_obj/softfp_stubs.o
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        tcc/_obj/tcc.elf tcc/_obj/tcc.bin
+    echo "        tcc.bin = $(stat -c%s tcc/_obj/tcc.bin) bytes (i386 AdventOS user program)"
+fi
+
 echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
 

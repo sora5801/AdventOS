@@ -97,6 +97,12 @@ USER_PROGRAMS = [
     # Session 90: path-B phase 1 — small C-subset compiler that
     # emits AdventOS-compatible ELF32 binaries (entry at VA 0x40000000).
     ('cc.elf',    'user/_obj/cc.bin',    None),
+    # Session 132: path-B phase 2 — vendored TinyCC ported as a real
+    # C compiler running INSIDE AdventOS. ~386 KiB so notably larger
+    # than cc.elf, but supports float, long long, full type system,
+    # function-like macros, etc.  Both live alongside; cc is the
+    # backstop, tcc is the heavy-duty option.
+    ('tcc.elf',   'tcc/_obj/tcc.bin',    None),
     # Session 107: path-C phase 1 — userspace framebuffer demo.
     ('gfx.elf',   'user/_obj/gfx.bin',   None),
     # Session 109: path-C phase 3 — PS/2 mouse demo.

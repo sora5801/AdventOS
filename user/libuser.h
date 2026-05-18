@@ -790,8 +790,10 @@ int      system(const char *cmd);
 
 extern int errno;
 
-/* time(NULL) -> wall-clock seconds.  out, if non-NULL, also stores it. */
-unsigned int time(unsigned int *out);
+/* time(NULL) -> wall-clock seconds.  out, if non-NULL, also stores it.
+ * time_t typedef is `long` to match POSIX (32-bit sufficient for AdventOS). */
+typedef long time_t;
+time_t time(time_t *out);
 
 /* gettimeofday — second-resolution; tv_usec stays 0. */
 struct timeval { long tv_sec; long tv_usec; };
