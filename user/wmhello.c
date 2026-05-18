@@ -68,8 +68,9 @@ int main(int argc, char **argv) {
     int release_count  = 0;
     int move_count     = 0;
     int focus_edges    = 0;
+    int closed         = 0;
 
-    for (int tick = 0; tick < total_ticks; tick++) {
+    for (int tick = 0; tick < total_ticks && !closed; tick++) {
         /* Drain any events that landed since last frame. */
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
@@ -89,6 +90,9 @@ int main(int argc, char **argv) {
                     last_press_x = ev.x; last_press_y = ev.y;
                     last_press_was_release = 1;
                     release_count++;
+                    break;
+                case WM_EV_CLOSE:
+                    closed = 1;
                     break;
                 default: break;
             }

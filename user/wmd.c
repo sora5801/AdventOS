@@ -194,6 +194,17 @@ static void paint_window(struct gfx_ctx *ctx, struct window *w,
     gfx_text(ctx, w->x + 6, w->y + 5, w->title,
              GFX_WHITE, GFX_TRANSPARENT);
 
+    /* Session 116 — close button on every CLIENT window, top-right
+     * of the title bar.  Drawn as a 14×14 red square with a white
+     * X glyph centred inside.  Click handling lives in the main
+     * loop; here we just paint. */
+    if (w->kind == KIND_CLIENT) {
+        int bx = w->x + w->w - 16;
+        int by = w->y + 2;
+        gfx_fill_rect(ctx, bx, by, 14, 14, GFX_RED);
+        gfx_text(ctx, bx + 3, by + 3, "x", GFX_WHITE, GFX_TRANSPARENT);
+    }
+
     /* Frame outline. */
     gfx_rect(ctx, w->x, w->y, w->w, w->h, GFX_WHITE);
     gfx_line(ctx, w->x, w->y + TITLE_H - 1,
@@ -397,15 +408,36 @@ int main(int argc, char **argv) {
         if (pressed) {
             int hit = hit_test(ms.x, ms.y);
             if (hit >= 0) {
-                /* Raise. */
-                g_z_counter++;
-                g_windows[hit].raised = g_z_counter;
-                focused = hit;
-                /* Start drag if in title bar. */
-                if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
-                    g_drag_idx   = hit;
-                    g_drag_off_x = ms.x - g_windows[hit].x;
-                    g_drag_off_y = ms.y - g_windows[hit].y;
+                /* Session 116 — close-button intercept.  The
+                 * 14x14 red box at the top-right of every CLIENT
+                 * window: if click lands there, send WM_EV_CLOSE
+                 * to the client and don't otherwise process the
+                 * click (no raise, no drag, no focus change). */
+                struct window *cw = &g_windows[hit];
+                int close_hit = 0;
+                if (cw->kind == KIND_CLIENT) {
+                    int bx = cw->x + cw->w - 16;
+                    int by = cw->y + 2;
+                    if (ms.x >= bx && ms.x < bx + 14 &&
+                        ms.y >= by && ms.y < by + 14) {
+                        close_hit = 1;
+                        struct sys_wm_event ev = {0};
+                        ev.type = WM_EV_CLOSE;
+                        sys_wm_event_push(cw->client_id, &ev);
+                    }
+                }
+                if (!close_hit) {
+                    /* Raise. */
+                    g_z_counter++;
+                    g_windows[hit].raised = g_z_counter;
+                    focused = hit;
+                    /* Start drag if in title bar (but not in the
+                     * close box, already excluded above). */
+                    if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
+                        g_drag_idx   = hit;
+                        g_drag_off_x = ms.x - g_windows[hit].x;
+                        g_drag_off_y = ms.y - g_windows[hit].y;
+                    }
                 }
             } else {
                 focused = -1;

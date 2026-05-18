@@ -120,8 +120,9 @@ int main(int argc, char **argv) {
 
     int mode_12h = 0;
     int has_focus = 0;
+    int closed = 0;
     int total_ticks = seconds * 4;          /* 250ms tick */
-    for (int tick = 0; tick < total_ticks; tick++) {
+    for (int tick = 0; tick < total_ticks && !closed; tick++) {
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
             switch (ev.type) {
@@ -130,6 +131,7 @@ int main(int argc, char **argv) {
                 case WM_EV_KEY:
                     if (ev.keycode == ' ') mode_12h = !mode_12h;
                     break;
+                case WM_EV_CLOSE:   closed = 1; break;
                 default: break;
             }
         }

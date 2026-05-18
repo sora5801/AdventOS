@@ -1,27 +1,32 @@
 # Build artifacts
-*.o
 *.elf
 *.bin
+*.o
+*.a
+*.syms
+build/
+kernel/_obj/
+libgfx/_obj/
+libjson/_obj/
+libcrypto/_obj/
+libwm/_obj/
+libagent/_obj/
+libc/_obj/
+user/_obj/
+os.img
+fs.img
+usbfs.img
 *.img
 
-# mkfs.py temp extracts
-_tmp_*.bin
+# Test artifacts
+*.ppm
+qemu-*.log
+boot.log
+boot.err
+boot.out
+qe.err
+qe.out
 
-# User-program build artifacts
-user/_obj/
-
-# Test / debug output
-*.log
-qemu.log
-
-# Session-1 toolchain probe scratch dir
-_probe/
-
-# Editor / OS noise
+# Editor + OS junk
 *.swp
-*~
 .DS_Store
-Thumbs.db
-
-# Claude Code per-user state
-.claude/

@@ -175,6 +175,9 @@ int main(int argc, char **argv) {
                     }
                     break;
                 }
+                case WM_EV_CLOSE:
+                    quit = 1;
+                    break;
                 default: break;
             }
         }

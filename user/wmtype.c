@@ -58,11 +58,12 @@ int main(int argc, char **argv) {
     int has_focus = 0;
     int total_ticks = seconds * 30;
     int caret_phase = 0;
+    int closed = 0;
 
     struct gfx_ctx sctx;
     make_surface_ctx(&sctx, &win);
 
-    for (int tick = 0; tick < total_ticks; tick++) {
+    for (int tick = 0; tick < total_ticks && !closed; tick++) {
         /* Drain events. */
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
@@ -83,11 +84,17 @@ int main(int argc, char **argv) {
                 }
                 case WM_EV_MOUSE_PRESS:
                     /* Click-to-clear if the user double-clicks at
-                     * the top-right "X" area (a 14x14 region). */
+                     * the top-right "X" area (a 14x14 region within
+                     * the *content* area; this is wmtype's own
+                     * widget, not the WM's close button which is in
+                     * the title bar above). */
                     if (ev.x >= WIN_W - 18 && ev.x < WIN_W - 4 &&
                         ev.y >= 2 && ev.y < 16) {
                         len = 0;
                     }
+                    break;
+                case WM_EV_CLOSE:
+                    closed = 1;
                     break;
                 default: break;
             }
