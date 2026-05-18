@@ -50,6 +50,8 @@
 #include "blkdev.h"
 #include "virtio_blk.h"
 #include "virtio_net.h"
+#include "virtio_scsi.h"
+#include "ahci.h"
 #include "virtio_rng.h"
 #include "virtio_console.h"
 #include "virtio_balloon.h"
@@ -209,6 +211,20 @@ void kmain(uint32_t boot_drive) {
      * slot 0) when QEMU was launched with `-device virtio-blk-pci`. */
     kputs("[boot] probing virtio-blk... ");
     virtio_blk_init();
+    kputs("done\n");
+
+    /* AHCI SATA controller — registers each attached SATA disk as a
+     * blkdev. Slots into the device-id space after ATA + virtio-blk
+     * + USB MSC. Silent when no `-device ahci` is wired. */
+    kputs("[boot] probing AHCI... ");
+    ahci_init();
+    kputs("done\n");
+
+    /* virtio-scsi — paravirtualized SCSI HBA. Same blkdev plumbing
+     * as virtio-blk but speaks SCSI on the wire (multi-LUN capable).
+     * Silent no-op when not present. */
+    kputs("[boot] probing virtio-scsi... ");
+    virtio_scsi_init();
     kputs("done\n");
 
     /* virtio-rng / -console / -balloon: more paravirtualized devices.
@@ -375,25 +391,43 @@ void kmain(uint32_t boot_drive) {
     virtio_console_start_polling();
     virtio_balloon_start_task();
 
-    /* If a USB Mass Storage device showed up during USB enumeration,
-     * try to mount it as an additional AdventFS instance at /mnt/usb.
-     * Silently no-ops if no USB drive is present, or if its sector 0
-     * doesn't have the AdventFS magic. */
+    /* Auto-mount AdventFS-formatted disks on USB / AHCI / virtio-scsi
+     * blkdevs at /mnt/usb, /mnt/sata, /mnt/scsi respectively. Silently
+     * no-ops if no such drive is present or its sector 0 doesn't have
+     * the AdventFS magic. */
     {
         extern int blkdev_count(void);
         extern struct blkdev *blkdev_get(int idx);
+        int usb_mounted = 0, sata_mounted = 0, scsi_mounted = 0;
         for (int i = 1; i < blkdev_count(); i++) {
             struct blkdev *b = blkdev_get(i);
             if (!b) continue;
-            if (b->name[0] != 'u' || b->name[1] != 's' || b->name[2] != 'b') continue;
-            struct fs_instance *uinst =
+            int is_usb   = (b->name[0] == 'u' && b->name[1] == 's' &&
+                            b->name[2] == 'b');
+            int is_sata  = (b->name[0] == 'a' && b->name[1] == 'h' &&
+                            b->name[2] == 'c' && b->name[3] == 'i');
+            int is_vscsi = (b->name[0] == 'v' && b->name[1] == 's' &&
+                            b->name[2] == 'c' && b->name[3] == 's' &&
+                            b->name[4] == 'i');
+            if (!is_usb && !is_sata && !is_vscsi) continue;
+            const char *mp     = is_usb   ? "/mnt/usb"
+                              : is_sata  ? "/mnt/sata"
+                                         : "/mnt/scsi";
+            const char *fsname = is_usb   ? "usbfs"
+                              : is_sata  ? "satafs"
+                                         : "scsifs";
+            int *flag          = is_usb   ? &usb_mounted
+                              : is_sata  ? &sata_mounted
+                                         : &scsi_mounted;
+            if (*flag) continue;
+            struct fs_instance *inst =
                 fs_create_instance(b, /*base_lba=*/0, b->n_blocks);
-            if (!uinst) continue;
-            struct vfs_fs_ops *uops = fs_make_ops_for(uinst);
-            if (uops && vfs_mount("/mnt/usb", "usbfs", uops) == 0) {
-                kprintf("[boot] mounted %s at /mnt/usb\n", b->name);
+            if (!inst) continue;
+            struct vfs_fs_ops *ops = fs_make_ops_for(inst);
+            if (ops && vfs_mount(mp, fsname, ops) == 0) {
+                kprintf("[boot] mounted %s at %s\n", b->name, mp);
+                *flag = 1;
             }
-            break;     /* one USB drive is enough for the demo */
         }
     }
 

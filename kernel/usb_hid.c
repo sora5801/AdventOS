@@ -76,6 +76,15 @@ static const char hid_to_ascii_shifted[HID_USAGE_MAX] = {
 #define HID_MOD_RSHIFT  (1 << 5)
 #define HID_MOD_LCTRL   (1 << 0)
 #define HID_MOD_RCTRL   (1 << 4)
+#define HID_MOD_LALT    (1 << 2)
+#define HID_MOD_RALT    (1 << 6)
+
+/* Session 135 — sentinel byte injected into the keyboard ring when
+ * the user presses Alt+Tab.  Sits at 0x80 (outside printable ASCII
+ * and outside any current keyboard-injection path) so wmd can
+ * intercept it without confusing programs that read the ring for
+ * normal text. */
+#define KBD_ALT_TAB     0x80
 
 /* Per-device state. We expect ≤1 keyboard for the demo, but the
  * code is general (one struct per attached HID device). */
@@ -103,6 +112,22 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
     if (usage >= HID_USAGE_MAX) return;
     int shift = (mods & (HID_MOD_LSHIFT | HID_MOD_RSHIFT)) ? 1 : 0;
     int ctrl  = (mods & (HID_MOD_LCTRL  | HID_MOD_RCTRL )) ? 1 : 0;
+    int alt   = (mods & (HID_MOD_LALT   | HID_MOD_RALT  )) ? 1 : 0;
+
+    /* Session 135 — Alt+Tab bypasses the keyboard ring entirely.
+     * The ring is a single-consumer queue and the shell would
+     * happily eat the byte (or any other reader); send the press
+     * via wm_post_alttab so wmd gets it deterministically the
+     * same frame.  Raw HID Tab (without Alt) still falls through
+     * to '\t' below. */
+    if (alt && usage == 0x2B) {
+        extern void wm_post_alttab(void);
+        wm_post_alttab();
+#ifdef USB_HID_TRACE
+        kprintf("[usb-hid] Alt+Tab -> wm channel\n");
+#endif
+        return;
+    }
 
     /* Arrow keys — emit the 3-byte ANSI CSI sequence (ESC '[' final),
      * same shape the PS/2 driver pushes via push_csi(). The shell

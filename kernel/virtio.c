@@ -231,6 +231,9 @@ void virtio_install_irq(uint16_t io_base, int irq,
     g_irq_slots[g_irq_slot_count].fn      = fn;
     g_irq_slots[g_irq_slot_count].cookie  = cookie;
     g_irq_slot_count++;
+    /* Install the master dispatcher exactly once per IRQ line; the
+     * isr.c chain handles co-existence with non-virtio drivers (e.g.
+     * e1000 on the same line). */
     if (!g_irq_master_installed[irq]) {
         isr_register_irq(irq, virtio_master_irq);
         pic_clear_mask((uint8_t)irq);

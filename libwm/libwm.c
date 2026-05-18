@@ -91,3 +91,10 @@ int wm_poll_event(struct wm_window *w, struct wm_event *out) {
     out->keycode = ev.keycode;
     return 1;
 }
+
+int wm_clipboard_set(const void *buf, int len) {
+    return sys_clipboard_set(buf, len);
+}
+int wm_clipboard_get(void *buf, int cap) {
+    return sys_clipboard_get(buf, cap);
+}

@@ -24,7 +24,9 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
 | ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
-| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough) | ✅ |
+| AHCI SATA controller (modern hard-disk interface) | ✅ |
+| virtio-blk + virtio-scsi + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
+| e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
@@ -98,8 +100,14 @@ The project advances in numbered "sessions" — each session is a focused chunk 
 Current session: **133 — Path B tcc port, Phase 1 foundation**. See [`docs/119-pathB-tcc-foundation.md`](docs/119-pathB-tcc-foundation.md) for the deep dive. Vendors TinyCC 0.9.28rc at `tcc/`, strips down to the i386 + ELF subset (~22 .c/.h files, ~1.8 MB), wires a host-only build into `build.sh` (step `[5f/7]`). `tcc.exe` is 685 KiB, identifies itself as `tcc version 0.9.28rc-adventos (i386 Linux)` and emits valid i386 ELF object files. Phase 2 (cross-compile to `tcc.elf` + add the ~30 libc functions tcc needs to libuser) is multi-session work; the audit + plan lives in [`tcc/README.AdventOS`](tcc/README.AdventOS).
 
 Recent session deep dives:
-- [Session 134 — Path C phase 27: wmterm terminal emulator](docs/120-pathC-wmterm.md)
 - [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
+- [Session 139 — Path C phase 32: wmcalc calculator](docs/125-pathC-wmcalc.md)
+- [Session 138 — Path C phase 31: snap-to-edge + drop shadows](docs/124-pathC-snap-shadows.md)
+- [Session 137 — Path C phase 30: wmedit text editor](docs/123-pathC-wmedit.md)
+- [Session 134 — Path C phase 27: wmterm terminal emulator](docs/120-pathC-wmterm.md)
+- [Session 124 — Path E phase 7: virtio-scsi + CDC-ACM TTY](docs/122-pathE-vscsi-cdc-tty.md)
+- [Session 123 — Path E phase 6: AHCI SATA controller](docs/110-pathE-ahci.md)
+- [Session 122 — Path E phase 5: e1000 NIC + 9p atomic rename](docs/109-pathE-e1000-and-rename.md)
 - [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
 - [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
@@ -160,7 +168,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–121 covered virtio-blk/net/rng/console/balloon/9p (read+write) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio. Still candidate: USB CDC-ECM, virtio-scsi, e1000 NIC, 9p rename, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–124 covered virtio-blk/scsi/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM with `/dev/ttyACM0` userspace device + AC97 consumer + WSL build path + IRQ-driven virtio + chain-style shared-PCI-IRQ dispatch + e1000 NIC + AHCI. Still candidate: USB EHCI (USB 2.0), USB CDC-ECM, NVMe, AHCI IRQ + NCQ.
 
 ## License
 

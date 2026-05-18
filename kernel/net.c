@@ -2,6 +2,7 @@
 #include "eth.h"
 #include "rtl8139.h"
 #include "virtio_net.h"
+#include "e1000.h"
 #include "kprintf.h"
 
 struct mac_addr g_my_mac;
@@ -40,7 +41,18 @@ void net_init(void) {
         return;
     }
 
-    kputs("net: no NIC found (tried rtl8139, virtio-net) — networking offline\n");
+    /* Last resort: Intel 82540EM / 82574L (e1000 / e1000e). The chip
+     * that ships on a lot of real-hardware boards. */
+    if (e1000_init(&g_my_mac) == 0) {
+        g_nic_send = e1000_send;
+        g_net_up = 1;
+        kputs("net: link up (e1000) — MAC ");
+        net_print_mac(&g_my_mac);
+        kputs("  (IP unconfigured — waiting for DHCP)\n");
+        return;
+    }
+
+    kputs("net: no NIC found (tried rtl8139, virtio-net, e1000) — networking offline\n");
 }
 
 void net_rx_frame(const void *frame, uint32_t len) {
