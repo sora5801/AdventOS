@@ -23,7 +23,9 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Sandbox masks + per-task resource limits (RSS/CPU/wall/FDs) | ✅ |
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
-| ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage | ✅ |
+| ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
+| virtio-blk (paravirtualized block) + virtio-net (paravirtualized NIC) | ✅ |
+| AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
 | In-guest httpd, httpsd, sshd, ircd | ✅ |
@@ -93,9 +95,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **107 — Path C phase 1: userspace framebuffer access**. See [`docs/94-pathC-fb.md`](docs/94-pathC-fb.md) for the deep dive (three new syscalls — `SYS_FB_INFO`/`SYS_FB_MAP`/`SYS_FB_UNMAP`; single-owner tracking via `g_fb_owner`; fbcon mutes while a task owns the FB; auto-release on task exit). `gfx.elf` paints a test card and a QMP screendump confirms pixel-perfect output.
+Current session: **118 — Path E: drivers (virtio-blk + virtio-net + USB CDC-ACM + aplay)**. See [`docs/105-pathE-drivers.md`](docs/105-pathE-drivers.md) for the deep dive — landed all four pieces in one push. Trickiest bug: legacy virtio's `QUEUE_NUM` is read-only, so capping qsize on the driver side silently desynchronizes the avail/used base offsets between guest and host.
 
 Recent session deep dives:
+- [Session 118 — Path E: drivers (virtio-blk, virtio-net, CDC-ACM, aplay)](docs/105-pathE-drivers.md)
 - [Session 107 — Path C phase 1: userspace framebuffer](docs/94-pathC-fb.md)
 - [Session 106 — cc Phase 3 part 10: struct-by-value calls](docs/93-cc-struct-by-value.md)
 - [Session 105 — cc Phase 3 part 9: variadic functions](docs/92-cc-variadics.md)
@@ -144,10 +147,11 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 
 **Path C — Graphics is started** as of session 107. Userspace can now take ownership of the VBE framebuffer, get it mapped into its address space, and write pixels directly. `gfx.elf` paints a test card; fbcon mutes while a task owns the FB and resumes on release. Follow-ups: software drawing lib (108), mouse driver (109), double-buffer (110), window manager daemon (111).
 
+**Path E — Drivers is complete** as of session 118. virtio-blk (paravirtualized block, slots into the existing `blkdev` table as `vblk0`), virtio-net (paravirtualized NIC, falls back from RTL8139 in `net_init`), USB CDC-ACM (the "USB serial port" class — Arduino/ESP32 dongles work via `-device usb-host` passthrough), and `aplay.elf` (userspace PCM/WAV streamer that feeds the existing AC97 codec via `SYS_AUDIO_PLAY`). See [`docs/105-pathE-drivers.md`](docs/105-pathE-drivers.md) for the deep dive — including the legacy-virtio gotcha where capping qsize silently breaks every request because QEMU computes avail/used base offsets from its own fixed qsize.
+
 Remaining candidate paths:
 - **Path B Phase 4+** — more cc polish (function-pointer typedef syntax, struct-by-value returns, `static`/`extern`, optimization) or a real `tcc` port.
-- **Path C 108+** — drawing library, mouse, window manager.
-- **Path E — Drivers.** virtio (modern QEMU's preferred device family), more USB device classes, sound consumer.
+- **Path C 108+** — drawing library, mouse, window manager (active path; sessions 107–117).
 
 ## License
 

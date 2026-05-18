@@ -182,7 +182,8 @@ USER_PROGS=(hello sh echo httpd ed init
             cp mv rm mkdir rmdir chmod touch find
             man
             lua
-            cc)
+            cc
+            aplay)
 # Session 108+: graphics programs link in libgfx on top of libuser.
 # Same separate-list pattern as the JSON / agent / crypto buckets.
 GFX_PROGS=(gfx mouse wmd)

@@ -62,9 +62,19 @@
 #define USB_DT_REPORT              0x22
 
 /* ---- Class codes ----------------------------------------------- */
+#define USB_CLASS_CDC_COMM         0x02   /* CDC Communication interface */
 #define USB_CLASS_HID              0x03
 #define USB_CLASS_MASS_STORAGE     0x08
 #define USB_CLASS_HUB              0x09
+#define USB_CLASS_CDC_DATA         0x0A   /* CDC Data interface (bulk in/out) */
+
+/* CDC-ACM subclass + protocol */
+#define USB_CDC_SUBCLASS_ACM       0x02   /* Abstract Control Model */
+
+/* CDC-ACM class requests */
+#define USB_CDC_REQ_SET_LINE_CODING         0x20
+#define USB_CDC_REQ_GET_LINE_CODING         0x21
+#define USB_CDC_REQ_SET_CONTROL_LINE_STATE  0x22
 
 /* HID subclass / protocol (boot interface) */
 #define USB_HID_SUBCLASS_BOOT      0x01
