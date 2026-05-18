@@ -293,6 +293,9 @@ DATA_FILES = [
     # Session 121 — Path B Phase 4 capstone: SBV returns + static/extern
     # + function-pointer typedef syntax, in one program.
     ('capstone.c', 'fs/capstone.c', None),
+    # Session 125 — language-corners batch test (comma, do-while, goto,
+    # switch, union, multi-dim arrays, sizeof NAME, static locals, etc.).
+    ('corners.c', 'fs/corners.c', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:

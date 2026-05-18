@@ -1014,6 +1014,8 @@ enum {
     N_EXPR_STMT,
     N_FUNC_DECL,
     N_PROGRAM,
+    /* Session 125 — language-corners batch. */
+    N_COMMA,         /* a, b — evaluate a, return b */
 };
 
 struct node {
@@ -1069,6 +1071,7 @@ static void node_push(struct node ***arr, int *n, int *cap, struct node *e) {
 /* ---------- Parser (recursive descent) ---------------------------- */
 
 static struct node *parse_expr(void);
+static struct node *parse_comma_expr(void);
 static struct node *parse_block(void);
 static struct node *parse_stmt(void);
 
@@ -1242,7 +1245,14 @@ static struct node *parse_primary(void) {
         }
         return n;
     }
-    if (t->kind == T_LPAREN) { g_tk++; struct node *e = parse_expr(); expect(T_RPAREN, "')'"); return e; }
+    if (t->kind == T_LPAREN) {
+        /* Session 125 — accept the comma operator inside parens.
+         * `(a, b)` evaluates a then returns b. */
+        g_tk++;
+        struct node *e = parse_comma_expr();
+        expect(T_RPAREN, "')'");
+        return e;
+    }
     if (t->kind == T_MINUS) {
         g_tk++;
         struct node *n = new_node(N_UN);
@@ -1337,6 +1347,29 @@ static struct node *parse_expr(void) {
         return n;
     }
     return lhs;
+}
+
+/* Session 125 — top-level comma-chained expression.
+ *
+ * The C comma operator has the lowest precedence: `a, b, c` evaluates
+ * each in turn and returns the last. We can't fold comma into
+ * parse_expr because parse_expr is *also* called inside argument
+ * lists, where comma is the argument separator (not the operator).
+ *
+ * parse_comma_expr is used in statement-level contexts and inside
+ * parenthesized sub-expressions — anywhere the inner comma is
+ * unambiguously the operator. */
+static struct node *parse_comma_expr(void) {
+    struct node *e = parse_expr();
+    while (tk_cur()->kind == T_COMMA) {
+        g_tk++;
+        struct node *rhs = parse_expr();
+        struct node *n = new_node(N_COMMA);
+        n->a = e;
+        n->b = rhs;
+        e = n;
+    }
+    return e;
 }
 
 static struct node *parse_block(void) {
@@ -1634,7 +1667,9 @@ static struct node *parse_stmt(void) {
         expect(T_SEMI, "';'");
         return n;
     }
-    struct node *e = parse_expr();
+    /* Session 125 — comma-expressions are allowed as statement
+     * expressions (e.g. `(a = 1, b = 2);` evaluates both). */
+    struct node *e = parse_comma_expr();
     expect(T_SEMI, "';'");
     struct node *es = new_node(N_EXPR_STMT);
     es->a = e;
@@ -3721,6 +3756,13 @@ static void gen_expr(struct node *n) {
             patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
             gen_expr(n->c);
             patch_d(jend, (unsigned)(g_code_len - (jend + 4)));
+            return;
+        }
+        case N_COMMA: {
+            /* Session 125 — `a, b` evaluates a (discarding the result)
+             * then evaluates b. The whole expression's value is b. */
+            gen_expr(n->a);   /* side-effects only; result in eax discarded */
+            gen_expr(n->b);   /* result stays in eax */
             return;
         }
         case N_UN: {
