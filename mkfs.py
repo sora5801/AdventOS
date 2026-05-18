@@ -114,6 +114,8 @@ USER_PROGRAMS = [
     ('wmpair.elf',  'user/_obj/wmpair.bin',  None),
     # Session 128: path-C phase 21 — file-manager client.
     ('wmfiles.elf', 'user/_obj/wmfiles.bin', None),
+    # Session 129: path-C phase 22 — live system-info dashboard.
+    ('wmsysinfo.elf','user/_obj/wmsysinfo.bin', None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -261,6 +263,7 @@ DATA_FILES = [
     ('wmpaint', 'fs/man/wmpaint', 'man'), # session 115
     ('wmpair',  'fs/man/wmpair',  'man'), # session 122
     ('wmfiles', 'fs/man/wmfiles', 'man'), # session 128
+    ('wmsysinfo','fs/man/wmsysinfo','man'),# session 129
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
