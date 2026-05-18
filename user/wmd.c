@@ -90,9 +90,30 @@ static const struct launch_entry g_launch_items[] = {
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
 
+/* Session 124 — right-click window context menu.  Open when a
+ * RIGHT-click lands on a client window's title bar; closes on the
+ * next click anywhere.  Targets a window by client_id so it
+ * survives slot-array compaction. */
+struct ctx_menu_state {
+    int          open;
+    int          x, y;          /* top-left of popup */
+    unsigned int target_id;
+};
+static struct ctx_menu_state g_ctx_menu;
+
+#define CTXMENU_W       100
+#define CTXMENU_ITEM_H  18
+#define CTXMENU_N_ITEMS 2
+
+static const char *g_ctx_labels[CTXMENU_N_ITEMS] = {
+    "Raise",
+    "Close",
+};
+
 static int g_drag_idx = -1;
 static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
+static int g_prev_right;       /* session 124 — right-button edge */
 
 static int my_atoi_str(const char *s) { return atoi(s); }
 
@@ -383,6 +404,36 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     }
 }
 
+/* Session 124 — right-click context menu painter + hit-test. */
+static void paint_ctx_menu(struct gfx_ctx *ctx) {
+    if (!g_ctx_menu.open) return;
+    int x = g_ctx_menu.x;
+    int y = g_ctx_menu.y;
+    int h = CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+    /* Shadow + body. */
+    gfx_fill_rect(ctx, x + 2, y + h, CTXMENU_W, 2, GFX_BLACK);
+    gfx_fill_rect(ctx, x + CTXMENU_W, y + 2, 2, h, GFX_BLACK);
+    gfx_fill_rect(ctx, x, y, CTXMENU_W, h, 0x202830u);
+    gfx_rect    (ctx, x, y, CTXMENU_W, h, GFX_WHITE);
+    for (int i = 0; i < CTXMENU_N_ITEMS; i++) {
+        int iy = y + i * CTXMENU_ITEM_H;
+        if (i > 0) gfx_line(ctx, x + 1, iy, x + CTXMENU_W - 2, iy,
+                            0x404850u);
+        gfx_text(ctx, x + 8, iy + 5, g_ctx_labels[i],
+                 GFX_WHITE, GFX_TRANSPARENT);
+    }
+}
+
+static int ctx_menu_hit(int px, int py) {
+    if (!g_ctx_menu.open) return -1;
+    int x = g_ctx_menu.x;
+    int y = g_ctx_menu.y;
+    int h = CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+    if (px < x || px >= x + CTXMENU_W) return -1;
+    if (py < y || py >= y + h) return -1;
+    return (py - y) / CTXMENU_ITEM_H;
+}
+
 /* Session 119 — popup over the Start button when the launcher is
  * open.  Drawn AFTER paint_taskbar so it sits on top. */
 static void paint_launcher(struct gfx_ctx *ctx) {
@@ -575,7 +626,59 @@ int main(int argc, char **argv) {
         int pressed  = left && !g_prev_left;
         int released = !left && g_prev_left;
 
+        /* Session 124 — right-button edge for the context menu. */
+        int right = (ms.buttons & 0x02) ? 1 : 0;
+        int right_pressed = right && !g_prev_right;
+        g_prev_right = right;
+
+        if (right_pressed) {
+            /* If the menu is already open, close it. */
+            if (g_ctx_menu.open) {
+                g_ctx_menu.open = 0;
+            } else {
+                int hit = hit_test(ms.x, ms.y);
+                if (hit >= 0 && g_windows[hit].kind == KIND_CLIENT
+                    && in_titlebar(&g_windows[hit], ms.x, ms.y)) {
+                    g_ctx_menu.open      = 1;
+                    g_ctx_menu.target_id = g_windows[hit].client_id;
+                    g_ctx_menu.x         = ms.x;
+                    g_ctx_menu.y         = ms.y;
+                    if (g_ctx_menu.x + CTXMENU_W > (int)ctx.width)
+                        g_ctx_menu.x = (int)ctx.width - CTXMENU_W;
+                    if (g_ctx_menu.y + CTXMENU_N_ITEMS * CTXMENU_ITEM_H
+                        > (int)ctx.height)
+                        g_ctx_menu.y = (int)ctx.height
+                            - CTXMENU_N_ITEMS * CTXMENU_ITEM_H;
+                }
+            }
+        }
+
         if (pressed) {
+            /* Session 124 — context-menu item click intercept. */
+            if (g_ctx_menu.open) {
+                int item = ctx_menu_hit(ms.x, ms.y);
+                /* Find target window by client_id. */
+                int target_idx = -1;
+                for (int i = 0; i < g_window_count; i++) {
+                    if (g_windows[i].kind == KIND_CLIENT
+                        && g_windows[i].client_id == g_ctx_menu.target_id) {
+                        target_idx = i; break;
+                    }
+                }
+                if (item == 0 && target_idx >= 0) {
+                    /* Raise. */
+                    g_z_counter++;
+                    g_windows[target_idx].raised = g_z_counter;
+                    focused = target_idx;
+                } else if (item == 1 && target_idx >= 0) {
+                    /* Close. */
+                    struct sys_wm_event ev = {0};
+                    ev.type = WM_EV_CLOSE;
+                    sys_wm_event_push(g_ctx_menu.target_id, &ev);
+                }
+                g_ctx_menu.open = 0;
+                goto after_press_hit;
+            }
             /* Session 119 — launcher popup intercept.  If the popup
              * is open and the click landed on an item, fork+exec
              * the chosen program.  If the click is anywhere else,
@@ -787,6 +890,22 @@ int main(int argc, char **argv) {
         gfx_fill_rect(&ctx, 0, 0, (int)ctx.width, 18, GFX_DARK_GREY);
         gfx_text(&ctx, 8, 5, "wmd - AdventOS Path C session 111",
                  GFX_WHITE, GFX_TRANSPARENT);
+        /* Session 124 — show the focused window's title on the
+         * right side of the top bar (when there is one).  Aligned
+         * to roughly column = fb_w/2 so it doesn't overlap the
+         * left-side wmd label. */
+        if (focused >= 0 && focused < g_window_count) {
+            struct window *fw = &g_windows[focused];
+            char fbuf[44];
+            int n = 0;
+            const char *p = "focus: ";
+            while (*p && n < (int)sizeof(fbuf) - 1) fbuf[n++] = *p++;
+            for (int i = 0; fw->title[i] && n < (int)sizeof(fbuf) - 1; i++)
+                fbuf[n++] = fw->title[i];
+            fbuf[n] = 0;
+            gfx_text(&ctx, (int)ctx.width / 2 + 80, 5, fbuf,
+                     GFX_CYAN, GFX_TRANSPARENT);
+        }
 
         int order[MAX_WINDOWS];
         z_order(order);
@@ -804,6 +923,9 @@ int main(int argc, char **argv) {
         /* Session 119 — launcher popup is drawn on top of the
          * taskbar when open. */
         paint_launcher(&ctx);
+        /* Session 124 — right-click context menu on top of
+         * everything (last paint wins). */
+        paint_ctx_menu(&ctx);
 
         /* Cursor: red if dragging, otherwise white. */
         unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;
