@@ -78,3 +78,16 @@ void wm_present(struct wm_window *out) {
      * here. */
     (void)out;
 }
+
+int wm_poll_event(struct wm_window *w, struct wm_event *out) {
+    if (!w || !w->id || !out) return 0;
+    struct sys_wm_event ev;
+    int r = sys_wm_event_poll(w->id, &ev);
+    if (r <= 0) return 0;
+    out->type    = ev.type;
+    out->x       = ev.x;
+    out->y       = ev.y;
+    out->button  = ev.button;
+    out->keycode = ev.keycode;
+    return 1;
+}

@@ -374,6 +374,12 @@ int main(int argc, char **argv) {
     int focused = -1;
     g_prev_left = 0;
 
+    /* Session 113 — track which client window the cursor was over
+     * last tick so we can synthesize FOCUS/UNFOCUS edges when it
+     * crosses a window boundary. */
+    int prev_hover_idx = -1;
+    int prev_mx = -1, prev_my = -1;
+
     for (int tick = 0; tick < total_ticks; tick++) {
         /* Session 112 — drain WM client events first so newly-
          * registered windows appear on this frame. */
@@ -421,6 +427,83 @@ int main(int argc, char **argv) {
             w->y = ny;
         }
         g_prev_left = left;
+
+        /* Session 113 — route mouse events to client-backed windows.
+         *
+         *   hover changes  → FOCUS / UNFOCUS edges
+         *   mouse motion   → MOUSE_MOVE (only inside the content
+         *                    area, x,y translated to surface-local)
+         *   press/release  → MOUSE_PRESS / MOUSE_RELEASE on the
+         *                    window the cursor is over, also with
+         *                    surface-local coords
+         *
+         * Events landing on the title bar of a CLIENT window go to
+         * the WM (for drag), not the client.  Events on demo windows
+         * are simply not forwarded since they aren't client-backed. */
+        int hover = hit_test(ms.x, ms.y);
+        int hover_is_client_content =
+            (hover >= 0
+             && g_windows[hover].kind == KIND_CLIENT
+             && ms.y >= g_windows[hover].y + TITLE_H
+             && ms.y <  g_windows[hover].y + g_windows[hover].h - 1);
+        int target = hover_is_client_content ? hover : -1;
+
+        /* FOCUS/UNFOCUS edges. We track via prev_hover_idx which
+         * indexes into g_windows[]. Note slots can compact across
+         * drain_wm_messages destroy paths, so prev_hover_idx is
+         * only valid until the next drain — refresh each tick. */
+        if (target != prev_hover_idx) {
+            if (prev_hover_idx >= 0
+                && prev_hover_idx < g_window_count
+                && g_windows[prev_hover_idx].kind == KIND_CLIENT) {
+                struct sys_wm_event ev = {0};
+                ev.type = WM_EV_UNFOCUS;
+                sys_wm_event_push(g_windows[prev_hover_idx].client_id, &ev);
+            }
+            if (target >= 0) {
+                struct sys_wm_event ev = {0};
+                ev.type = WM_EV_FOCUS;
+                sys_wm_event_push(g_windows[target].client_id, &ev);
+            }
+            prev_hover_idx = target;
+        }
+
+        if (target >= 0) {
+            struct window *w = &g_windows[target];
+            int sx = ms.x - (w->x + 1);
+            int sy = ms.y - (w->y + TITLE_H);
+            if (sx < 0) sx = 0;
+            if (sy < 0) sy = 0;
+            if (sx >= (int)w->surface_w) sx = (int)w->surface_w - 1;
+            if (sy >= (int)w->surface_h) sy = (int)w->surface_h - 1;
+            /* Motion event — only when the cursor actually moved. */
+            if (ms.x != prev_mx || ms.y != prev_my) {
+                struct sys_wm_event ev = {0};
+                ev.type = WM_EV_MOUSE_MOVE;
+                ev.x    = sx;
+                ev.y    = sy;
+                ev.button = ms.buttons;
+                sys_wm_event_push(w->client_id, &ev);
+            }
+            if (pressed) {
+                struct sys_wm_event ev = {0};
+                ev.type   = WM_EV_MOUSE_PRESS;
+                ev.x      = sx;
+                ev.y      = sy;
+                ev.button = WM_BUTTON_LEFT;
+                sys_wm_event_push(w->client_id, &ev);
+            }
+            if (released) {
+                struct sys_wm_event ev = {0};
+                ev.type   = WM_EV_MOUSE_RELEASE;
+                ev.x      = sx;
+                ev.y      = sy;
+                ev.button = WM_BUTTON_LEFT;
+                sys_wm_event_push(w->client_id, &ev);
+            }
+        }
+        prev_mx = ms.x;
+        prev_my = ms.y;
 
         /* Compose the frame. */
         gfx_clear(&ctx, 0x0A1828u);  /* deep blue desktop bg */

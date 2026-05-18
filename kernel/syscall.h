@@ -309,6 +309,20 @@ struct sys_limits {
                                 *    the bound WM. */
 #define SYS_WM_DESTROY    93   /* (eax=93, ebx=window_id) -> 0/-1     */
 
+/* Session 113 — input routing.  The WM determines which window the
+ * mouse cursor / keyboard focus belongs to, then pushes events into
+ * that window's per-slot event queue with SYS_WM_EVENT_PUSH.  The
+ * client drains its own queue with SYS_WM_EVENT_POLL.  See
+ * struct sys_wm_event below for the per-event payload. */
+#define SYS_WM_EVENT_PUSH 94   /* (eax=94, ebx=window_id, ecx=struct sys_wm_event*)
+                                * Wmd-only.  -> 0 on success, -1 if
+                                * caller isn't the bound WM or window
+                                * doesn't exist. */
+#define SYS_WM_EVENT_POLL 95   /* (eax=95, ebx=window_id, ecx=struct sys_wm_event*)
+                                * Client-only.  -> 1 if event returned,
+                                * 0 if queue empty, -1 if window isn't
+                                * owned by the calling task. */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */
@@ -359,6 +373,39 @@ struct sys_wm_msg {
     uint32_t    h;
     uint32_t    wmd_va;      /* read surface here (op=1 only)  */
     char        title[32];
+};
+
+/* Session 113 — per-event payload for SYS_WM_EVENT_PUSH/POLL.
+ *
+ *   type = 1 (WM_EV_MOUSE_MOVE)   x,y valid in client surface coords
+ *   type = 2 (WM_EV_MOUSE_PRESS)  x,y valid; button bit set
+ *   type = 3 (WM_EV_MOUSE_RELEASE) x,y valid; button bit set
+ *   type = 4 (WM_EV_KEY)          keycode valid (raw ASCII or scancode)
+ *   type = 5 (WM_EV_FOCUS)        no fields; the window just got focus
+ *   type = 6 (WM_EV_UNFOCUS)      no fields; the window just lost focus
+ *   type = 7 (WM_EV_CLOSE)        the WM is requesting the client to
+ *                                 destroy this window (e.g. WM exit)
+ *
+ * Coordinates are translated by wmd to be local to the client
+ * surface (origin at top-left of the surface, not the screen). */
+#define WM_EV_MOUSE_MOVE      1u
+#define WM_EV_MOUSE_PRESS     2u
+#define WM_EV_MOUSE_RELEASE   3u
+#define WM_EV_KEY             4u
+#define WM_EV_FOCUS           5u
+#define WM_EV_UNFOCUS         6u
+#define WM_EV_CLOSE           7u
+
+#define WM_BUTTON_LEFT        0x01u
+#define WM_BUTTON_RIGHT       0x02u
+#define WM_BUTTON_MIDDLE      0x04u
+
+struct sys_wm_event {
+    uint32_t    type;
+    int32_t     x;           /* mouse-event: client-surface-local */
+    int32_t     y;
+    uint32_t    button;      /* mouse press/release: bitmask */
+    uint32_t    keycode;     /* key event: ASCII or scancode */
 };
 
 

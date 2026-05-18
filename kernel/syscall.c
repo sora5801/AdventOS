@@ -878,6 +878,16 @@ void syscall_dispatch(struct registers *r) {
         case SYS_WM_DESTROY:
             ret = wm_destroy_window(task_current(), (uint32_t)a);
             break;
+        /* Session 113 — input routing.  PUSH is wmd-only, POLL is
+         * the client side. */
+        case SYS_WM_EVENT_PUSH:
+            ret = b ? wm_push_event(task_current(), (uint32_t)a,
+                                    (const struct sys_wm_event *)(uintptr_t)b) : -1;
+            break;
+        case SYS_WM_EVENT_POLL:
+            ret = b ? wm_poll_event(task_current(), (uint32_t)a,
+                                    (struct sys_wm_event *)(uintptr_t)b) : -1;
+            break;
         case SYS_PTRACE: {
             /* Multiplexed ptrace dispatch (session 57). See the op
              * comments in syscall.h for what each one does; the heavy

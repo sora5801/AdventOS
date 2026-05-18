@@ -129,6 +129,9 @@ typedef unsigned int   size_t;
 #define SYS_WM_CREATE      91
 #define SYS_WM_POLL        92
 #define SYS_WM_DESTROY     93
+/* Session 113 — input routing.  See struct sys_wm_event. */
+#define SYS_WM_EVENT_PUSH  94
+#define SYS_WM_EVENT_POLL  95
 
 /* Session 70: syscall sandbox.
  *
@@ -492,6 +495,40 @@ int      sys_wm_bind     (void);
 int      sys_wm_create   (struct sys_wm_create *args);
 int      sys_wm_poll     (struct sys_wm_msg *out);
 int      sys_wm_destroy  (unsigned int window_id);
+
+/* Session 113 — input routing.  Event type/button/keycode constants
+ * mirror the kernel ABI.
+ *
+ *   sys_wm_event_push : wmd-only.  Pushes an event into the per-
+ *                       window queue of `window_id`.  Returns 0
+ *                       on success, -1 if caller isn't the bound
+ *                       WM or the window doesn't exist.
+ *   sys_wm_event_poll : client-only.  Drains one event from the
+ *                       given (owned) window's queue.  Returns 1
+ *                       on event, 0 if empty, -1 on auth fail. */
+#define WM_EV_MOUSE_MOVE      1u
+#define WM_EV_MOUSE_PRESS     2u
+#define WM_EV_MOUSE_RELEASE   3u
+#define WM_EV_KEY             4u
+#define WM_EV_FOCUS           5u
+#define WM_EV_UNFOCUS         6u
+#define WM_EV_CLOSE           7u
+
+#define WM_BUTTON_LEFT        0x01u
+#define WM_BUTTON_RIGHT       0x02u
+#define WM_BUTTON_MIDDLE      0x04u
+
+struct sys_wm_event {
+    unsigned int type;
+    int          x;
+    int          y;
+    unsigned int button;
+    unsigned int keycode;
+};
+int      sys_wm_event_push (unsigned int window_id,
+                            const struct sys_wm_event *ev);
+int      sys_wm_event_poll (unsigned int window_id,
+                            struct sys_wm_event *out);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

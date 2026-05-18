@@ -465,6 +465,26 @@ int sys_wm_destroy(unsigned int window_id) {
     return ret;
 }
 
+/* Session 113 — input routing. */
+int sys_wm_event_push(unsigned int window_id,
+                      const struct sys_wm_event *ev) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_EVENT_PUSH), "b"(window_id), "c"(ev)
+                      : "memory");
+    return ret;
+}
+int sys_wm_event_poll(unsigned int window_id,
+                      struct sys_wm_event *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_EVENT_POLL), "b"(window_id), "c"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

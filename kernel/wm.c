@@ -60,6 +60,14 @@ struct wm_window {
     char      title[32];
     uint32_t  n_pages;
     uint32_t *pages;     /* kmalloc'd at create */
+
+    /* Session 113 — per-window event ring.  Allocated lazily on the
+     * first wm_push_event so windows that never see input cost zero
+     * extra heap. */
+    struct sys_wm_event *events;
+    uint32_t             ev_head;   /* read */
+    uint32_t             ev_tail;   /* write */
+    uint32_t             ev_size;
 };
 
 struct wm_state {
@@ -124,6 +132,11 @@ static void free_slot_pages(struct wm_window *w) {
     w->n_pages = 0;
 }
 
+static void free_slot_events(struct wm_window *w) {
+    if (w->events) { kfree(w->events); w->events = 0; }
+    w->ev_head = w->ev_tail = w->ev_size = 0;
+}
+
 /* ---- public API ---------------------------------------------- */
 
 int wm_bind(struct task *t) {
@@ -138,6 +151,7 @@ int wm_bind(struct task *t) {
         struct wm_window *w = &g_state->windows[i];
         if (w->state != WM_SLOT_EMPTY) {
             free_slot_pages(w);
+            free_slot_events(w);
             w->state = WM_SLOT_EMPTY;
         }
     }
@@ -194,6 +208,12 @@ int wm_create_window(struct task *client, struct sys_wm_create *args) {
     slot->n_pages   = n_pages;
     for (int i = 0; i < 31; i++) slot->title[i] = args->title[i];
     slot->title[31] = 0;
+    /* Event queue starts empty/unallocated — wm_push_event lazy-
+     * allocates on first use (session 113). */
+    slot->events    = 0;
+    slot->ev_head   = 0;
+    slot->ev_tail   = 0;
+    slot->ev_size   = 0;
     slot->state     = WM_SLOT_OPEN_PENDING;
 
     args->id        = slot->id;
@@ -259,11 +279,60 @@ int wm_pop_message(struct task *caller, struct sys_wm_msg *out) {
                     w->wmd_va + (uintptr_t)p * PAGE_SIZE);
             }
             free_slot_pages(w);
+            free_slot_events(w);
             w->state = WM_SLOT_EMPTY;
             return 1;
         }
     }
     return 0;
+}
+
+/* ---- Session 113: input routing ------------------------------ */
+
+int wm_push_event(struct task *caller, uint32_t window_id,
+                  const struct sys_wm_event *ev) {
+    if (!ev || !caller) return -1;
+    if (g_wm_owner != caller) return -1;     /* WM-only */
+    if (!g_state) return -1;
+    struct wm_window *w = find_slot_by_id(window_id);
+    if (!w) return -1;
+    if (w->state != WM_SLOT_LIVE && w->state != WM_SLOT_OPEN_PENDING) return -1;
+
+    /* Lazy-allocate the event ring on first push.  Saves heap for
+     * windows that never receive input. */
+    if (!w->events) {
+        w->events = (struct sys_wm_event *)
+            kmalloc(sizeof(struct sys_wm_event) * WM_EVENT_QUEUE_DEPTH);
+        if (!w->events) return -1;
+        w->ev_head = w->ev_tail = w->ev_size = 0;
+    }
+
+    /* Drop oldest on overflow.  Mouse-move events are the noisy
+     * case; a slow client missing the tail isn't fatal — better
+     * than the WM blocking on a wedged client. */
+    if (w->ev_size >= WM_EVENT_QUEUE_DEPTH) {
+        w->ev_head = (w->ev_head + 1u) % WM_EVENT_QUEUE_DEPTH;
+        w->ev_size--;
+    }
+    w->events[w->ev_tail] = *ev;
+    w->ev_tail = (w->ev_tail + 1u) % WM_EVENT_QUEUE_DEPTH;
+    w->ev_size++;
+    return 0;
+}
+
+int wm_poll_event(struct task *caller, uint32_t window_id,
+                  struct sys_wm_event *out) {
+    if (!out || !caller) return -1;
+    if (!g_state) return 0;
+    struct wm_window *w = find_slot_by_id(window_id);
+    if (!w) return -1;
+    if (w->owner_pid != caller->id) return -1;
+    if (!w->events || w->ev_size == 0) return 0;
+
+    *out = w->events[w->ev_head];
+    w->ev_head = (w->ev_head + 1u) % WM_EVENT_QUEUE_DEPTH;
+    w->ev_size--;
+    return 1;
 }
 
 void wm_on_task_exit(struct task *t) {

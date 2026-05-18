@@ -54,4 +54,17 @@ void wm_fill_rect(struct wm_window *out, int x, int y, int w, int h,
  * 113's damage-region work. */
 void wm_present  (struct wm_window *out);
 
+/* Session 113 — input.  Re-exports `struct sys_wm_event` and friends
+ * from libuser as `struct wm_event` so client code can speak the
+ * library's vocabulary rather than the raw syscall vocabulary.
+ * Returns 1 if an event was returned, 0 if the queue is empty. */
+struct wm_event {
+    unsigned int type;      /* WM_EV_* */
+    int          x;         /* surface-local */
+    int          y;
+    unsigned int button;
+    unsigned int keycode;
+};
+int wm_poll_event(struct wm_window *w, struct wm_event *out);
+
 #endif

@@ -38,6 +38,10 @@ struct task;
 #define WM_MAX_WINDOWS        4
 #define WM_MAX_PAGES_PER_WIN  256          /* 256 * 4096 = 1 MiB cap */
 #define WM_MSG_QUEUE_DEPTH    8
+/* Session 113 — per-window input event queue depth. Big enough for
+ * a few hundred ms of 60-Hz mouse-move events if the client polls
+ * lazily. */
+#define WM_EVENT_QUEUE_DEPTH  32
 #define WM_SURFACE_VA_BASE    0x60000000u  /* both client and WM share base */
 
 /* Try to bind `t` as the WM.  Returns 0 on success, -1 if another
@@ -48,6 +52,13 @@ int  wm_bind(struct task *t);
  * caller AND into wmd at independent VAs. Returns 0 on success,
  * -1 on any failure (no partial leak — the helper rolls back). */
 int  wm_create_window(struct task *client, struct sys_wm_create *args);
+
+/* Session 113 — input routing.  Wmd-side push (caller must be the
+ * bound WM); client-side poll (caller must own the window). */
+int  wm_push_event(struct task *caller, uint32_t window_id,
+                   const struct sys_wm_event *ev);
+int  wm_poll_event(struct task *caller, uint32_t window_id,
+                   struct sys_wm_event *out);
 
 /* SYS_WM_DESTROY backend. Returns 0 on success, -1 if the window
  * isn't owned by `caller` or doesn't exist. */
