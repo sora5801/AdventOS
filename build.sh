@@ -131,6 +131,16 @@ mkdir -p libjson/_obj
 LIBJSON_OBJS=(libjson/_obj/libjson.o)
 echo "        libjson.o = $(stat -c%s libjson/_obj/libjson.o) bytes"
 
+# Session 108 — libgfx — Path C software drawing library. Same shape
+# as libjson: one source file, one object, linked into graphical
+# programs (gfx, future wm). Smaller than libjson; mostly the 8x8
+# font + Bresenham + rect fill.
+echo "[5d/7] build libgfx (static, statically linked into graphics programs)"
+mkdir -p libgfx/_obj
+"$CC" "${USER_CFLAGS[@]}" -c -o libgfx/_obj/libgfx.o libgfx/libgfx.c
+LIBGFX_OBJS=(libgfx/_obj/libgfx.o)
+echo "        libgfx.o = $(stat -c%s libgfx/_obj/libgfx.o) bytes"
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
@@ -153,8 +163,10 @@ USER_PROGS=(hello sh echo httpd ed init
             cp mv rm mkdir rmdir chmod touch find
             man
             lua
-            cc
-            gfx)
+            cc)
+# Session 108: graphics programs link in libgfx on top of libuser.
+# Same separate-list pattern as the JSON / agent / crypto buckets.
+GFX_PROGS=(gfx)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.
@@ -233,6 +245,24 @@ for name in "${TLS_PROGS[@]}"; do
         "${LIBCRYPTO_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
+done
+
+# Session 108 — Path C graphical programs link libgfx in addition to
+# libuser. Started with `gfx`; the future `wm` daemon will also land
+# in this bucket.
+for name in "${GFX_PROGS[@]}"; do
+    src="user/${name}.c"
+    if [ ! -f "$src" ]; then continue; fi
+    "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
+    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+        user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
+        "${LIBGFX_OBJS[@]}"
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        "user/_obj/${name}.elf" "user/_obj/${name}.bin"
+    nm "user/_obj/${name}.elf" \
+        | awk '/^[0-9a-fA-F]+ [Tt] / {printf "%s %s\n", $1, $3}' \
+        > "user/_obj/${name}.syms"
     echo "        ${name}.bin = $(stat -c%s user/_obj/${name}.bin) bytes"
 done
 
