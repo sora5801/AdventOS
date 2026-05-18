@@ -386,9 +386,11 @@ int main(int argc, char **argv) {
     g_prev_left = 0;
 
     /* Session 113 — track which client window the cursor was over
-     * last tick so we can synthesize FOCUS/UNFOCUS edges when it
-     * crosses a window boundary. */
+     * last tick so we can synthesize HOVER_ENTER/LEAVE edges when
+     * it crosses a window boundary.  Session 117 — separate from
+     * `prev_focus_id` (kbd focus, changes on click). */
     int prev_hover_idx = -1;
+    int prev_focus_id  = 0;       /* 0 = nothing, else client_id */
     int prev_mx = -1, prev_my = -1;
 
     for (int tick = 0; tick < total_ticks; tick++) {
@@ -443,6 +445,27 @@ int main(int argc, char **argv) {
                 focused = -1;
             }
         }
+        /* Session 117 — push FOCUS / UNFOCUS edges to client
+         * windows when the *click-focused* window changes.  Use
+         * client_id to identify the window across slot-array
+         * compaction (drain_wm_messages can shift indices). */
+        unsigned int new_focus_id =
+            (focused >= 0 && focused < g_window_count
+             && g_windows[focused].kind == KIND_CLIENT)
+            ? g_windows[focused].client_id : 0u;
+        if ((unsigned int)new_focus_id != (unsigned int)prev_focus_id) {
+            if (prev_focus_id != 0) {
+                struct sys_wm_event ev = {0};
+                ev.type = WM_EV_UNFOCUS;
+                sys_wm_event_push(prev_focus_id, &ev);
+            }
+            if (new_focus_id != 0) {
+                struct sys_wm_event ev = {0};
+                ev.type = WM_EV_FOCUS;
+                sys_wm_event_push(new_focus_id, &ev);
+            }
+            prev_focus_id = new_focus_id;
+        }
         if (released) {
             g_drag_idx = -1;
         }
@@ -480,21 +503,20 @@ int main(int argc, char **argv) {
              && ms.y <  g_windows[hover].y + g_windows[hover].h - 1);
         int target = hover_is_client_content ? hover : -1;
 
-        /* FOCUS/UNFOCUS edges. We track via prev_hover_idx which
-         * indexes into g_windows[]. Note slots can compact across
-         * drain_wm_messages destroy paths, so prev_hover_idx is
-         * only valid until the next drain — refresh each tick. */
+        /* Session 117 — HOVER_ENTER / HOVER_LEAVE edges when the
+         * cursor crosses a client window's content area.  Distinct
+         * from FOCUS / UNFOCUS (above; click-driven). */
         if (target != prev_hover_idx) {
             if (prev_hover_idx >= 0
                 && prev_hover_idx < g_window_count
                 && g_windows[prev_hover_idx].kind == KIND_CLIENT) {
                 struct sys_wm_event ev = {0};
-                ev.type = WM_EV_UNFOCUS;
+                ev.type = WM_EV_HOVER_LEAVE;
                 sys_wm_event_push(g_windows[prev_hover_idx].client_id, &ev);
             }
             if (target >= 0) {
                 struct sys_wm_event ev = {0};
-                ev.type = WM_EV_FOCUS;
+                ev.type = WM_EV_HOVER_ENTER;
                 sys_wm_event_push(g_windows[target].client_id, &ev);
             }
             prev_hover_idx = target;

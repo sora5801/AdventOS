@@ -510,9 +510,14 @@ int      sys_wm_destroy  (unsigned int window_id);
 #define WM_EV_MOUSE_PRESS     2u
 #define WM_EV_MOUSE_RELEASE   3u
 #define WM_EV_KEY             4u
+/* Session 117 — FOCUS / UNFOCUS are click-driven (the window
+ * receives keyboard input).  HOVER_ENTER / HOVER_LEAVE are mouse
+ * crossing events. */
 #define WM_EV_FOCUS           5u
 #define WM_EV_UNFOCUS         6u
 #define WM_EV_CLOSE           7u
+#define WM_EV_HOVER_ENTER     8u
+#define WM_EV_HOVER_LEAVE     9u
 
 #define WM_BUTTON_LEFT        0x01u
 #define WM_BUTTON_RIGHT       0x02u

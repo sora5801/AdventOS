@@ -75,8 +75,16 @@ int main(int argc, char **argv) {
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
             switch (ev.type) {
-                case WM_EV_FOCUS:        has_focus = 1; focus_edges++; break;
-                case WM_EV_UNFOCUS:      has_focus = 0; focus_edges++; break;
+                /* Session 117 — react to the HOVER edges (mouse
+                 * crossing the window) so wmhello's border tracks
+                 * pointer position the way it did before HOVER and
+                 * FOCUS were separated.  WM_EV_FOCUS is now the
+                 * click-focus signal — also count those so the
+                 * smoke test can confirm both flows still arrive. */
+                case WM_EV_HOVER_ENTER:  has_focus = 1; focus_edges++; break;
+                case WM_EV_HOVER_LEAVE:  has_focus = 0; focus_edges++; break;
+                case WM_EV_FOCUS:        focus_edges++; break;
+                case WM_EV_UNFOCUS:      focus_edges++; break;
                 case WM_EV_MOUSE_MOVE:
                     mx = ev.x; my = ev.y; move_count++;
                     break;

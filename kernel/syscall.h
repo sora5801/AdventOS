@@ -392,9 +392,15 @@ struct sys_wm_msg {
 #define WM_EV_MOUSE_PRESS     2u
 #define WM_EV_MOUSE_RELEASE   3u
 #define WM_EV_KEY             4u
+/* Session 117 — FOCUS / UNFOCUS are now click-driven: they fire
+ * when the window becomes (or stops being) the click-focused window
+ * — the one that receives keyboard input.  Hover crossing events
+ * use the new HOVER_ENTER / HOVER_LEAVE types below. */
 #define WM_EV_FOCUS           5u
 #define WM_EV_UNFOCUS         6u
 #define WM_EV_CLOSE           7u
+#define WM_EV_HOVER_ENTER     8u
+#define WM_EV_HOVER_LEAVE     9u
 
 #define WM_BUTTON_LEFT        0x01u
 #define WM_BUTTON_RIGHT       0x02u

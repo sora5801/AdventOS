@@ -30,3 +30,15 @@ qe.out
 # Editor + OS junk
 *.swp
 .DS_Store
+
+# Claude Code session metadata.  The .claude/ subtree contains parallel
+# worktrees used by other concurrent sessions (paths B + D), not part
+# of this repo.
+.claude/
+
+# Stray log files written by manual debugging.
+nc-out.log
+qe.log
+qemu.log
+serial.log
+s*.log
