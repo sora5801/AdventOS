@@ -25,13 +25,20 @@
 #include "../include/types.h"
 
 struct gfx_ctx {
-    volatile unsigned char *fb;     /* user-mapped framebuffer base */
-    unsigned int  user_va;          /* where it was mapped */
+    /* All drawing primitives write to ->fb. In single-buffered mode
+     * (gfx_init) that's the mapped framebuffer itself; in double-
+     * buffered mode (gfx_init_db) it's a malloc'd backbuffer and the
+     * real fb is reachable via ->fb_real. gfx_present() blits the
+     * backbuffer to ->fb_real (no-op in single-buffered mode). */
+    volatile unsigned char *fb;       /* drawing target */
+    volatile unsigned char *fb_real;  /* the mapped framebuffer */
+    unsigned char          *back;     /* malloc'd backbuffer (NULL = single-buf) */
+    unsigned int  user_va;            /* where the FB is mapped */
     unsigned int  width;
     unsigned int  height;
-    unsigned int  pitch;            /* bytes per scanline */
-    unsigned int  bpp;              /* 16, 24, or 32 */
-    unsigned int  fb_size;          /* pitch * height */
+    unsigned int  pitch;              /* bytes per scanline */
+    unsigned int  bpp;                /* 16, 24, or 32 */
+    unsigned int  fb_size;            /* pitch * height */
 };
 
 /* Common 24-bit color names. Match kernel/fbcon.h's FBC_* constants. */
@@ -51,8 +58,19 @@ struct gfx_ctx {
  * the FB is unavailable or another task already owns it. */
 int  gfx_init    (struct gfx_ctx *ctx, unsigned int user_va);
 
+/* Session 110 — double-buffered init. Allocates a malloc'd back-
+ * buffer of fb_size bytes; all primitives draw to it. Call
+ * gfx_present() to push it to the screen. Use this for animation
+ * to avoid tearing. Returns 0 / -1. */
+int  gfx_init_db (struct gfx_ctx *ctx, unsigned int user_va);
+
+/* Copy the backbuffer to the real framebuffer. No-op for single-
+ * buffered contexts. Constant time (one memcpy of fb_size bytes). */
+void gfx_present (struct gfx_ctx *ctx);
+
 /* Release the FB so fbcon (or another task) can take over.
- * Auto-called at process exit by the kernel as well. */
+ * Auto-called at process exit by the kernel as well. Also frees
+ * the backbuffer if double-buffered. */
 void gfx_release (struct gfx_ctx *ctx);
 
 /* Pack a 0xRRGGBB into the kernel's pixel format for this ctx's bpp.

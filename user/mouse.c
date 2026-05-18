@@ -35,39 +35,30 @@ int main(int argc, char **argv) {
     if (seconds <= 0) seconds = 8;
 
     struct gfx_ctx ctx;
-    if (gfx_init(&ctx, FB_VA) < 0) {
+    /* Session 110 — use double-buffered mode. Each frame: clear back,
+     * draw everything, gfx_present. No more per-frame erase-then-draw
+     * — tearing is gone because the present is a single blit. */
+    if (gfx_init_db(&ctx, FB_VA) < 0) {
         printf("mouse: framebuffer unavailable or already owned\n");
         return 1;
     }
 
-    /* Static backdrop. */
-    gfx_clear(&ctx, GFX_DARK_GREY);
-    gfx_text(&ctx, 8, 8, "AdventOS Path C - session 109 mouse demo",
-             GFX_WHITE, GFX_TRANSPARENT);
-    gfx_text(&ctx, 8, 24, "move the mouse; left/right/middle clicks light up",
-             GFX_GREY, GFX_TRANSPARENT);
-    /* Decorative frame near the screen edges. */
-    gfx_rect(&ctx, 4, 4, (int)ctx.width - 8, (int)ctx.height - 8, GFX_GREEN);
-
-    /* HUD area in the bottom strip. */
     int hud_y = (int)ctx.height - 32;
-    gfx_fill_rect(&ctx, 4, hud_y, (int)ctx.width - 8, 28, GFX_BLACK);
-
-    /* Approx 60 fps polling loop. */
     int total_ticks = seconds * 60;
-    int prev_x = -1, prev_y = -1;
     for (int tick = 0; tick < total_ticks; tick++) {
         struct sys_mouse_state ms;
         if (sys_mouse_poll(&ms) < 0) break;
 
-        /* Erase old cursor by repainting the local backdrop under
-         * its bounding box. Coarse — just a small dark-grey square. */
-        if (prev_x >= 0) {
-            gfx_fill_rect(&ctx, prev_x - CURSOR_R - 1,
-                                prev_y - CURSOR_R - 1,
-                                2 * CURSOR_R + 3,
-                                2 * CURSOR_R + 3, GFX_DARK_GREY);
-        }
+        /* Repaint the whole frame each tick — the backbuffer makes
+         * it cheap and the present is atomic from the viewer's
+         * perspective. */
+        gfx_clear(&ctx, GFX_DARK_GREY);
+        gfx_text(&ctx, 8, 8, "AdventOS Path C - sessions 109+110",
+                 GFX_WHITE, GFX_TRANSPARENT);
+        gfx_text(&ctx, 8, 24,
+                 "move the mouse; double-buffered: no tearing now",
+                 GFX_GREY, GFX_TRANSPARENT);
+        gfx_rect(&ctx, 4, 4, (int)ctx.width - 8, (int)ctx.height - 8, GFX_GREEN);
 
         unsigned int color = GFX_WHITE;
         if (ms.buttons & 0x01) color = GFX_RED;
@@ -75,13 +66,12 @@ int main(int argc, char **argv) {
         else if (ms.buttons & 0x04) color = GFX_YELLOW;
         draw_cursor(&ctx, ms.x, ms.y, color);
 
-        /* HUD: clear + redraw text. */
+        /* HUD strip. */
         gfx_fill_rect(&ctx, 4, hud_y, (int)ctx.width - 8, 28, GFX_BLACK);
         char buf[80];
         int n = 0;
         const char *p = "x=";
         while (*p && n < (int)sizeof(buf) - 1) buf[n++] = *p++;
-        /* itoa-ish for ms.x */
         { char t[12]; int tn = 0; int v = ms.x; int neg = v < 0;
           if (neg) v = -v;
           if (v == 0) t[tn++] = '0';
@@ -104,10 +94,9 @@ int main(int argc, char **argv) {
         buf[n] = 0;
         gfx_text(&ctx, 12, hud_y + 10, buf, GFX_GREEN, GFX_BLACK);
 
-        prev_x = ms.x;
-        prev_y = ms.y;
-
-        sys_sleep_ms(16);    /* ~60 fps */
+        /* Push the backbuffer to the real FB in one go. */
+        gfx_present(&ctx);
+        sys_sleep_ms(16);
     }
 
     gfx_release(&ctx);
