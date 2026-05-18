@@ -40,6 +40,11 @@
 #define TASKBAR_H  28
 #define TASKBAR_BTN_W  140
 #define TASKBAR_BTN_PAD  4
+/* Session 119 — Start button on the left edge of the taskbar
+ * plus the launcher popup that opens above it. */
+#define START_BTN_W  64
+#define LAUNCH_ITEM_H 22
+#define LAUNCH_W    160
 
 #define KIND_CLOCK   0
 #define KIND_GRADIENT 1
@@ -69,6 +74,21 @@ static int g_window_count;
 static int g_z_counter = 1;
 
 /* Drag state. window_idx == -1 means no drag. */
+/* Session 119 — app launcher catalog.  Keep paths in lockstep with
+ * mkfs.py's `files` table. */
+struct launch_entry {
+    const char *label;
+    const char *path;
+};
+static const struct launch_entry g_launch_items[] = {
+    { "wmhello", "/wmhello.elf" },
+    { "wmtype",  "/wmtype.elf"  },
+    { "wmclock", "/wmclock.elf" },
+    { "wmpaint", "/wmpaint.elf" },
+};
+#define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
+static int g_launcher_open;
+
 static int g_drag_idx = -1;
 static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
@@ -260,11 +280,11 @@ static int hit_test(int px, int py) {
 
 /* Session 118 — taskbar.  Iterate the CLIENT windows in
  * registration order (i.e. the order they appear in g_windows[]),
- * give each one a fixed-width button.  `out_idx` is filled with
- * the g_windows[] index of the clicked button on a hit, else -1. */
+ * give each one a fixed-width button.  Session 119 — the first
+ * START_BTN_W pixels are reserved for the Start button. */
 static int taskbar_hit(int fb_w, int fb_h, int px, int py) {
     if (py < fb_h - TASKBAR_H || py >= fb_h) return -1;
-    int x = TASKBAR_BTN_PAD;
+    int x = START_BTN_W + TASKBAR_BTN_PAD;
     for (int i = 0; i < g_window_count; i++) {
         if (g_windows[i].kind != KIND_CLIENT) continue;
         int x2 = x + TASKBAR_BTN_W;
@@ -275,6 +295,26 @@ static int taskbar_hit(int fb_w, int fb_h, int px, int py) {
     return -1;
 }
 
+/* Session 119 — was the click in the Start button at the very
+ * left of the taskbar? */
+static int start_button_hit(int fb_w, int fb_h, int px, int py) {
+    (void)fb_w;
+    if (py < fb_h - TASKBAR_H + 4 || py >= fb_h - 4) return 0;
+    if (px < 4 || px >= START_BTN_W - 4) return 0;
+    return 1;
+}
+
+/* Session 119 — when the launcher is open, was the click on one
+ * of its items?  Returns the item index (0..N) or -1. */
+static int launcher_hit(int fb_h, int px, int py) {
+    if (!g_launcher_open) return -1;
+    int ly = fb_h - TASKBAR_H - N_LAUNCH_ITEMS * LAUNCH_ITEM_H - 4;
+    int lx = 4;
+    if (px < lx || px >= lx + LAUNCH_W) return -1;
+    if (py < ly || py >= ly + N_LAUNCH_ITEMS * LAUNCH_ITEM_H) return -1;
+    return (py - ly) / LAUNCH_ITEM_H;
+}
+
 static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     int fb_w = (int)ctx->width;
     int fb_h = (int)ctx->height;
@@ -283,8 +323,17 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     gfx_fill_rect(ctx, 0, y, fb_w, TASKBAR_H, 0x182030u);
     gfx_line(ctx, 0, y, fb_w - 1, y, GFX_GREY);
 
-    /* Per-window button. */
-    int bx = TASKBAR_BTN_PAD;
+    /* Session 119 — Start button on the very left. */
+    int sby = y + 4;
+    int sbh = TASKBAR_H - 8;
+    unsigned int sfill = g_launcher_open ? GFX_GREEN : 0x205030u;
+    gfx_fill_rect(ctx, 4, sby, START_BTN_W - 8, sbh, sfill);
+    gfx_rect(ctx, 4, sby, START_BTN_W - 8, sbh, GFX_WHITE);
+    gfx_text(ctx, 4 + 6, sby + 5, "Start",
+             GFX_WHITE, GFX_TRANSPARENT);
+
+    /* Per-window button.  Starts after the Start button. */
+    int bx = START_BTN_W + TASKBAR_BTN_PAD;
     int by = y + 4;
     int bh = TASKBAR_H - 8;
     for (int i = 0; i < g_window_count; i++) {
@@ -300,6 +349,29 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
                  GFX_WHITE, GFX_TRANSPARENT);
         bx += TASKBAR_BTN_W + TASKBAR_BTN_PAD;
         if (bx > fb_w - TASKBAR_BTN_W) break;
+    }
+}
+
+/* Session 119 — popup over the Start button when the launcher is
+ * open.  Drawn AFTER paint_taskbar so it sits on top. */
+static void paint_launcher(struct gfx_ctx *ctx) {
+    if (!g_launcher_open) return;
+    int fb_h = (int)ctx->height;
+    int ly = fb_h - TASKBAR_H - N_LAUNCH_ITEMS * LAUNCH_ITEM_H - 4;
+    int lx = 4;
+    int lh = N_LAUNCH_ITEMS * LAUNCH_ITEM_H;
+    /* Drop shadow. */
+    gfx_fill_rect(ctx, lx + 2, ly + lh, LAUNCH_W, 2, GFX_BLACK);
+    gfx_fill_rect(ctx, lx + LAUNCH_W, ly + 2, 2, lh, GFX_BLACK);
+    /* Body. */
+    gfx_fill_rect(ctx, lx, ly, LAUNCH_W, lh, 0x202830u);
+    gfx_rect    (ctx, lx, ly, LAUNCH_W, lh, GFX_WHITE);
+    for (int i = 0; i < N_LAUNCH_ITEMS; i++) {
+        int iy = ly + i * LAUNCH_ITEM_H;
+        if (i > 0) gfx_line(ctx, lx + 1, iy, lx + LAUNCH_W - 2, iy,
+                            0x404850u);
+        gfx_text(ctx, lx + 10, iy + 7, g_launch_items[i].label,
+                 GFX_WHITE, GFX_TRANSPARENT);
     }
 }
 
@@ -459,6 +531,28 @@ int main(int argc, char **argv) {
         int released = !left && g_prev_left;
 
         if (pressed) {
+            /* Session 119 — launcher popup intercept.  If the popup
+             * is open and the click landed on an item, fork+exec
+             * the chosen program.  If the click is anywhere else,
+             * close the popup. */
+            if (g_launcher_open) {
+                int li = launcher_hit((int)ctx.height, ms.x, ms.y);
+                if (li >= 0) {
+                    int pid = sys_fork();
+                    if (pid == 0) {
+                        const char *argv[2] = { g_launch_items[li].path, 0 };
+                        sys_exec(g_launch_items[li].path, argv);
+                        sys_exit(127);   /* exec failed */
+                    }
+                }
+                g_launcher_open = 0;
+                goto after_press_hit;
+            }
+            if (start_button_hit((int)ctx.width, (int)ctx.height,
+                                 ms.x, ms.y)) {
+                g_launcher_open = 1;
+                goto after_press_hit;
+            }
             /* Session 118 — taskbar buttons live below all
              * windows in z order.  Check them BEFORE the normal
              * hit_test so a button click always raises the right
@@ -662,6 +756,9 @@ int main(int argc, char **argv) {
          * taskbar region during drag; that's a UI smell but the
          * taskbar gets the last word on its strip. */
         paint_taskbar(&ctx, focused);
+        /* Session 119 — launcher popup is drawn on top of the
+         * taskbar when open. */
+        paint_launcher(&ctx);
 
         /* Cursor: red if dragging, otherwise white. */
         unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;
