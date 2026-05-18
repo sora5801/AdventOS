@@ -1,0 +1,39 @@
+NAME
+    wmd - window manager daemon (Path C phase 5)
+
+SYNOPSIS
+    wmd [SECONDS]
+
+DESCRIPTION
+    Take over the framebuffer and run a compositor for SECONDS
+    (default 30, then release).  Paints a desktop background, a
+    top status bar, and four demo windows: a clock, an RGB
+    gradient, an "About" panel, and a color-bars test card.
+
+    Mouse interaction:
+      hover         (no-op; cursor follows mouse)
+      L click       raise the window under the cursor; if click
+                    landed in the title bar, begin dragging
+      L drag        move the dragged window with the cursor
+      L release     stop dragging
+
+    Cursor color encodes state:
+      white         normal
+      yellow        L pressed on desktop background
+      red           L pressed in a window title bar (dragging)
+
+    Top status bar shows "wmd - AdventOS Path C session 111".
+
+    Compositor model is back-to-front blit at ~60 fps with libgfx
+    double-buffering, so the present is atomic (no tearing).
+
+LIMITATIONS
+    No client protocol yet — all four windows are painted by wmd
+    itself from its own pixel state.  Session 112 adds an IPC
+    surface for real clients.
+
+    The mouse driver only works if wmd is the FB owner.  Run
+    `gfx` or `mouse` after wmd exits, not concurrently.
+
+SEE ALSO
+    mouse(1), gfx(1)

@@ -166,7 +166,7 @@ USER_PROGS=(hello sh echo httpd ed init
             cc)
 # Session 108+: graphics programs link in libgfx on top of libuser.
 # Same separate-list pattern as the JSON / agent / crypto buckets.
-GFX_PROGS=(gfx mouse)
+GFX_PROGS=(gfx mouse wmd)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.
