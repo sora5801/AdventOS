@@ -125,8 +125,12 @@ static void kbd_irq(struct registers *r) {
      * latches the last byte even after OBF clears) and double-push.
      * Checking OBF first makes whichever path got there first the
      * authoritative one; the other becomes a no-op. */
-    if (!(inb(KBD_STATUS) & 0x01)) return;
-    process_scancode(inb(KBD_DATA_PORT));
+    uint8_t st = inb(KBD_STATUS);
+    if (!(st & 0x01)) return;
+    uint8_t b = inb(KBD_DATA_PORT);
+    /* Session 109 — route AUX (mouse) bytes to the mouse driver. */
+    if (st & 0x20) { extern void mouse_process_byte(uint8_t); mouse_process_byte(b); }
+    else            process_scancode(b);
 }
 
 /* Drain everything currently in the i8042 output buffer. Safe to call
@@ -135,10 +139,18 @@ static void kbd_irq(struct registers *r) {
  * PS/2 IRQs don't fire under our QEMU 10.x + i440fx setup. The OBF
  * flag is bit 0 of the status port (0x64); we use the literal here
  * so this function is independent of KBD_STATUS_OBF which is defined
- * further down in this file. */
+ * further down in this file.
+ *
+ * Session 109 — for each byte, check status bit 5 (AUX) and route
+ * mouse bytes to mouse_process_byte instead of feeding them into the
+ * scancode decoder. */
 void keyboard_poll_once(void) {
-    while (inb(KBD_STATUS) & 0x01) {
-        process_scancode(inb(KBD_DATA_PORT));
+    extern void mouse_process_byte(uint8_t);
+    uint8_t st;
+    while ((st = inb(KBD_STATUS)) & 0x01) {
+        uint8_t b = inb(KBD_DATA_PORT);
+        if (st & 0x20) mouse_process_byte(b);
+        else            process_scancode(b);
     }
 }
 

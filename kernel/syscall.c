@@ -828,6 +828,23 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
+        case SYS_MOUSE_POLL: {
+            /* Session 109 — Path C: snapshot the accumulated mouse
+             * state. Drain the i8042 first so the snapshot is fresh
+             * even if no other path has been polling. */
+            extern void keyboard_poll_once(void);
+            extern void mouse_get_state(int *, int *, int *);
+            keyboard_poll_once();
+            struct sys_mouse_state *out = (struct sys_mouse_state *)(uintptr_t)a;
+            if (!out) { ret = -1; break; }
+            int x, y, btns;
+            mouse_get_state(&x, &y, &btns);
+            out->x       = x;
+            out->y       = y;
+            out->buttons = (uint32_t)btns;
+            ret = 0;
+            break;
+        }
         case SYS_KBD_POLL: {
             /* Non-blocking keyboard read. Returns the next byte from
              * the input ring, or 0 if empty. Bypasses the cooked/raw

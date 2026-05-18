@@ -421,6 +421,16 @@ int sys_fb_unmap(void) {
     return ret;
 }
 
+/* Session 109 — Path C mouse poll. */
+int sys_mouse_poll(struct sys_mouse_state *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_MOUSE_POLL), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

@@ -1,0 +1,34 @@
+NAME
+    mouse - PS/2 mouse demo (Path C phase 3)
+
+SYNOPSIS
+    mouse [SECONDS]
+
+DESCRIPTION
+    Takes over the framebuffer, then in a 60 fps loop polls the
+    kernel's PS/2 mouse driver via SYS_MOUSE_POLL (89) and redraws a
+    crosshair cursor at the current absolute position. A HUD strip at
+    the bottom shows x / y / button state in real time. Runs for
+    SECONDS (default 8), then releases the framebuffer.
+
+    Cursor color encodes button state:
+      no buttons → white
+      left  held → red
+      right held → blue
+      middle held → yellow
+
+KERNEL DRIVER
+    The PS/2 mouse is driven by kernel/mouse.c. Bytes arrive on the
+    i8042 data port (0x60) interleaved with keyboard scancodes; the
+    keyboard polling path inspects i8042 status bit 5 (AUX) before
+    each read and routes mouse bytes to mouse_process_byte() instead
+    of into the scancode decoder. Three-byte packets are reassembled
+    and the running (x, y, buttons) state is clamped to the VBE
+    framebuffer dimensions.
+
+EXIT STATUS
+    0   framebuffer was painted and released
+    1   framebuffer unavailable or already owned by another task
+
+SEE ALSO
+    gfx(1)

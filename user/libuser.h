@@ -121,6 +121,7 @@ typedef unsigned int   size_t;
 #define SYS_RMDIR          86    /* session 83: remove empty dir */
 #define SYS_TTY_GET_CURSOR 87    /* session 84: read cursor (row,col) */
 #define SYS_FB_UNMAP       88    /* session 107: release FB ownership */
+#define SYS_MOUSE_POLL     89    /* session 109: read mouse state */
 
 /* Session 70: syscall sandbox.
  *
@@ -431,6 +432,20 @@ struct sys_fb_info {
 int      sys_fb_info     (struct sys_fb_info *out);
 int      sys_fb_map      (unsigned int user_va);
 int      sys_fb_unmap    (void);
+
+/* Session 109 — Path C: PS/2 mouse poll.
+ *   sys_mouse_poll(out)  : read current absolute cursor position
+ *                          (x, y clamped to fb size) and button mask
+ *                          (bit 0 = left, bit 1 = right, bit 2 = mid).
+ *                          Returns 0 / -1.
+ * Driver polls the i8042 lazily on each call, so call this at least
+ * 30-60 times per second for responsive cursor tracking. */
+struct sys_mouse_state {
+    int          x;
+    int          y;
+    unsigned int buttons;
+};
+int      sys_mouse_poll  (struct sys_mouse_state *out);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

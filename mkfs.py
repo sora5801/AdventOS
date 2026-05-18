@@ -99,6 +99,8 @@ USER_PROGRAMS = [
     ('cc.elf',    'user/_obj/cc.bin',    None),
     # Session 107: path-C phase 1 — userspace framebuffer demo.
     ('gfx.elf',   'user/_obj/gfx.bin',   None),
+    # Session 109: path-C phase 3 — PS/2 mouse demo.
+    ('mouse.elf', 'user/_obj/mouse.bin', None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -238,6 +240,7 @@ DATA_FILES = [
     ('lua',   'fs/man/lua',   'man'),     # session 87
     ('cc',    'fs/man/cc',    'man'),     # session 90
     ('gfx',   'fs/man/gfx',   'man'),     # session 107
+    ('mouse', 'fs/man/mouse', 'man'),     # session 109
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were

@@ -288,6 +288,12 @@ struct sys_limits {
                                 * so fbcon can resume painting).
                                 * Auto-called on task exit. */
 
+#define SYS_MOUSE_POLL    89   /* (eax=89, ebx=struct sys_mouse_state *)
+                                * Reads the current accumulated mouse
+                                * state. Returns 0 on success, -1 if
+                                * the mouse driver isn't ready.
+                                * Session 109. */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */
@@ -295,6 +301,12 @@ struct sys_fb_info {
     uint32_t  pitch;         /* bytes per scanline */
     uint32_t  bpp;           /* 16, 24, or 32 */
     uint32_t  fb_size;       /* total bytes (pitch * height) */
+};
+
+struct sys_mouse_state {
+    int32_t   x;             /* absolute X within FB, clamped */
+    int32_t   y;             /* absolute Y within FB, clamped */
+    uint32_t  buttons;       /* bit 0 = left, bit 1 = right, bit 2 = middle */
 };
 
 

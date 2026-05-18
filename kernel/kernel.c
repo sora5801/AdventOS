@@ -124,6 +124,14 @@ void kmain(uint32_t boot_drive) {
     keyboard_init();
     kputs("ok\n");
 
+    /* Session 109 — Path C: PS/2 mouse. Mouse bytes arrive on the
+     * same i8042 data port as keyboard; the keyboard's drain loops
+     * route AUX bytes here via mouse_process_byte. */
+    kputs("[boot] starting mouse... ");
+    extern void mouse_init(void);
+    mouse_init();
+    kputs("ok\n");
+
     kputs("[boot] enabling serial RX IRQ... ");
     serial_install_irq();
     kputs("ok\n");
