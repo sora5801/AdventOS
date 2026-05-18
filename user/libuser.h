@@ -138,6 +138,7 @@ typedef unsigned int   size_t;
 #define SYS_VIRTIO_CONSOLE_WRITE  97
 #define SYS_VIRTIO_CONSOLE_READ   98
 #define SYS_VIRTIO_BALLOON_STATS  99
+#define SYS_RENAME                100
 
 /* Session 70: syscall sandbox.
  *
@@ -369,6 +370,12 @@ int      sys_getrandom        (void *buf, int n);
 int      sys_virtio_console_write(const void *buf, int n);
 int      sys_virtio_console_read (void *buf, int n);
 int      sys_virtio_balloon_stats(unsigned int out[4]);
+
+/* Atomic rename via the kernel. Only works for paths both living
+ * under a filesystem that supports it (currently just /mnt/9p ↔
+ * /mnt/9p). Returns -1 otherwise; userspace tools should fall back
+ * to the copy+unlink path. */
+int      sys_rename (const char *oldp, const char *newp);
 
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns

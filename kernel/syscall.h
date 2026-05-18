@@ -348,6 +348,13 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
+#define SYS_RENAME      100 /* (eax=100, ebx=old_path, ecx=new_path) ->
+                             * 0 / -1.  For paths under /mnt/9p the
+                             * driver issues an atomic 9P Trenameat;
+                             * for AdventFS paths the kernel does NOT
+                             * implement rename (caller falls back to
+                             * the userspace copy+unlink in mv.c). */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

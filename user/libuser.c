@@ -268,6 +268,15 @@ int sys_virtio_console_read(void *buf, int n) {
     return ret;
 }
 
+int sys_rename(const char *oldp, const char *newp) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_RENAME), "b"(oldp), "c"(newp)
+                      : "memory");
+    return ret;
+}
+
 int sys_virtio_balloon_stats(unsigned int out[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

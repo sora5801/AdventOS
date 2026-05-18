@@ -58,6 +58,8 @@
 #define P9_Rreaddir      41
 #define P9_Tmkdir        72
 #define P9_Rmkdir        73
+#define P9_Trenameat     74
+#define P9_Rrenameat     75
 #define P9_Tunlinkat     76
 #define P9_Runlinkat     77
 #define P9_Tversion      100
@@ -567,6 +569,27 @@ static int p9_unlinkat(struct v9p *v, uint32_t dfid, const char *name,
     return 0;
 }
 
+/* Trenameat — atomic rename of `oldname` under `olddir_fid` to
+ * `newname` under `newdir_fid`. Both fids must already refer to
+ * directories. The fids themselves are NOT consumed by this
+ * operation. */
+static int p9_renameat(struct v9p *v,
+                       uint32_t olddir_fid, const char *oldname,
+                       uint32_t newdir_fid, const char *newname)
+{
+    struct p9w w = { v->tbuf, 0, P9_MSIZE };
+    int s = hdr_begin(&w, P9_Trenameat, 0);
+    w_u32(&w, olddir_fid);
+    w_str(&w, oldname);
+    w_u32(&w, newdir_fid);
+    w_str(&w, newname);
+    hdr_finalize(&w, s);
+
+    int rl = p9_round_trip(v, w.o);
+    if (rl < 0 || p9_check_error(v, rl, "Trenameat") != 0) return -1;
+    return 0;
+}
+
 /* ---- VFS adapter ------------------------------------------------ */
 
 /* Path-walked-and-opened state we hand back through vfs_inode. Since
@@ -862,6 +885,43 @@ int virtio_9p_unlink_path(const char *rel_path, int is_dir) {
 done:
     p9_clunk(v, dfid);
     p9_free_fid(v, dfid);
+    spin_unlock(&v->lock);
+    return rc;
+}
+
+/* Rename `old_rel` -> `new_rel`, both relative to the 9p mount point.
+ * Implemented via 9P Trenameat: walks olddir + newdir fids, issues
+ * one atomic Trenameat call, clunks both. Returns 0 / -1. */
+int virtio_9p_rename_path(const char *old_rel, const char *new_rel) {
+    struct v9p *v = &g_v9p;
+    if (!v->in_use) return -1;
+
+    char old_parent[V9P_PATH_MAX], old_base[64];
+    char new_parent[V9P_PATH_MAX], new_base[64];
+    if (split_parent_basename(old_rel, old_parent, sizeof(old_parent),
+                              old_base, sizeof(old_base)) != 0) return -1;
+    if (split_parent_basename(new_rel, new_parent, sizeof(new_parent),
+                              new_base, sizeof(new_base)) != 0) return -1;
+
+    spin_lock(&v->lock);
+    uint32_t old_fid, new_fid;
+    if (p9_alloc_fid(v, &old_fid) != 0) {
+        spin_unlock(&v->lock); return -1;
+    }
+    if (p9_alloc_fid(v, &new_fid) != 0) {
+        p9_free_fid(v, old_fid); spin_unlock(&v->lock); return -1;
+    }
+    int rc = -1;
+    int is_dir;
+    if (p9_walk(v, v->root_fid, old_parent, old_fid, &is_dir) != 0) goto done;
+    if (p9_walk(v, v->root_fid, new_parent, new_fid, &is_dir) != 0) goto done;
+    if (p9_renameat(v, old_fid, old_base, new_fid, new_base) != 0)  goto done;
+    rc = 0;
+done:
+    p9_clunk(v, old_fid);
+    p9_clunk(v, new_fid);
+    p9_free_fid(v, old_fid);
+    p9_free_fid(v, new_fid);
     spin_unlock(&v->lock);
     return rc;
 }

@@ -48,4 +48,8 @@ void virtio_9p_fd_close(int inode_slot);
  * and SYS_RMDIR when the path lives under the 9p mount. */
 int  virtio_9p_unlink_path(const char *rel_path, int is_dir);
 
+/* Atomic rename via 9P Trenameat. Both paths are relative to the
+ * mount point. Returns 0 / -1. Called from SYS_RENAME. */
+int  virtio_9p_rename_path(const char *old_rel, const char *new_rel);
+
 #endif

@@ -24,7 +24,8 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
 | ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
-| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough) | ✅ |
+| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
+| e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
@@ -95,9 +96,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **121 — Path E phase 4: 9p writes + IRQ-driven virtio**. See [`docs/108-pathE-9p-write-and-irq.md`](docs/108-pathE-9p-write-and-irq.md). `/mnt/9p` is now fully read-write (Tlcreate / Twrite / Tmkdir / Tunlinkat). All six virtio drivers moved off `pit_sleep` polling onto PCI INTx via a shared-line dispatcher in `kernel/virtio.c` — RX latency drops from ~10ms to microseconds and the polling tasks are gone.
+Current session: **122 — Path E phase 5: e1000 NIC + 9p atomic rename**. See [`docs/109-pathE-e1000-and-rename.md`](docs/109-pathE-e1000-and-rename.md). New `kernel/e1000.{h,c}` driver for the Intel 82540EM/82574L gigabit Ethernet card — `-device e1000` in QEMU, or real-hardware boards. Plugs in as the third NIC backend after RTL8139 and virtio-net. Plus 9P Trenameat + `SYS_RENAME = 100` so `mv /mnt/9p/foo /mnt/9p/bar` is now one atomic kernel operation.
 
 Recent session deep dives:
+- [Session 122 — Path E phase 5: e1000 NIC + 9p atomic rename](docs/109-pathE-e1000-and-rename.md)
 - [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
 - [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
@@ -158,7 +160,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–121 covered virtio-blk/net/rng/console/balloon/9p (read+write) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio. Still candidate: USB CDC-ECM, virtio-scsi, e1000 NIC, 9p rename, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–122 covered virtio-blk/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio + e1000 NIC. Still candidate: USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
 
 ## License
 
