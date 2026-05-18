@@ -3,9 +3,18 @@
 #include "spinlock.h"
 #include "string.h"
 
-/* Cover the entire 32-bit address space at 4 KiB granularity. */
-#define PMM_MAX_PAGES    (1u << 20)             /* 1 Mi pages = 4 GiB   */
-#define PMM_BITMAP_BYTES (PMM_MAX_PAGES / 8)    /* 128 KiB              */
+/* Cover up to 256 MiB of physical RAM at 4 KiB granularity. The
+ * kernel only needs to track actual RAM (E820 USABLE regions); MMIO
+ * holes like the VBE FB at 0xFC000000 are never tracked here.
+ *
+ * Previously this was sized for the full 4 GiB 32-bit address space
+ * (1M pages → 128 KiB bitmap). That ate 128 KiB of .bss for memory
+ * the kernel never actually allocates — and pushed kernel .bss past
+ * the VGA-RAM ceiling at 0xA0000 once enough drivers piled on.
+ * Capping at 256 MiB drops the bitmap to 8 KiB; we'd need to revisit
+ * if AdventOS ever expects to run with -m 256+. */
+#define PMM_MAX_PAGES    (1u << 16)             /* 64 Ki pages = 256 MiB */
+#define PMM_BITMAP_BYTES (PMM_MAX_PAGES / 8)    /* 8 KiB                 */
 
 static uint8_t   g_bitmap[PMM_BITMAP_BYTES];
 static uint32_t  g_total_pages;

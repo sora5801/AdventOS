@@ -51,6 +51,7 @@
 #define VIRTIO_LEGACY_BALLOON    0x1002
 #define VIRTIO_LEGACY_CONSOLE    0x1003
 #define VIRTIO_LEGACY_RNG        0x1005
+#define VIRTIO_LEGACY_9P         0x1009
 
 /* Legacy PCI I/O register offsets from BAR0. */
 #define VIRTIO_PCI_HOST_FEATURES   0x00

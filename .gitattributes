@@ -1,0 +1,14 @@
+# Force LF line endings for files that get executed by Linux/WSL
+# (shell scripts, Python, Makefile). Without this, git's autocrlf
+# converts to CRLF on Windows checkout and the kernel rejects the
+# shebang line with "set: pipefail: invalid option name".
+*.sh        text eol=lf
+*.py        text eol=lf
+Makefile    text eol=lf
+*.ld        text eol=lf
+
+# Source code: LF as well, for cross-platform sanity.
+*.c         text eol=lf
+*.h         text eol=lf
+*.S         text eol=lf
+*.md        text eol=lf

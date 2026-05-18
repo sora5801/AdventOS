@@ -53,6 +53,7 @@
 #include "virtio_rng.h"
 #include "virtio_console.h"
 #include "virtio_balloon.h"
+#include "virtio_9p.h"
 
 /* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
  * pinned to BSP. The BKL machinery + race-fixed task creation are
@@ -221,6 +222,11 @@ void kmain(uint32_t boot_drive) {
     kputs("[boot] probing virtio-balloon... ");
     virtio_balloon_init();
     kputs("done\n");
+    /* virtio-9p init does Tversion + Tattach right here; the mount
+     * into the VFS namespace is deferred to after vfs_init below. */
+    kputs("[boot] probing virtio-9p... ");
+    virtio_9p_init();
+    kputs("done\n");
 
     /* Block cache must be live BEFORE fs_init — fs.c reads its
      * superblock through bcache_read on the first call. */
@@ -252,6 +258,13 @@ void kmain(uint32_t boot_drive) {
     vfs_mkdir("/var");
     vfs_mkdir("/var/kv");
     vfs_mkdir("/var/cron");
+    /* virtio-9p auto-mount: if the device is present + ready, the
+     * host's exported directory shows up at /mnt/9p. Silent no-op
+     * otherwise (e.g. on Windows/MSYS2 QEMU which lacks 9p support). */
+    vfs_mkdir("/mnt");
+    if (virtio_9p_available()) {
+        virtio_9p_mount("/mnt/9p");
+    }
     kputs("ok\n");
 
     {

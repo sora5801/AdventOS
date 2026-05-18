@@ -24,7 +24,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
 | ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
-| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon | ✅ |
+| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
@@ -95,9 +95,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **128 — cc language corners (11 features in one branch)**. See [`docs/115-pathB-language-corners.md`](docs/115-pathB-language-corners.md) for the deep dive. Ships 11 small features in one commit each: comma operator, bitwise/shift compound assigns, `do-while`, `break`/`continue`, `union`, `sizeof NAME`, `goto`+labels, assignment-as-expression, `switch`/`case`/`default`, 2D arrays, and `static` locals. The smoke test ([`smoke_corners.py`](smoke_corners.py) + [`fs/corners.c`](fs/corners.c)) compiles a program exercising every feature and checks 22 output lines.
+Current session: **120 — Path E phase 3: WSL build + virtio-9p host filesystem**. See [`docs/107-pathE-9p.md`](docs/107-pathE-9p.md) for the deep dive. `build.sh` now auto-detects Linux vs MSYS2 and swaps `ld -m i386pe ↔ elf_i386` + `-fleading-underscore` appropriately, so the same source builds on WSL or Windows. With a WSL/Linux host, `-device virtio-9p-pci,fsdev=hostfs,mount_tag=...,disable-modern=on` exposes a host directory at `/mnt/9p` — `cat`, `ls`, and multi-level path resolution all work end-to-end over 9P2000.L.
 
 Recent session deep dives:
+- [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
 - [Session 121 — Path B Phase 4 capstone (SBV returns, static/extern, fp typedef)](docs/108-pathB-capstone.md)
@@ -156,7 +157,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–119 covered virtio-blk/net/rng/console/balloon + USB CDC-ACM + AC97 consumer. Still candidate: virtio-9p (needs a Linux QEMU host), USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–120 covered virtio-blk/net/rng/console/balloon/9p + USB CDC-ACM + AC97 consumer + WSL build path. Still candidate: 9p writes (Tlcreate/Twrite), IRQ-driven virtio completion, USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
 
 ## License
 

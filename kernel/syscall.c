@@ -91,6 +91,14 @@ static void release_fd(struct task_fd *e) {
         case FD_TMPFS:   tmpfs_close      (e->obj_idx); break;
         case FD_PTY_M:   pty_close_master (e->obj_idx); break;
         case FD_PTY_S:   pty_close_slave  (e->obj_idx); break;
+        case FD_9P: {
+            /* Release the per-fd 9p inode slot so future opens don't
+             * exhaust the pool.  9p fids themselves are short-lived
+             * (each read does walk + open + clunk inline). */
+            extern void virtio_9p_fd_close(int);
+            virtio_9p_fd_close(e->obj_idx);
+            break;
+        }
         default: break;     /* FD_FS / FD_STDIN / FD_STDOUT have no refcount */
     }
     e->kind    = FD_FREE;
@@ -441,6 +449,19 @@ void syscall_dispatch(struct registers *r) {
                     /* /proc files are synthesized fresh on every
                      * read. obj_idx packs (kind, pid). */
                     int rd = procfs_read_by_id(e->obj_idx, e->offset,
+                                               buf, (uint32_t)n);
+                    if (rd > 0) e->offset += (uint32_t)rd;
+                    ret = rd;
+                    break;
+                }
+                case FD_9P: {
+                    /* virtio-9p file. Each read translates to a 9P
+                     * Twalk + Tlopen + Tread + Tclunk round-trip, so
+                     * reads are O(round-trips-per-syscall) — fine for
+                     * small files, slow for big ones.  The path is
+                     * stored in g_inodes[obj_idx] in virtio_9p.c. */
+                    extern int virtio_9p_fd_read(int, uint32_t, void *, uint32_t);
+                    int rd = virtio_9p_fd_read(e->obj_idx, e->offset,
                                                buf, (uint32_t)n);
                     if (rd > 0) e->offset += (uint32_t)rd;
                     ret = rd;
