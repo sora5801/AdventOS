@@ -34,6 +34,12 @@
 #define MAX_WINDOWS 8
 #define TITLE_H    18
 #define CURSOR_R   8
+/* Session 118 — bottom taskbar height.  Reserved real-estate at
+ * y = ctx.height - TASKBAR_H .. ctx.height.  Buttons are uniform
+ * width within that strip. */
+#define TASKBAR_H  28
+#define TASKBAR_BTN_W  140
+#define TASKBAR_BTN_PAD  4
 
 #define KIND_CLOCK   0
 #define KIND_GRADIENT 1
@@ -252,6 +258,51 @@ static int hit_test(int px, int py) {
     return -1;
 }
 
+/* Session 118 — taskbar.  Iterate the CLIENT windows in
+ * registration order (i.e. the order they appear in g_windows[]),
+ * give each one a fixed-width button.  `out_idx` is filled with
+ * the g_windows[] index of the clicked button on a hit, else -1. */
+static int taskbar_hit(int fb_w, int fb_h, int px, int py) {
+    if (py < fb_h - TASKBAR_H || py >= fb_h) return -1;
+    int x = TASKBAR_BTN_PAD;
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_windows[i].kind != KIND_CLIENT) continue;
+        int x2 = x + TASKBAR_BTN_W;
+        if (px >= x && px < x2) return i;
+        x = x2 + TASKBAR_BTN_PAD;
+        if (x > fb_w - TASKBAR_BTN_W) break;
+    }
+    return -1;
+}
+
+static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+    int y    = fb_h - TASKBAR_H;
+    /* Bar background. */
+    gfx_fill_rect(ctx, 0, y, fb_w, TASKBAR_H, 0x182030u);
+    gfx_line(ctx, 0, y, fb_w - 1, y, GFX_GREY);
+
+    /* Per-window button. */
+    int bx = TASKBAR_BTN_PAD;
+    int by = y + 4;
+    int bh = TASKBAR_H - 8;
+    for (int i = 0; i < g_window_count; i++) {
+        struct window *w = &g_windows[i];
+        if (w->kind != KIND_CLIENT) continue;
+        int is_focused = (i == focused_idx);
+        unsigned int fill = is_focused ? w->frame_color : 0x303848u;
+        gfx_fill_rect(ctx, bx, by, TASKBAR_BTN_W, bh, fill);
+        gfx_rect(ctx, bx, by, TASKBAR_BTN_W, bh,
+                 is_focused ? GFX_WHITE : GFX_GREY);
+        /* Truncate title to fit (~16 chars at 8 px each). */
+        gfx_text(ctx, bx + 6, by + 5, w->title,
+                 GFX_WHITE, GFX_TRANSPARENT);
+        bx += TASKBAR_BTN_W + TASKBAR_BTN_PAD;
+        if (bx > fb_w - TASKBAR_BTN_W) break;
+    }
+}
+
 static int in_titlebar(struct window *w, int px, int py) {
     return px >= w->x && px < w->x + w->w &&
            py >= w->y && py < w->y + TITLE_H;
@@ -408,6 +459,19 @@ int main(int argc, char **argv) {
         int released = !left && g_prev_left;
 
         if (pressed) {
+            /* Session 118 — taskbar buttons live below all
+             * windows in z order.  Check them BEFORE the normal
+             * hit_test so a button click always raises the right
+             * window even if it's behind another one. */
+            int tb_hit = taskbar_hit((int)ctx.width, (int)ctx.height,
+                                     ms.x, ms.y);
+            if (tb_hit >= 0) {
+                g_z_counter++;
+                g_windows[tb_hit].raised = g_z_counter;
+                focused = tb_hit;
+                /* Don't trigger raise via hit_test below. */
+                goto after_press_hit;
+            }
             int hit = hit_test(ms.x, ms.y);
             if (hit >= 0) {
                 /* Session 116 — close-button intercept.  The
@@ -444,6 +508,7 @@ int main(int argc, char **argv) {
             } else {
                 focused = -1;
             }
+        after_press_hit:;
         }
         /* Session 117 — push FOCUS / UNFOCUS edges to client
          * windows when the *click-focused* window changes.  Use
@@ -591,6 +656,12 @@ int main(int argc, char **argv) {
             paint_window(&ctx, &g_windows[idx],
                          idx == focused, t_sec, (unsigned int)tick);
         }
+
+        /* Session 118 — taskbar painted on top of windows so it
+         * stays visible.  Window decorations can extend into the
+         * taskbar region during drag; that's a UI smell but the
+         * taskbar gets the last word on its strip. */
+        paint_taskbar(&ctx, focused);
 
         /* Cursor: red if dragging, otherwise white. */
         unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;
