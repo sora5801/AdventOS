@@ -105,8 +105,26 @@ def main():
             print("[!] capstone never finished; last 2KB of serial:")
             safe_print(buf[-2048:])
             return 1
+        # Measure cap.elf size to track codegen-quality regressions.
+        time.sleep(0.3)
+        size_buf = b""
+        ser.sendall(b"wc -c /cap.elf\n")
+        # Wait for `wc`'s output. The shell prompt after will be "advent$"
+        # which appears AFTER the wc output line. Allow some flexibility.
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                ser.settimeout(0.5)
+                chunk = ser.recv(4096)
+                if chunk:
+                    size_buf += chunk
+                else:
+                    break
+            except (socket.timeout, ConnectionResetError):
+                if b"advent$" in size_buf and b"cap.elf" in size_buf:
+                    break
 
-        out = buf.decode("ascii", errors="replace")
+        out = buf.decode("ascii", errors="replace") + size_buf.decode("ascii", errors="replace")
         print("\n=== capstone output ===")
         for line in out.splitlines():
             line = line.strip()
@@ -117,6 +135,18 @@ def main():
                          or line.startswith("squared")
                          or line.startswith("op=")):
                 print(f"  {line}")
+
+        # Extract cap.elf size from the `wc -c /cap.elf` output.
+        # wc.elf typically prints "<num> /cap.elf" or just "<num>".
+        import re
+        size_text = size_buf.decode("ascii", errors="replace")
+        m = re.search(r"\b(\d{3,})\b\s*/?cap\.elf", size_text)
+        if not m:
+            m = re.search(r"\n\s*(\d{3,})\b", size_text)
+        if m:
+            print(f"\n  cap.elf size = {m.group(1)} bytes")
+        else:
+            print("\n  (could not parse cap.elf size from wc output)")
 
         expectations = [
             "make_point(3,4) = (3, 4)",

@@ -2249,7 +2249,44 @@ static void patch_d(int off, unsigned int d) {
 /* Instruction primitives. Keep these named after what they do; the
  * compiler logic stays readable while the actual byte patterns are
  * documented here once. */
-static void e_push_eax(void)            { emit_b(0x50); }
+
+/* Session 122 — peephole pass (rolling).
+ *
+ * Returns 1 if any fixup table records an imm32 starting at code_off.
+ * Used by the rolling peephole to avoid rewriting a `mov eax, imm32`
+ * whose imm is actually a placeholder waiting to be patched (string
+ * address, global address, function VA). Forward-declared here so
+ * e_push_eax can call it; defined further down once the fixup tables
+ * exist. */
+static int has_imm_fixup_at(int code_off);
+
+static void e_push_eax(void) {
+    /* Rolling peephole: collapse `mov eax, imm32; push eax` (6 bytes)
+     * into a single `push imm8` (2 bytes) or `push imm32` (5 bytes).
+     * Common pattern from cdecl-style call-arg setup where each
+     * scalar arg is emitted as mov+push.
+     *
+     * Skipped if the previous mov's imm32 has a fixup attached — the
+     * imm bytes are placeholders for string/global/function VAs, not
+     * the actual value. */
+    if (g_code_len >= 5
+        && g_code[g_code_len - 5] == 0xb8
+        && !has_imm_fixup_at(g_code_len - 4)) {
+        int imm = (int)(
+              (unsigned)g_code[g_code_len - 4]
+           | ((unsigned)g_code[g_code_len - 3] <<  8)
+           | ((unsigned)g_code[g_code_len - 2] << 16)
+           | ((unsigned)g_code[g_code_len - 1] << 24));
+        g_code_len -= 5;
+        if (imm >= -128 && imm <= 127) {
+            emit_b(0x6a); emit_b((unsigned char)(imm & 0xff));
+        } else {
+            emit_b(0x68); emit_d((unsigned)imm);
+        }
+        return;
+    }
+    emit_b(0x50);
+}
 static void e_push_ebx(void)            { emit_b(0x53); }
 static void e_pop_eax(void)             { emit_b(0x58); }
 static void e_pop_ebx(void)             { emit_b(0x5b); }
@@ -2341,8 +2378,62 @@ static void e_lea_eax_ebp(int off_from_ebp) {
     }
 }
 
+/* Session 122 — EBX-targeted variants used by the smart-codegen
+ * register-allocator pass. They mirror the EAX-targeted ones above so
+ * a binop's RHS can be loaded directly into EBX without going through
+ * EAX (skipping push/pop on the common simple-RHS case). */
+
+/* mov ebx, [ebp + disp] */
+static void e_load_local_ebx(int off_from_ebp) {
+    if (off_from_ebp >= -128 && off_from_ebp <= 127) {
+        emit_b(0x8b); emit_b(0x5d); emit_b((unsigned char)(off_from_ebp & 0xff));
+    } else {
+        emit_b(0x8b); emit_b(0x9d); emit_d((unsigned)off_from_ebp);
+    }
+}
+
+/* lea ebx, [ebp + disp] */
+static void e_lea_ebx_ebp(int off_from_ebp) {
+    if (off_from_ebp >= -128 && off_from_ebp <= 127) {
+        emit_b(0x8d); emit_b(0x5d); emit_b((unsigned char)(off_from_ebp & 0xff));
+    } else {
+        emit_b(0x8d); emit_b(0x9d); emit_d((unsigned)off_from_ebp);
+    }
+}
+
+/* mov ebx, [imm32]   →  8b 1d imm32  (no special EBX-from-memoffs32 form;
+ * use modrm). Returns file offset of the imm32 for fixup-recording. */
+static int e_mov_ebx_at_abs(void) {
+    emit_b(0x8b); emit_b(0x1d);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+
+/* mov ebx, imm32 with offset returned for fixup. Used for &global and
+ * function-address loads into EBX. */
+static int e_mov_ebx_imm_for_fixup(void) {
+    emit_b(0xbb);
+    int off = g_code_len;
+    emit_d(0);
+    return off;
+}
+
 /* mov eax, [eax]  →  8b 00  (dword load through eax) */
 static void e_load_eax_at_eax(void) { emit_b(0x8b); emit_b(0x00); }
+
+/* Session 122 — mov eax, [eax + disp]. Used to collapse the
+ * "deref-with-offset" pattern (e.g. N_ARROW: `(*p).field` =
+ * `*(p + field_off)`) into a single addressed load. */
+static void e_load_eax_at_eax_disp(int disp) {
+    if (disp == 0) {
+        emit_b(0x8b); emit_b(0x00);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_b(0x8b); emit_b(0x40); emit_b((unsigned char)(disp & 0xff));
+    } else {
+        emit_b(0x8b); emit_b(0x80); emit_d((unsigned)disp);
+    }
+}
 
 /* movzx eax, byte [eax]  →  0f b6 00  (byte load, zero-extended) */
 static void e_loadb_eax_at_eax(void) { emit_b(0x0f); emit_b(0xb6); emit_b(0x00); }
@@ -2634,6 +2725,22 @@ static void record_addr_fixup(int imm_off, int func_idx) {
     g_addr_fixups[g_n_addr_fixups].imm_off  = imm_off;
     g_addr_fixups[g_n_addr_fixups].func_idx = func_idx;
     g_n_addr_fixups++;
+}
+
+/* Session 122 — implementation of the forward-declared peephole helper.
+ * Scans the three imm32-style fixup tables (string, global, addr-of-
+ * function) and returns 1 if any of them recorded the offset. The
+ * call-rel32 fixup table (g_fixups) records DISPLACEMENTS for
+ * `e8 disp32` / `0f 84 disp32`, never imm-loads — so it's not scanned
+ * here. */
+static int has_imm_fixup_at(int code_off) {
+    for (int i = 0; i < g_n_str_fixups; i++)
+        if (g_str_fixups[i].code_off == code_off) return 1;
+    for (int i = 0; i < g_n_glob_fixups; i++)
+        if (g_glob_fixups[i].code_off == code_off) return 1;
+    for (int i = 0; i < g_n_addr_fixups; i++)
+        if (g_addr_fixups[i].imm_off == code_off) return 1;
+    return 0;
 }
 
 static int local_find(const char *name) {
@@ -3147,6 +3254,178 @@ static int expr_ptr_elem_size(struct node *n) {
     return 0;
 }
 
+/* ---- Session 122 — constant folding ------------------------------- *
+ *
+ * Pre-codegen pass that walks the AST and replaces N_UN / N_BIN /
+ * N_TERNARY nodes whose operands are N_NUM (integer literals) with
+ * a single N_NUM holding the folded result. Eliminates compile-time
+ * arithmetic and gives the dead-code-elimination pass (#4) something
+ * to chew on: `if (CONST)` becomes `if (0)` or `if (N)`, and DCE
+ * strips the dead branch entirely.
+ *
+ * Walk is post-order: children fold first so their parents can see
+ * the literal values. Division by zero is left as-is (codegen will
+ * emit the divide and the program will trap at runtime — same
+ * semantics as before). Comparison operators fold to 0/1. */
+static void fold_node(struct node *n) {
+    if (!n) return;
+    /* Recurse first so children become literals before we look. */
+    fold_node(n->a);
+    fold_node(n->b);
+    fold_node(n->c);
+    fold_node(n->body);
+    for (int i = 0; i < n->n_list; i++)   fold_node(n->list[i]);
+    for (int i = 0; i < n->n_params; i++) fold_node(n->params[i]);
+
+    if (n->kind == N_UN && n->a && n->a->kind == N_NUM) {
+        int v = n->a->num, r;
+        switch (n->op) {
+            case T_MINUS: r = -v;     break;
+            case T_BANG:  r = !v;     break;
+            case T_TILDE: r = ~v;     break;
+            default: return;
+        }
+        n->kind = N_NUM;
+        n->num  = r;
+        n->a    = 0;
+        return;
+    }
+
+    if (n->kind == N_BIN
+        && n->a && n->a->kind == N_NUM
+        && n->b && n->b->kind == N_NUM)
+    {
+        int a = n->a->num, b = n->b->num, r;
+        switch (n->op) {
+            case T_PLUS:      r = a + b;  break;
+            case T_MINUS:     r = a - b;  break;
+            case T_STAR:      r = a * b;  break;
+            case T_SLASH:     if (b == 0) return; r = a / b;  break;
+            case T_PERCENT:   if (b == 0) return; r = a % b;  break;
+            case T_AMP:       r = a & b;  break;
+            case T_PIPE:      r = a | b;  break;
+            case T_CARET:     r = a ^ b;  break;
+            case T_LSHIFT:    r = a << b; break;
+            case T_RSHIFT:    r = a >> b; break;
+            case T_EQ:        r = (a == b); break;
+            case T_NEQ:       r = (a != b); break;
+            case T_LT:        r = (a <  b); break;
+            case T_GT:        r = (a >  b); break;
+            case T_LE:        r = (a <= b); break;
+            case T_GE:        r = (a >= b); break;
+            case T_AMP_AMP:   r = (a && b); break;
+            case T_PIPE_PIPE: r = (a || b); break;
+            default: return;
+        }
+        n->kind = N_NUM;
+        n->num  = r;
+        n->a    = 0;
+        n->b    = 0;
+        return;
+    }
+
+    /* Ternary `c ? t : e` with constant c — splice the chosen branch
+     * in place of the ternary node. Children have already been folded
+     * post-order so the splice doesn't re-fold them. */
+    if (n->kind == N_TERNARY && n->a && n->a->kind == N_NUM) {
+        struct node *chosen = n->a->num ? n->b : n->c;
+        if (chosen) *n = *chosen;   /* shallow copy — children stay shared */
+    }
+}
+
+/* ---- Session 122 — register-allocator helpers --------------------- *
+ *
+ * The default codegen evaluates every binop with a push/pop round-trip
+ * around EAX:
+ *
+ *     gen_expr(lhs)   ; eax = lhs
+ *     push eax
+ *     gen_expr(rhs)   ; eax = rhs (clobbers eax)
+ *     mov  ebx, eax   ; ebx = rhs
+ *     pop  eax        ; eax = lhs (restored)
+ *     <op>            ; eax = lhs op rhs
+ *
+ * For the *very* common case where one operand is "simple" — an
+ * N_NUM, N_STR, N_ADDR_OF, or N_NAME that loads from a fixed local
+ * /global slot — we can compute the simple side directly into EBX
+ * without touching EAX. That saves a push + pop (2 bytes) per binop,
+ * which compounds quickly. The same pattern shows up in N_INDEX,
+ * N_INDEX_ASSIGN, N_DEREF_ASSIGN, and N_INDEX_MEMBER_ASSIGN.
+ *
+ * `is_simple_load` says whether `gen_simple_into_ebx` can handle the
+ * node. The helper is intentionally narrow — it only fires on cases
+ * where we can guarantee EAX is preserved. Anything that *might*
+ * clobber EAX (calls, nested binops, derefs, indexing) falls back to
+ * the push/pop path. */
+static int is_simple_load(struct node *n) {
+    if (!n) return 0;
+    if (n->kind == N_NUM)     return 1;
+    if (n->kind == N_STR)     return 1;
+    if (n->kind == N_NAME)    return 1;
+    if (n->kind == N_ADDR_OF) return 1;
+    return 0;
+}
+
+/* Emit a load of `n` into EBX. Mirrors the EAX-targeted code paths
+ * in gen_expr's N_NUM / N_STR / N_NAME / N_ADDR_OF cases. Caller has
+ * checked is_simple_load(n). */
+static void gen_simple_into_ebx(struct node *n) {
+    if (n->kind == N_NUM) {
+        e_mov_ebx_imm(n->num);
+        return;
+    }
+    if (n->kind == N_STR) {
+        if (g_n_str_fixups >= MAX_STR_FIXUPS) die("too many string fixups");
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        g_str_fixups[g_n_str_fixups].code_off = imm_off;
+        g_str_fixups[g_n_str_fixups].str_idx  = n->num;
+        g_n_str_fixups++;
+        return;
+    }
+    if (n->kind == N_NAME) {
+        int off = local_find(n->name);
+        if (off != 0) {
+            int k = local_kind(n->name);
+            if (kind_is_array(k)) e_lea_ebx_ebp(off);
+            else                  e_load_local_ebx(off);
+            return;
+        }
+        int gi = global_find(n->name);
+        if (gi >= 0) {
+            if (kind_is_array(g_globals[gi].kind)) {
+                int imm_off = e_mov_ebx_imm_for_fixup();
+                record_glob_fixup(imm_off, gi);
+            } else {
+                int imm_off = e_mov_ebx_at_abs();
+                record_glob_fixup(imm_off, gi);
+            }
+            return;
+        }
+        /* Function name decays to its VA. */
+        int fi = func_find(n->name);
+        if (fi < 0) fi = func_intern(n->name, -1);
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        record_addr_fixup(imm_off, fi);
+        return;
+    }
+    if (n->kind == N_ADDR_OF) {
+        int off = local_find(n->name);
+        if (off != 0) { e_lea_ebx_ebp(off); return; }
+        int gi = global_find(n->name);
+        if (gi >= 0) {
+            int imm_off = e_mov_ebx_imm_for_fixup();
+            record_glob_fixup(imm_off, gi);
+            return;
+        }
+        int fi = func_find(n->name);
+        if (fi < 0) fi = func_intern(n->name, -1);
+        int imm_off = e_mov_ebx_imm_for_fixup();
+        record_addr_fixup(imm_off, fi);
+        return;
+    }
+    die_at(n->line, "gen_simple_into_ebx: not a simple node", 0);
+}
+
 static void gen_expr(struct node *n) {
     if (!n) { e_mov_eax_imm(0); return; }
     switch (n->kind) {
@@ -3293,26 +3572,46 @@ static void gen_expr(struct node *n) {
             if (fi < 0) die_at(n->line, "no such field", n->field_name);
             int field_off  = g_structs[sidx].fields[fi].offset;
             int field_kind = g_structs[sidx].fields[fi].kind;
-            /* Base address into eax. */
-            if (is_arrow) {
+            (void)field_kind;
+            /* Session 122 — collapse the base-address + field-offset +
+             * deref chain into a single addressed load where possible.
+             *
+             *   N_MEMBER local:   mov eax, [ebp + off + field_off]
+             *                     (was lea+add+load = 3+5+2 = 10 bytes;
+             *                      now 3-6 bytes depending on disp size)
+             *
+             *   N_ARROW local:    mov eax, [ebp + off]      (load ptr)
+             *                     mov eax, [eax + field_off] (deref+off)
+             *                     (was 3+5+2 = 10 bytes; now 3 + 2-6).
+             *
+             * Globals are similar but field_off is folded into the
+             * fixup target VA at patch time. */
+            if (!is_arrow) {
+                /* Member: address = base + field_off, then dereference. */
+                if (is_local) {
+                    /* mov eax, [ebp + off + field_off] — one instruction. */
+                    int total = off + field_off;
+                    e_load_local(total);
+                } else {
+                    /* Globals: load through [GLOBAL_VA + field_off].
+                     * Encode as mov eax, [imm32]; the fixup adds
+                     * `field_off` on top of the global's VA so the
+                     * final imm32 is GLOBAL_VA + field_off. */
+                    if (field_off == 0) {
+                        emit_load_global(gi);
+                    } else {
+                        emit_b(0xa1);
+                        int imm_off = g_code_len;
+                        emit_d((unsigned)field_off);  /* base is the field_off; fixup ADDS the VA */
+                        record_glob_fixup(imm_off, gi);
+                    }
+                }
+            } else {
+                /* Arrow: load pointer, then deref-with-offset. */
                 if (is_local) e_load_local(off);
                 else          emit_load_global(gi);
-            } else {
-                if (is_local) e_lea_eax_ebp(off);
-                else          emit_addrof_global(gi);
+                e_load_eax_at_eax_disp(field_off);
             }
-            /* Add field offset. */
-            if (field_off != 0) {
-                /* add eax, imm32  →  05 imm32  (special EAX form). */
-                emit_b(0x05); emit_d((unsigned)field_off);
-            }
-            /* Load width — char/byte vs dword. We currently store all
-             * fields at 4-byte slots, so all reads are dword unless the
-             * field is explicitly char-pointer-ish (which means the
-             * field VALUE is itself a pointer — still 4 bytes). Byte
-             * loads only matter for `char field;` someday — not in scope. */
-            (void)field_kind;
-            e_load_eax_at_eax();
             return;
         }
         case N_INDEX_MEMBER: {
@@ -3507,12 +3806,39 @@ static void gen_expr(struct node *n) {
             }
             /* Standard arithmetic / comparison: compute LHS in eax,
              * push; compute RHS in eax; pop LHS into ebx -> reorder
-             * so that the op operates on (eax = LHS, ebx = RHS). */
-            gen_expr(n->a);
-            e_push_eax();
-            gen_expr(n->b);
-            e_mov_ebx_eax();
-            e_pop_eax();
+             * so that the op operates on (eax = LHS, ebx = RHS).
+             *
+             * Session 122 — register-allocator fast paths:
+             *
+             *   (a) RHS is simple (NUM/STR/NAME/ADDR_OF): load directly
+             *       into EBX after computing LHS in EAX. Saves a
+             *       push+pop pair (2 bytes) per binop.
+             *   (b) LHS is simple AND RHS would otherwise need push/pop:
+             *       compute RHS first into EAX, move to EBX, then load
+             *       LHS into EAX. Saves the same 2 bytes.
+             *
+             * Both paths require neither side to clobber the other; the
+             * simple-load helpers guarantee they don't touch the
+             * non-target register, so the guarantee follows from
+             * is_simple_load. */
+            if (is_simple_load(n->b)) {
+                gen_expr(n->a);
+                gen_simple_into_ebx(n->b);
+            } else if (is_simple_load(n->a)) {
+                gen_expr(n->b);
+                e_mov_ebx_eax();
+                /* Load LHS into EAX without disturbing EBX. The
+                 * existing N_NUM/N_NAME/N_ADDR_OF/N_STR codegen for the
+                 * EAX side doesn't touch EBX — that's by inspection
+                 * of the N_NAME, N_NUM, N_STR, N_ADDR_OF cases above. */
+                gen_expr(n->a);
+            } else {
+                gen_expr(n->a);
+                e_push_eax();
+                gen_expr(n->b);
+                e_mov_ebx_eax();
+                e_pop_eax();
+            }
             switch (n->op) {
                 case T_PLUS:    e_add_eax_ebx();   break;
                 case T_MINUS:   e_sub_eax_ebx();   break;
@@ -3551,9 +3877,15 @@ static void gen_stmt(struct node *n) {
             /* Block scoping: locals declared inside the block stop being
              * NAME-visible when we leave, but their stack space stays
              * reserved by the function prologue. g_locals_bytes is the
-             * watermark used to size `sub esp, N` — never roll it back. */
+             * watermark used to size `sub esp, N` — never roll it back.
+             *
+             * Session 122 — DCE: stop emitting at the first `return` in
+             * a block. Anything after is unreachable. */
             int saved_locals = g_n_locals;
-            for (int i = 0; i < n->n_list; i++) gen_stmt(n->list[i]);
+            for (int i = 0; i < n->n_list; i++) {
+                gen_stmt(n->list[i]);
+                if (n->list[i] && n->list[i]->kind == N_RETURN) break;
+            }
             g_n_locals = saved_locals;
             return;
         }
@@ -3802,16 +4134,35 @@ static void gen_stmt(struct node *n) {
             if (fi < 0) die_at(n->line, "no such field", n->field_name);
             int field_off = g_structs[sidx].fields[fi].offset;
 
+            /* Session 122 — fast paths that collapse the addressed-store
+             * into a single instruction.
+             *
+             *   N_MEMBER_ASSIGN local:   mov [ebp + off + field_off], eax
+             *   N_MEMBER_ASSIGN global:  mov [GLOBAL_VA + field_off], eax
+             *
+             * For N_ARROW_ASSIGN we still need EBX to hold the pointer,
+             * so we keep the existing push/pop path — RHS could clobber
+             * EAX freely. */
+            if (!is_arrow) {
+                gen_expr(n->a);          /* eax = rhs */
+                if (is_local) {
+                    e_store_local(off + field_off);
+                } else {
+                    /* mov [imm32], eax with fixup that adds field_off. */
+                    emit_b(0xa3);
+                    int imm_off = g_code_len;
+                    emit_d((unsigned)field_off);
+                    record_glob_fixup(imm_off, gi);
+                }
+                return;
+            }
+            /* Arrow path — keep original push/pop until we have an
+             * EBX-disp store helper. */
             gen_expr(n->a);          /* eax = rhs */
             e_push_eax();
             /* Compute destination address into eax. */
-            if (is_arrow) {
-                if (is_local) e_load_local(off);
-                else          emit_load_global(gi);
-            } else {
-                if (is_local) e_lea_eax_ebp(off);
-                else          emit_addrof_global(gi);
-            }
+            if (is_local) e_load_local(off);
+            else          emit_load_global(gi);
             if (field_off != 0) {
                 emit_b(0x05); emit_d((unsigned)field_off);
             }
@@ -3951,6 +4302,19 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_IF: {
+            /* Session 122 — DCE: if the condition was constant-folded
+             * to a literal, only emit the taken branch. Skips both the
+             * conditional emit + jz pair AND the dead branch's body. */
+            if (n->a && n->a->kind == N_NUM) {
+                if (n->a->num) {
+                    /* Then-branch is live. */
+                    gen_stmt(n->b);
+                } else if (n->c) {
+                    /* Else-branch is live. */
+                    gen_stmt(n->c);
+                }
+                return;
+            }
             gen_expr(n->a);
             e_test_eax_eax();
             int jz = e_jz_rel32();
@@ -3966,6 +4330,17 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_WHILE: {
+            /* Session 122 — DCE: `while (0)` emits nothing. `while (1)`
+             * (or any nonzero const) emits the body in a tight infinite
+             * loop without the conditional test. */
+            if (n->a && n->a->kind == N_NUM) {
+                if (n->a->num == 0) return;
+                int top = g_code_len;
+                gen_stmt(n->b);
+                int jback = e_jmp_rel32();
+                patch_d(jback, (unsigned)(top - (jback + 4)));
+                return;
+            }
             int top = g_code_len;
             gen_expr(n->a);
             e_test_eax_eax();
@@ -4729,6 +5104,11 @@ int main(int argc, char **argv) {
     lex_all(g_pp_buf, g_pp_len);
     struct node *prog = parse_program();
 
+    /* Session 122 — constant-folding pass over every function body.
+     * Runs before pre-population so any folded expressions are visible
+     * to subsequent passes (DCE in particular). */
+    for (int i = 0; i < prog->n_list; i++) fold_node(prog->list[i]);
+
     /* Session 106 — pre-populate function param info BEFORE any
      * codegen runs. This makes per-function param kinds available
      * to call sites regardless of source order, which is required
@@ -4834,7 +5214,18 @@ int main(int argc, char **argv) {
     for (int i = 0; i < g_n_glob_fixups; i++) {
         int gi = g_glob_fixups[i].glob_idx;
         unsigned int va = (unsigned int)g_data_pool_base_va + (unsigned int)g_globals[gi].offset;
-        patch_d(g_glob_fixups[i].code_off, va);
+        /* Session 122 — read the current imm32 as an ADDEND. Existing
+         * call sites emit emit_d(0) so addend is zero (no change). The
+         * N_MEMBER global fast path emits emit_d(field_off) so the
+         * final patched value is GLOBAL_VA + field_off — one addressed
+         * load instead of mov-load-add-load. */
+        int code_off = g_glob_fixups[i].code_off;
+        unsigned int addend =
+              (unsigned int)g_code[code_off + 0]
+            | ((unsigned int)g_code[code_off + 1] << 8)
+            | ((unsigned int)g_code[code_off + 2] << 16)
+            | ((unsigned int)g_code[code_off + 3] << 24);
+        patch_d(code_off, va + addend);
     }
 
     if (write_elf(out_path, g_code_len) < 0) return 1;
