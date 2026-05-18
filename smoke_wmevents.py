@@ -122,20 +122,20 @@ def main():
         time.sleep(0.8)
 
         # Click — press + release.  Hold time matters: QEMU's PS/2
-        # emulation seems to coalesce button events that flip state
-        # within ~600ms of each other, so we hold the down state for
-        # 1.0s to guarantee both edges produce a packet wmd can see.
-        print("[+] click (1.0s hold)")
+        # emulation coalesces button events that flip state too
+        # quickly, so we hold the down state for 1.3s.  Shorter holds
+        # are racy (1.0s registers sometimes, fails sometimes).
+        print("[+] click (1.3s hold)")
         qmp_cmd(q, qbuf, "input-send-event", {"events": [
             {"type": "btn", "data": {"down": True, "button": "left"}},
         ]})
         qbuf = b""
-        time.sleep(1.0)
+        time.sleep(1.3)
         qmp_cmd(q, qbuf, "input-send-event", {"events": [
             {"type": "btn", "data": {"down": False, "button": "left"}},
         ]})
         qbuf = b""
-        time.sleep(1.2)
+        time.sleep(1.5)
 
         if os.path.exists(SHOT_PPM):
             os.remove(SHOT_PPM)
