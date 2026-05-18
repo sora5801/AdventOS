@@ -38,10 +38,28 @@ static const char *exception_names[32] = {
     "Reserved", "Reserved",
 };
 
-static irq_handler_fn irq_handlers[16];
+/* Per-IRQ handler chain. Four slots is plenty even for PCI INTx
+ * sharing on QEMU (we only ever co-locate net + virtio-blk/scsi).
+ *
+ * Session 124 — switched from one-handler-per-line to a chain so a
+ * later driver registering on a shared IRQ doesn't overwrite an
+ * earlier one. The previous behavior caused an IRQ storm when
+ * virtio-scsi and e1000 both landed on IRQ 11: e1000 overwrote
+ * virtio's master dispatcher, virtio-scsi's ISR latch never got
+ * cleared, the level-triggered INTx line stayed asserted and the
+ * CPU spun forever in e1000_irq.
+ *
+ * All callers are append-only (each device registers once at boot);
+ * we never unregister, so no removal API. Overflowing the chain is
+ * a build-time programming error, not a runtime case to handle. */
+#define IRQ_CHAIN_LEN  4
+static irq_handler_fn irq_handlers[16][IRQ_CHAIN_LEN];
+static int            irq_handler_count[16];
 
 void isr_register_irq(int irq, irq_handler_fn handler) {
-    if (irq >= 0 && irq < 16) irq_handlers[irq] = handler;
+    if (irq < 0 || irq >= 16) return;
+    if (irq_handler_count[irq] >= IRQ_CHAIN_LEN) return;
+    irq_handlers[irq][irq_handler_count[irq]++] = handler;
 }
 
 /* Session 68 build marker. Lock-free direct UART write — fine in any
@@ -182,7 +200,12 @@ void irq_handler(struct registers *r) {
     int irq = (int)r->int_no - 32;
     if (irq >= 0 && irq < 16) {
         pic_send_eoi(irq);
-        if (irq_handlers[irq]) irq_handlers[irq](r);
+        /* Walk the chain. Each handler is responsible for figuring
+         * out whether the IRQ was for it (read its own ISR / status
+         * register). Spurious calls to other devices' handlers are
+         * cheap — just one MMIO/PIO read that returns 0. */
+        int n = irq_handler_count[irq];
+        for (int i = 0; i < n; i++) irq_handlers[irq][i](r);
     }
 
     /* If we're about to iret back to ring 3, this is a chance to

@@ -25,7 +25,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Block cache, virtual FS layer, /proc | ✅ |
 | ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
 | AHCI SATA controller (modern hard-disk interface) | ✅ |
-| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
+| virtio-blk + virtio-scsi + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
 | e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
@@ -97,9 +97,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **123 — Path E phase 6: AHCI SATA controller**. See [`docs/110-pathE-ahci.md`](docs/110-pathE-ahci.md). New `kernel/ahci.{h,c}` — modern hard-disk interface, what every real PC has shipped with for the last 15 years. Registers each attached SATA disk as a `blkdev` next to ATA, virtio-blk, and USB MSC, so bcache / fs / `SYS_BLOCK_*` syscalls work through it uniformly. Stretch goal too: AdventFS mounts directly off an AHCI disk at `/mnt/sata`.
+Current session: **124 — Path E phase 7: virtio-scsi + CDC-ACM TTY**. See [`docs/122-pathE-vscsi-cdc-tty.md`](docs/122-pathE-vscsi-cdc-tty.md). New `kernel/virtio_scsi.{h,c}` — paravirtualized SCSI HBA (the *other* virtio block device; most cloud images expose disks via SCSI rather than virtio-blk). Auto-mounts at `/mnt/scsi`. Plus: CDC-ACM `/dev/ttyACM0` userspace device — the existing USB-serial driver now backs a proper `FD_CDC_ACM` file descriptor with per-port RX ring. Also fixes a shared-PCI-IRQ storm where the e1000 + virtio-scsi sharing IRQ 11 caused boot to hang silently — `isr_register_irq` is now chain-style (multi-handler-per-line).
 
 Recent session deep dives:
+- [Session 124 — Path E phase 7: virtio-scsi + CDC-ACM TTY](docs/122-pathE-vscsi-cdc-tty.md)
 - [Session 123 — Path E phase 6: AHCI SATA controller](docs/110-pathE-ahci.md)
 - [Session 122 — Path E phase 5: e1000 NIC + 9p atomic rename](docs/109-pathE-e1000-and-rename.md)
 - [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
@@ -162,7 +163,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–123 covered virtio-blk/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio + e1000 NIC + AHCI. Still candidate: virtio-scsi, USB EHCI (USB 2.0), USB CDC-ECM, full TTY integration of CDC-ACM, AHCI IRQ + NCQ.
+- **Path E — Drivers extension** — sessions 118–124 covered virtio-blk/scsi/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM with `/dev/ttyACM0` userspace device + AC97 consumer + WSL build path + IRQ-driven virtio + chain-style shared-PCI-IRQ dispatch + e1000 NIC + AHCI. Still candidate: USB EHCI (USB 2.0), USB CDC-ECM, NVMe, AHCI IRQ + NCQ.
 
 ## License
 

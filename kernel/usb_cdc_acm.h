@@ -42,4 +42,18 @@ int  usb_cdc_acm_write(const void *data, int len);
  * the HID keyboard polling task. */
 void usb_cdc_acm_start_polling(void);
 
+/* Number of attached CDC-ACM ports (each shows up at /dev/ttyACM<n>).
+ * Returns 0 when QEMU was launched without a usb-host passthrough of
+ * a real CDC-ACM dongle. */
+int  usb_cdc_acm_port_count(void);
+
+/* Per-port read: pulls up to `n` bytes from port `port`'s RX ring.
+ * Returns the number copied, 0 if the ring was empty, -1 on bad port.
+ * Non-blocking — kernel SYS_READ wraps this in a yield loop. */
+int  usb_cdc_acm_read(int port, void *buf, int n);
+
+/* Per-port write: queues `len` bytes via the named port's bulk-OUT
+ * endpoint. Returns bytes sent or -1. */
+int  usb_cdc_acm_write_port(int port, const void *data, int len);
+
 #endif
