@@ -70,7 +70,72 @@ static int  g_hist_count;
  * a fresh interactive shell with no commands run yet. */
 static int  g_last_status = 0;
 
+/* Positional args: $0 = name (script path or function name), $1..$N
+ * = args. g_pos_count counts the args (does not include $0). Stored
+ * by-pointer since the strings live elsewhere (main argv for scripts,
+ * a per-call buffer for function bodies). Bounded so the static
+ * table fits in .data.
+ *
+ * Saved/restored across function calls — see push/pop_positional. */
+#define POS_MAX 32
+static const char *g_pos[POS_MAX] = {0};
+static int         g_pos_count    = 0;
+
+static void set_positional(const char *name, char **args, int nargs) {
+    g_pos[0] = name ? name : "";
+    int n = nargs < POS_MAX - 1 ? nargs : POS_MAX - 1;
+    for (int i = 0; i < n; i++) g_pos[i + 1] = args[i];
+    for (int i = n + 1; i < POS_MAX; i++) g_pos[i] = 0;
+    g_pos_count = n;
+}
+
+/* Shell functions. Tiny by design — names/bodies sit in fixed-size
+ * .data so the table fits well under the 32 KiB user-data budget.
+ * Bodies are stored as the literal source (with `;` between original
+ * statements) so we can hand them to execute_line wholesale at call
+ * time. Recursion is supported via the positional-arg push/pop dance,
+ * limited only by user-stack depth. */
+#define FUNC_MAX        16
+#define FUNC_BODY_MAX   512
+struct shfunc {
+    int  in_use;
+    char name[32];
+    char body[FUNC_BODY_MAX];
+};
+static struct shfunc g_funcs[FUNC_MAX] = {{0}};
+
+static struct shfunc *func_find(const char *name) {
+    for (int i = 0; i < FUNC_MAX; i++) {
+        if (g_funcs[i].in_use && strcmp(g_funcs[i].name, name) == 0)
+            return &g_funcs[i];
+    }
+    return 0;
+}
+
+static struct shfunc *func_install(const char *name) {
+    struct shfunc *f = func_find(name);
+    if (f) return f;
+    for (int i = 0; i < FUNC_MAX; i++) {
+        if (!g_funcs[i].in_use) {
+            g_funcs[i].in_use = 1;
+            int j = 0;
+            while (name[j] && j < (int)sizeof(g_funcs[i].name) - 1) {
+                g_funcs[i].name[j] = name[j]; j++;
+            }
+            g_funcs[i].name[j] = 0;
+            return &g_funcs[i];
+        }
+    }
+    return 0;
+}
+
 /* ---- helpers ------------------------------------------------------- */
+
+/* Per-token "no expand" flag — set when any byte of the token came
+ * from inside single quotes. expand_vars_segment respects it by
+ * skipping the token's `$` refs (matches bash single-quote
+ * semantics). Reset per tokenize() call. Indexed by token slot. */
+static char g_tok_raw[ARG_MAX];
 
 /* Tokenize on whitespace AND on shell operators — they become standalone
  * tokens. Writes NULs over separators in `line` and fills tokens[].
@@ -95,6 +160,7 @@ static int  g_last_status = 0;
 static int tokenize(char *line, char **tokens, int cap) {
     int n = 0;
     char *p = line;
+    for (int i = 0; i < ARG_MAX; i++) g_tok_raw[i] = 0;
     while (*p && n < cap - 1) {
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
@@ -127,7 +193,8 @@ static int tokenize(char *line, char **tokens, int cap) {
 
         /* ---- One-char operators ---- */
         if (*p == '|' || *p == '>' || *p == '<' ||
-            *p == '&' || *p == ';') {
+            *p == '&' || *p == ';' ||
+            *p == '{' || *p == '}') {
             char saved = *p;
             *p++ = 0;
             static char pipe_tok[2] = {'|', 0};
@@ -135,11 +202,15 @@ static int tokenize(char *line, char **tokens, int cap) {
             static char lt_tok  [2] = {'<', 0};
             static char amp_tok [2] = {'&', 0};
             static char semi_tok[2] = {';', 0};
+            static char lbr_tok [2] = {'{', 0};
+            static char rbr_tok [2] = {'}', 0};
             tokens[n++] = (saved == '|') ? pipe_tok :
                           (saved == '>') ? gt_tok   :
                           (saved == '<') ? lt_tok   :
                           (saved == '&') ? amp_tok  :
-                                           semi_tok;
+                          (saved == ';') ? semi_tok :
+                          (saved == '{') ? lbr_tok  :
+                                           rbr_tok;
             continue;
         }
 
@@ -160,9 +231,15 @@ static int tokenize(char *line, char **tokens, int cap) {
         tokens[n++] = out;
         while (*p && *p != ' ' && *p != '\t' &&
                *p != '|' && *p != '>' && *p != '<' &&
-               *p != '&' && *p != ';') {
+               *p != '&' && *p != ';' &&
+               *p != '{' && *p != '}') {
             if (*p == '\'' || *p == '"') {
                 char q = *p++;
+                /* Single quotes mark the token as raw — its $ refs
+                 * are preserved literally instead of being expanded
+                 * by expand_vars_segment. Double quotes still allow
+                 * expansion (matches bash). */
+                if (q == '\'' && n - 1 < ARG_MAX) g_tok_raw[n - 1] = 1;
                 while (*p && *p != q) *out++ = *p++;
                 if (*p == q) p++;       /* skip closing quote */
             } else {
@@ -170,7 +247,14 @@ static int tokenize(char *line, char **tokens, int cap) {
             }
         }
         if (*p == ' ' || *p == '\t') p++;
-        *out = 0;
+        /* NUL-terminate the word — but only when we have a "safe" slot
+         * to write into. If `out < p` (quote stripping happened) or we
+         * just advanced past whitespace, the byte at `*out` is junk we
+         * can overwrite. Otherwise *out == *p points AT an operator
+         * char; clobbering it would lose the operator AND break the
+         * outer loop's detection. In that case the operator handler's
+         * own `*p++ = 0` doubles as the word's terminator. */
+        if (out < p) *out = 0;
         /* If we hit an operator, leave it for the next iteration. */
     }
     tokens[n] = 0;
@@ -292,17 +376,28 @@ static int glob_expand_one(const char *pat, char **out, int out_cap) {
 static int glob_expand_tokens(char **tokens, int ntok) {
     g_glob_pool_next = 0;
 
-    char *out[ARG_MAX];
+    char *out    [ARG_MAX];
+    char  out_raw[ARG_MAX];
     int   no = 0;
 
     for (int i = 0; i < ntok; i++) {
-        char *t = tokens[i];
+        char *t   = tokens[i];
+        int   raw = (i < ARG_MAX) ? g_tok_raw[i] : 0;
         /* Operator tokens are short — don't glob through them. */
         if ((t[0] == '|' || t[0] == '>' || t[0] == '<' ||
              t[0] == '&' || t[0] == ';') && (t[1] == 0 ||
              t[1] == t[0] || (t[0] == '|' && t[1] == '>'))) {
             if (no >= ARG_MAX) return -1;
-            out[no++] = t;
+            out_raw[no] = 0;
+            out[no++]   = t;
+            continue;
+        }
+        /* Single-quoted tokens skip glob expansion too (bash:
+         * `'*.c'` is the literal three-char string). */
+        if (raw) {
+            if (no >= ARG_MAX) return -1;
+            out_raw[no] = 1;
+            out[no++]   = t;
             continue;
         }
 
@@ -310,16 +405,19 @@ static int glob_expand_tokens(char **tokens, int ntok) {
         int   nm = glob_expand_one(t, matches, ARG_MAX - no);
         if (nm == 0) {
             if (no >= ARG_MAX) return -1;
-            out[no++] = t;
+            out_raw[no] = 0;
+            out[no++]   = t;
         } else {
             for (int k = 0; k < nm; k++) {
                 if (no >= ARG_MAX) return -1;
-                out[no++] = matches[k];
+                out_raw[no] = 0;
+                out[no++]   = matches[k];
             }
         }
     }
 
-    for (int i = 0; i < no; i++) tokens[i] = out[i];
+    for (int i = 0; i < no; i++) tokens[i]   = out[i];
+    for (int i = 0; i < no; i++) g_tok_raw[i] = out_raw[i];
     /* Re-terminate so the chain walker and parse_pipeline_slice can
      * still assume tokens[ntok] is NULL. Without this an expanding
      * glob (no > original ntok) leaves stale pointers in the tail
@@ -452,6 +550,60 @@ static int expand_vars(const char *in, char *out, int out_cap) {
          * would freeze $? to the prior line's status. The per-segment
          * pass in execute_line catches $? after each command updates
          * g_last_status, matching bash semantics. */
+
+        /* `$0` .. `$9`: positional argument or script name. Unknown
+         * positions expand to empty (matches bash). Done before the
+         * alpha-name branch so `$1foo` expands `$1` then keeps `foo`
+         * literal. */
+        if (*in == '$' && in[1] >= '0' && in[1] <= '9') {
+            int idx = in[1] - '0';
+            in += 2;
+            const char *v = (idx <= g_pos_count) ? g_pos[idx] : 0;
+            if (v) {
+                while (*v) {
+                    if (oi >= out_cap - 1) return -1;
+                    out[oi++] = *v++;
+                }
+            }
+            continue;
+        }
+
+        /* `$#` — number of positional args (excluding $0). */
+        if (*in == '$' && in[1] == '#') {
+            in += 2;
+            int v = g_pos_count;
+            char tmp[12]; int ti = 0;
+            if (v == 0) tmp[ti++] = '0';
+            while (v) { tmp[ti++] = '0' + v % 10; v /= 10; }
+            while (ti--) {
+                if (oi >= out_cap - 1) return -1;
+                out[oi++] = tmp[ti];
+            }
+            continue;
+        }
+
+        /* `$@` and `$*` — all positional args joined by single spaces.
+         * Bash distinguishes "$@" (one arg per element) from "$*"
+         * (single space-joined arg). We don't yet track quoting, so
+         * both collapse to the same space-joined string and word-split
+         * naturally at tokenize time. */
+        if (*in == '$' && (in[1] == '@' || in[1] == '*')) {
+            in += 2;
+            for (int i = 1; i <= g_pos_count; i++) {
+                if (i > 1) {
+                    if (oi >= out_cap - 1) return -1;
+                    out[oi++] = ' ';
+                }
+                const char *v = g_pos[i];
+                if (!v) continue;
+                while (*v) {
+                    if (oi >= out_cap - 1) return -1;
+                    out[oi++] = *v++;
+                }
+            }
+            continue;
+        }
+
         if (*in == '$' && (
                 (in[1] >= 'A' && in[1] <= 'Z') ||
                 (in[1] >= 'a' && in[1] <= 'z') ||
@@ -825,6 +977,19 @@ static void cmd_help(void) {
     puts("  history           print recent commands (Up/Down recalls them)\n");
     puts("  source FILE / . FILE   run a .sh script in the current shell\n");
     puts("  exit [CODE]       exit the shell\n");
+    puts("  shift [N]         drop first N positional args (default 1)\n");
+    puts("  read [-p P] VAR   read one line of stdin into VAR\n");
+    puts("  [ EXPR ] / test   POSIX-ish test: -f/-d/-e/-r/-w/-x FILE,\n");
+    puts("                    -z/-n STR, STR=STR, STR!=STR,\n");
+    puts("                    N -eq/-ne/-lt/-gt/-le/-ge N\n");
+    puts("\n");
+    puts("Control flow:\n");
+    puts("  if CMD ; then ...; [elif CMD ; then ...] [else ...] fi\n");
+    puts("  for VAR in WORDS ; do ... ; done\n");
+    puts("  while CMD ; do ... ; done\n");
+    puts("  NAME() { ... }    define a shell function (called like a cmd)\n");
+    puts("  $1..$9, $@, $*, $#, $0   positional args inside scripts / fns\n");
+    puts("  'literal $x'      single quotes prevent variable expansion\n");
     puts("\n");
     puts("Line editing (raw-mode, sessions 49 + 84):\n");
     puts("  Backspace         erase char before cursor\n");
@@ -1492,6 +1657,174 @@ static void cmd_history(void) {
     }
 }
 
+/* Integer parse for `[` test: accepts optional '-' / '+' and decimal
+ * digits. Returns 1 on success and writes to *out; 0 on parse failure.
+ * Doesn't check overflow — fine for test's typical use of small ints. */
+static int parse_int(const char *s, int *out) {
+    if (!s || !*s) return 0;
+    int sign = 1, v = 0; const char *p = s;
+    if (*p == '-') { sign = -1; p++; }
+    else if (*p == '+') p++;
+    if (!*p) return 0;
+    while (*p) {
+        if (*p < '0' || *p > '9') return 0;
+        v = v * 10 + (*p - '0');
+        p++;
+    }
+    *out = sign * v;
+    return 1;
+}
+
+/* Evaluate a `[ ... ]` test expression. Returns 0 (true) / 1 (false),
+ * or 2 on syntax error. Caller supplies the inner-args slice WITHOUT
+ * the trailing `]` (cmd_test_bracket strips that first).
+ *
+ * Supported forms (subset of POSIX test):
+ *   ! EXPR                    negation
+ *   -f / -d / -e / -r / -w / -x  FILE     (regular / dir / exists / r / w / x)
+ *   -z / -n  STR              (zero / non-zero length)
+ *   STR1 = STR2               (string eq)
+ *   STR1 != STR2              (string neq)
+ *   INT1 -eq / -ne / -lt / -gt / -le / -ge INT2  (numeric compare)
+ *   STR                       (true iff STR is non-empty — bash compat)
+ *
+ * The 0=true convention mirrors process exit codes throughout the
+ * shell, so `if [ ... ]; then ...; fi` falls out naturally. */
+static int test_eval(int argc, char **argv) {
+    if (argc == 0)                return 1;
+    if (argc == 1)                return argv[0][0] == 0 ? 1 : 0;
+    if (argc == 2 && argv[0][0] == '!' && argv[0][1] == 0) {
+        int r = test_eval(argc - 1, argv + 1);
+        return r == 0 ? 1 : (r == 1 ? 0 : 2);
+    }
+    if (argc == 2 && argv[0][0] == '-' && argv[0][2] == 0) {
+        const char *p = argv[1];
+        switch (argv[0][1]) {
+            case 'z': return p[0] == 0 ? 0 : 1;
+            case 'n': return p[0] != 0 ? 0 : 1;
+            case 'e': return sys_fs_mode(p) >= 0  ? 0 : 1;
+            case 'f': {
+                /* regular file = exists AND readdir(p) fails. sys_fs_size
+                 * looked tempting but returns the entry's raw `size`
+                 * field for dirs, which is non-negative — bad signal.
+                 * readdir succeeds iff p is a non-empty directory, so
+                 * we treat readdir-failure as "not a dir". Empty dirs
+                 * round-trip as files; acceptable corner case. */
+                if (sys_fs_mode(p) < 0) return 1;
+                int  it = 0;
+                char nm[17];
+                return sys_readdir(p, &it, nm) < 0 ? 0 : 1;
+            }
+            case 'd': {
+                /* Mirror of -f: readdir succeeds → it's a dir. The
+                 * empty-dir caveat above applies (empty dirs read as
+                 * not-a-dir). */
+                int  it = 0;
+                char nm[17];
+                return sys_readdir(p, &it, nm) >= 0 ? 0 : 1;
+            }
+            case 'r': { int m = sys_fs_mode(p); return (m >= 0 && (m & 0444)) ? 0 : 1; }
+            case 'w': { int m = sys_fs_mode(p); return (m >= 0 && (m & 0222)) ? 0 : 1; }
+            case 'x': { int m = sys_fs_mode(p); return (m >= 0 && (m & 0111)) ? 0 : 1; }
+            default: return 2;
+        }
+    }
+    if (argc == 3) {
+        const char *op = argv[1];
+        const char *a  = argv[0], *b = argv[2];
+        if (strcmp(op, "=") == 0)  return strcmp(a, b) == 0 ? 0 : 1;
+        if (strcmp(op, "!=") == 0) return strcmp(a, b) != 0 ? 0 : 1;
+        int ai = 0, bi = 0;
+        if (op[0] == '-' && parse_int(a, &ai) && parse_int(b, &bi)) {
+            if (strcmp(op, "-eq") == 0) return ai == bi ? 0 : 1;
+            if (strcmp(op, "-ne") == 0) return ai != bi ? 0 : 1;
+            if (strcmp(op, "-lt") == 0) return ai <  bi ? 0 : 1;
+            if (strcmp(op, "-gt") == 0) return ai >  bi ? 0 : 1;
+            if (strcmp(op, "-le") == 0) return ai <= bi ? 0 : 1;
+            if (strcmp(op, "-ge") == 0) return ai >= bi ? 0 : 1;
+        }
+        return 2;
+    }
+    return 2;
+}
+
+/* `read [-p PROMPT] VAR` — read one line from stdin into the env var
+ * `VAR`. Returns 0 on success, 1 on EOF or no arg. Trailing newline
+ * is stripped. Bash supports many more flags (-r, -t, -n, multiple
+ * vars with field-splitting); we ship just the smallest set that's
+ * actually useful in scripts. */
+static int cmd_read(int ntok, char **toks) {
+    const char *prompt = 0;
+    const char *var    = 0;
+    int i = 1;
+    if (i < ntok && strcmp(toks[i], "-p") == 0 && i + 1 < ntok) {
+        prompt = toks[i + 1];
+        i += 2;
+    }
+    if (i < ntok) var = toks[i];
+    if (!var) { puts("read: usage: read [-p PROMPT] VAR\n"); return 1; }
+
+    if (prompt) puts(prompt);
+
+    /* Read one whole line in a single sys_read. Canonical-mode
+     * kshell_read_line only writes when i+1 < cap, so calling
+     * sys_read(0,&c,1) yields 0 bytes per call regardless of what
+     * the user typed. A big buffer + one syscall is what bash's
+     * `read` effectively does. */
+    char line[LINE_MAX];
+    int  n = sys_read(0, line, (int)sizeof(line) - 1);
+    if (n < 0) return 1;
+    if (n >= (int)sizeof(line)) n = (int)sizeof(line) - 1;
+    line[n] = 0;
+    /* Strip any trailing \r/\n the kernel may have left. */
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+        line[--n] = 0;
+    }
+    if (env_set(var, line) < 0) {
+        puts("read: env full or value too long\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* `[ EXPR ]` builtin. Requires the closing `]` token; absence is a
+ * syntax error. `test EXPR` is the same minus the trailing bracket. */
+static int cmd_test_bracket(char **toks, int ntok) {
+    /* Inner args: skip the leading "[" / "test", strip the trailing "]"
+     * for the bracketed form. */
+    int  is_bracket = (toks[0][0] == '[' && toks[0][1] == 0);
+    int  argc = ntok - 1;
+    char **argv = toks + 1;
+    if (is_bracket) {
+        if (argc == 0 || strcmp(argv[argc - 1], "]") != 0) {
+            puts("sh: [: missing `]'\n");
+            return 2;
+        }
+        argc--;
+    }
+    int rc = test_eval(argc, argv);
+    if (rc == 2) puts("sh: test: syntax error\n");
+    return rc;
+}
+
+/* `shift [N]` — drop the first N positional args (default 1). Returns
+ * 0 on success, 1 if N exceeds $# (bash behavior). */
+static int cmd_shift(int ntok, char **toks) {
+    int n = 1;
+    if (ntok > 1) {
+        const char *p = toks[1];
+        n = 0;
+        while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+    }
+    if (n > g_pos_count) return 1;
+    for (int i = 1; i + n <= g_pos_count; i++) {
+        g_pos[i] = g_pos[i + n];
+    }
+    for (int i = g_pos_count - n + 1; i <= g_pos_count; i++) g_pos[i] = 0;
+    g_pos_count -= n;
+    return 0;
+}
+
 /* Forward decls — run_script + cmd_source both call execute_line, but
  * execute_line lives below cmd_forktest so it can call every builtin. */
 static void execute_line(char *line_in);
@@ -1520,21 +1853,194 @@ static void cmd_forktest(void) {
            sys_getpid(), marker, pid, reaped, code);
 }
 
+/* ---- compound-statement helpers (control flow) --------------------- */
+
+/* Classify a token as a compound-block opener / closer. Used by the
+ * depth-aware chain walker so `;` separators INSIDE `if cond; then
+ * body; fi` don't split the outer statement.
+ *
+ * Openers: if / for / while / `{`
+ * Closers: fi / done / `}`
+ *
+ * `then` / `else` / `elif` / `do` are body-section markers, not
+ * depth changers. */
+static int depth_delta(const char *t) {
+    if (!t) return 0;
+    if (strcmp(t, "if")    == 0) return +1;
+    if (strcmp(t, "for")   == 0) return +1;
+    if (strcmp(t, "while") == 0) return +1;
+    if (strcmp(t, "{")     == 0) return +1;
+    if (strcmp(t, "fi")    == 0) return -1;
+    if (strcmp(t, "done")  == 0) return -1;
+    if (strcmp(t, "}")     == 0) return -1;
+    return 0;
+}
+
+/* Scan tokens[lo..hi) for the first occurrence of `kw` at the given
+ * starting depth. Returns its index, or hi if not found. The caller's
+ * depth parameter lets compound parsers find their `then` / `do` /
+ * `fi` / `done` while ignoring the same words nested inside child
+ * compounds. */
+static int find_depth_kw(char **toks, int lo, int hi, const char *kw,
+                         int starting_depth) {
+    int depth = starting_depth;
+    for (int i = lo; i < hi; i++) {
+        const char *t = toks[i];
+        if (!t) continue;
+        if (depth == 0 && strcmp(t, kw) == 0) return i;
+        depth += depth_delta(t);
+    }
+    return hi;
+}
+
+/* find_depth_kw, but match against any one of several keywords.
+ * `kws` is a NULL-terminated list of C strings. Returns the
+ * matching index, or hi. */
+static int find_depth_any(char **toks, int lo, int hi,
+                          const char *const *kws, int starting_depth) {
+    int depth = starting_depth;
+    for (int i = lo; i < hi; i++) {
+        const char *t = toks[i];
+        if (!t) continue;
+        if (depth == 0) {
+            for (int k = 0; kws[k]; k++) {
+                if (strcmp(t, kws[k]) == 0) return i;
+            }
+        }
+        depth += depth_delta(t);
+    }
+    return hi;
+}
+
+/* Find the index of the closer that matches the opener at tokens[lo].
+ * Returns hi if the input is malformed. Opener is consumed (depth
+ * starts at 1) so the matching closer at depth 0 is the answer. */
+static int find_match_close(char **toks, int lo, int hi) {
+    const char *opener = toks[lo];
+    const char *closer;
+    if (strcmp(opener, "if")    == 0) closer = "fi";
+    else if (strcmp(opener, "for")   == 0) closer = "done";
+    else if (strcmp(opener, "while") == 0) closer = "done";
+    else if (strcmp(opener, "{")     == 0) closer = "}";
+    else return hi;
+    int depth = 1;
+    for (int i = lo + 1; i < hi; i++) {
+        const char *t = toks[i];
+        if (!t) continue;
+        if (strcmp(t, opener) == 0) { depth++; continue; }
+        if (strcmp(t, closer) == 0) { depth--; if (depth == 0) return i; continue; }
+        depth += depth_delta(t);
+    }
+    return hi;
+}
+
+/* Forward decls for the recursive structure. exec_token_seq walks a
+ * range as a `;` / `&&` / `||` chain of statements; execute_segment
+ * runs one leaf; exec_compound handles `if`/`for`/`while`/`function`
+ * blocks. They call each other via these forward decls. */
+static int  execute_segment        (char **toks, int lo, int hi);
+static int  exec_token_seq         (char **toks, int lo, int hi);
+static int  exec_compound          (char **toks, int lo, int hi);
+static int  chain_kind             (const char *t);
+
+/* Per-segment `$` expansion pool — used by exec_for / exec_while to
+ * snapshot/restore between iterations. Storage lives further down
+ * where expand_vars_segment is defined; we reference it from the
+ * compound executors via these declarations. */
+#define DOLLAR_Q_POOL_LEN  (LINE_MAX * 4)
+static char g_dollar_q_pool[DOLLAR_Q_POOL_LEN];
+static int  g_dollar_q_off;
+static void expand_vars_segment    (char **toks, int lo, int hi);
+static void expand_dollar_q_segment(char **toks, int lo, int hi);
+
 /* ---- line dispatcher + script runner (session 49) ------------------ */
 
 /* Run a single segment of a possibly-chained line — i.e. tokens
- * [lo, hi) with no `;`, `&&`, or `||` separators inside. Returns the
- * exit status (0 = success, non-zero = failure) so the outer
- * execute_line loop can apply chaining semantics. Also stores the
+ * [lo, hi) with no `;`, `&&`, or `||` separators at depth 0. Returns
+ * the exit status (0 = success, non-zero = failure) so the outer
+ * exec_token_seq loop can apply chaining semantics. Also stores the
  * result in g_last_status so a subsequent `$?` expansion sees it.
  *
- * The body is the old execute_line for one segment: hard builtins,
- * soft builtins (only when there's no pipeline operator), then
- * parse + run_pipeline as the fallthrough. */
+ * The body is the old execute_line for one segment: dispatch to a
+ * compound handler if it starts with if/for/while/`{`/`function`/
+ * `NAME () {`, otherwise run hard / soft builtins or a pipeline. */
 static int execute_segment(char **toks, int lo, int hi) {
     int ntok = hi - lo;
     if (ntok <= 0) return 0;
     char **seg = &toks[lo];
+
+    /* Compound? Dispatch to the structured handler. The chain walker
+     * already extends segments to cover whole compounds via its
+     * depth-aware separator scan, so seg here is the entire if/for/
+     * while/`{...}` block. */
+    if (strcmp(seg[0], "if")    == 0 ||
+        strcmp(seg[0], "for")   == 0 ||
+        strcmp(seg[0], "while") == 0 ||
+        strcmp(seg[0], "{")     == 0) {
+        return exec_compound(toks, lo, hi);
+    }
+
+    /* Function definition: `NAME() { body }` (token NAME ends in
+     * "()" and is followed by `{`). Stored verbatim — `;` separators
+     * inside the body are preserved when we round-trip back to a
+     * line at call time. */
+    {
+        char *t0 = seg[0];
+        int   tl = 0; while (t0[tl]) tl++;
+        if (tl >= 3 && t0[tl - 2] == '(' && t0[tl - 1] == ')' &&
+            ntok >= 2 && seg[1][0] == '{' && seg[1][1] == 0) {
+            int body_end = find_match_close(toks, lo + 1, hi);
+            if (body_end >= hi) {
+                puts("sh: function: missing `}'\n");
+                return 2;
+            }
+            /* Snapshot tokens[lo+2..body_end) into the function's
+             * body buffer, joined by spaces. Quoting nuance is lost
+             * (acceptable for a small in-process function feature). */
+            char name[32];
+            int nl = tl - 2 < (int)sizeof(name) - 1 ? tl - 2 : (int)sizeof(name) - 1;
+            for (int j = 0; j < nl; j++) name[j] = t0[j];
+            name[nl] = 0;
+            struct shfunc *f = func_install(name);
+            if (!f) { puts("sh: function table full\n"); return 1; }
+            int bo = 0;
+            for (int j = lo + 2; j < body_end; j++) {
+                char *t = toks[j];
+                if (!t) continue;
+                for (int k = 0; t[k] && bo < FUNC_BODY_MAX - 2; k++)
+                    f->body[bo++] = t[k];
+                if (bo < FUNC_BODY_MAX - 2) f->body[bo++] = ' ';
+            }
+            f->body[bo] = 0;
+            return 0;
+        }
+    }
+
+    /* Function call: first token matches a defined function name.
+     * Push the current $0..$N, set $0=name and $1..=args, run the
+     * body via exec_token_seq, restore. Nesting works as long as we
+     * don't blow the user stack (recursion depth is bounded by user
+     * stack frames + g_pos save snapshots). */
+    {
+        struct shfunc *f = func_find(seg[0]);
+        if (f) {
+            const char *saved_pos[POS_MAX];
+            int          saved_count = g_pos_count;
+            for (int i = 0; i < POS_MAX; i++) saved_pos[i] = g_pos[i];
+
+            set_positional(seg[0], &seg[1], ntok - 1);
+
+            char buf[LINE_MAX];
+            int  j = 0;
+            while (f->body[j] && j < (int)sizeof(buf) - 1) { buf[j] = f->body[j]; j++; }
+            buf[j] = 0;
+            execute_line(buf);
+
+            g_pos_count = saved_count;
+            for (int i = 0; i < POS_MAX; i++) g_pos[i] = saved_pos[i];
+            return g_last_status;
+        }
+    }
 
     int has_pipe_op = 0;
     for (int i = 0; i < ntok; i++) {
@@ -1559,6 +2065,10 @@ static int execute_segment(char **toks, int lo, int hi) {
     if (strcmp(seg[0], "export")   == 0) { cmd_export (seg, ntok); return 0; }
     if (strcmp(seg[0], "unset")    == 0) { cmd_unset_b(seg, ntok); return 0; }
     if (strcmp(seg[0], "history")  == 0) { cmd_history(); return 0; }
+    if (strcmp(seg[0], "shift")    == 0) { return cmd_shift(ntok, seg); }
+    if (strcmp(seg[0], "[")        == 0) { return cmd_test_bracket(seg, ntok); }
+    if (strcmp(seg[0], "test")     == 0) { return cmd_test_bracket(seg, ntok); }
+    if (strcmp(seg[0], "read")     == 0) { return cmd_read(ntok, seg); }
     if (strcmp(seg[0], "source")   == 0 || strcmp(seg[0], ".") == 0) {
         cmd_source(ntok > 1 ? seg[1] : 0);
         return 0;
@@ -1601,49 +2111,339 @@ static int execute_segment(char **toks, int lo, int hi) {
     return rc;
 }
 
-/* Substitute every `$?` substring in tokens[lo..hi) with the decimal
- * of g_last_status. Rewritten tokens land in g_dollar_q_pool, a
- * static buffer that's per-execute_line (reset at the start of each
- * line). Tokens without `$?` are left alone (pointer unchanged).
- *
- * Done per-segment so the value reflects the segment's immediate
- * predecessor in a chain — `cd /nope ; echo $?` then sees 1, not the
- * stale value from the previous line. The pool is sized to absorb
- * one full LINE_MAX-worth of rewritten tokens. */
-#define DOLLAR_Q_POOL_LEN  LINE_MAX
-static char g_dollar_q_pool[DOLLAR_Q_POOL_LEN];
-static int  g_dollar_q_off;
+/* ---- compound executor (if / for / while / brace group) ----------- */
 
-static void expand_dollar_q_segment(char **toks, int lo, int hi) {
+/* Skip a depth-0 `;` separator at *pos if present. Used between
+ * compound sections (after `if cond`, after `then body`, etc.) so
+ * users can write either `; then` or just `then`. */
+static void skip_semi(char **toks, int *pos, int hi) {
+    while (*pos < hi && toks[*pos]) {
+        if (toks[*pos][0] == ';' && toks[*pos][1] == 0) { (*pos)++; continue; }
+        break;
+    }
+}
+
+/* Run tokens[lo..hi) as one if/then/elif/else/fi compound. tokens[lo]
+ * must be the literal `if`. Returns the executed branch's status, or
+ * 0 if all conditions failed and no else branch. */
+static int exec_if(char **toks, int lo, int hi) {
+    int pos = lo + 1;        /* past `if` */
+
+    /* Iterate over (cond ; then body) pairs until we find a true cond
+     * or fall through to `else`/`fi`. */
+    static const char *cond_terms[] = {"then", 0};
+    static const char *body_terms[] = {"elif", "else", "fi", 0};
+    for (;;) {
+        int then_at = find_depth_any(toks, pos, hi, cond_terms, 0);
+        if (then_at >= hi) { puts("sh: if: missing `then'\n"); return 2; }
+
+        int cond_status = exec_token_seq(toks, pos, then_at);
+        pos = then_at + 1;
+        skip_semi(toks, &pos, hi);
+
+        int body_end = find_depth_any(toks, pos, hi, body_terms, 0);
+        if (cond_status == 0) {
+            int rc = exec_token_seq(toks, pos, body_end);
+            /* Branch ran; skip the rest. */
+            return rc;
+        }
+        pos = body_end;
+        if (pos >= hi) return 0;       /* malformed but tolerable */
+        const char *kw = toks[pos];
+        if (strcmp(kw, "fi") == 0) return 0;
+        if (strcmp(kw, "else") == 0) {
+            pos++;
+            skip_semi(toks, &pos, hi);
+            int fi_at = find_depth_kw(toks, pos, hi, "fi", 0);
+            return exec_token_seq(toks, pos, fi_at);
+        }
+        if (strcmp(kw, "elif") == 0) {
+            pos++;
+            continue;                  /* loop again for the elif cond */
+        }
+        return 0;
+    }
+}
+
+/* Run tokens[lo..hi) as one for/in/do/done compound. */
+static int exec_for(char **toks, int lo, int hi) {
+    int pos = lo + 1;        /* past `for` */
+    if (pos >= hi || !toks[pos]) { puts("sh: for: missing var\n"); return 2; }
+    const char *var = toks[pos++];
+    if (pos >= hi || strcmp(toks[pos], "in") != 0) {
+        puts("sh: for: expected `in'\n");
+        return 2;
+    }
+    pos++;                            /* past `in` */
+
+    int do_at = find_depth_kw(toks, pos, hi, "do", 0);
+    if (do_at >= hi) { puts("sh: for: missing `do'\n"); return 2; }
+    int done_at = find_depth_kw(toks, do_at + 1, hi, "done", 0);
+    if (done_at >= hi) { puts("sh: for: missing `done'\n"); return 2; }
+
+    /* The word list: tokens[pos..do_at), stripping trailing `;`. */
+    int words_end = do_at;
+    while (words_end > pos &&
+           toks[words_end - 1] &&
+           toks[words_end - 1][0] == ';' && toks[words_end - 1][1] == 0) {
+        words_end--;
+    }
+    int body_lo = do_at + 1;
+    skip_semi(toks, &body_lo, done_at);
+
+    /* Snapshot body token pointers + pool offset so each iteration
+     * re-expands `$VAR` against the freshly-set loop variable. Without
+     * this, the first iteration's expand_vars_segment overwrites
+     * tokens with their substituted form and subsequent iterations
+     * see the stale string with no `$x` left to expand. */
+    int   body_n = done_at - body_lo;
+    if (body_n < 0) body_n = 0;
+    char *body_save[ARG_MAX];
+    if (body_n > ARG_MAX) body_n = ARG_MAX;
+    for (int s = 0; s < body_n; s++) body_save[s] = toks[body_lo + s];
+    int pool_save = g_dollar_q_off;
+
+    int last = 0;
+    for (int i = pos; i < words_end; i++) {
+        char *w = toks[i];
+        if (!w) continue;
+        if (w[0] == ';' && w[1] == 0) continue;
+        if (env_set(var, w) < 0) {
+            puts("sh: for: env full\n");
+            return 1;
+        }
+        /* Reset body + pool to the pre-loop state. */
+        for (int s = 0; s < body_n; s++) toks[body_lo + s] = body_save[s];
+        g_dollar_q_off = pool_save;
+
+        last = exec_token_seq(toks, body_lo, done_at);
+    }
+    return last;
+}
+
+/* Run tokens[lo..hi) as one while/do/done compound. */
+static int exec_while(char **toks, int lo, int hi) {
+    int pos = lo + 1;        /* past `while` */
+    int do_at = find_depth_kw(toks, pos, hi, "do", 0);
+    if (do_at >= hi) { puts("sh: while: missing `do'\n"); return 2; }
+    int done_at = find_depth_kw(toks, do_at + 1, hi, "done", 0);
+    if (done_at >= hi) { puts("sh: while: missing `done'\n"); return 2; }
+
+    int body_lo = do_at + 1;
+    skip_semi(toks, &body_lo, done_at);
+
+    /* Snapshot BOTH the condition AND the body, since `while [ $x -gt
+     * 0 ]` re-checks $x each iteration. The cond's tokens also get
+     * variable-substituted in place on first run. */
+    int   cond_n = do_at - pos;
+    int   body_n = done_at - body_lo;
+    if (cond_n < 0) cond_n = 0;
+    if (body_n < 0) body_n = 0;
+    char *cond_save[ARG_MAX], *body_save[ARG_MAX];
+    if (cond_n > ARG_MAX) cond_n = ARG_MAX;
+    if (body_n > ARG_MAX) body_n = ARG_MAX;
+    for (int s = 0; s < cond_n; s++) cond_save[s] = toks[pos + s];
+    for (int s = 0; s < body_n; s++) body_save[s] = toks[body_lo + s];
+    int pool_save = g_dollar_q_off;
+
+    int last = 0;
+    /* Cap iterations defensively — runaway `while true` would otherwise
+     * lock the interactive shell hard until the OOM killer fires. */
+    int safety = 100000;
+    while (safety-- > 0) {
+        for (int s = 0; s < cond_n; s++) toks[pos + s]     = cond_save[s];
+        for (int s = 0; s < body_n; s++) toks[body_lo + s] = body_save[s];
+        g_dollar_q_off = pool_save;
+
+        int cond = exec_token_seq(toks, pos, do_at);
+        if (cond != 0) break;
+
+        /* Body run uses an even-fresher restore so the body's first
+         * statement sees pristine `$VAR` refs after the cond mutated
+         * the pool. */
+        for (int s = 0; s < body_n; s++) toks[body_lo + s] = body_save[s];
+        g_dollar_q_off = pool_save;
+
+        last = exec_token_seq(toks, body_lo, done_at);
+    }
+    if (safety <= 0) puts("sh: while: iteration cap hit\n");
+    return last;
+}
+
+/* Dispatch on the opener keyword. The chain walker has already
+ * extended this segment to cover the entire compound (fi/done/}). */
+static int exec_compound(char **toks, int lo, int hi) {
+    const char *t = toks[lo];
+    if (strcmp(t, "if")    == 0) return exec_if   (toks, lo, hi);
+    if (strcmp(t, "for")   == 0) return exec_for  (toks, lo, hi);
+    if (strcmp(t, "while") == 0) return exec_while(toks, lo, hi);
+    if (strcmp(t, "{")     == 0) {
+        int close = find_match_close(toks, lo, hi);
+        return exec_token_seq(toks, lo + 1, close);
+    }
+    return 2;
+}
+
+/* Walk tokens[lo..hi) as a `;` / `&&` / `||` chain, with `;` and chain
+ * ops only honoured at depth 0 — compound blocks aren't split. Returns
+ * the last segment's status. Replaces the inline chain walker that
+ * lived in execute_line before control flow.
+ *
+ * The depth count + skip-of-block-keywords logic is what lets
+ * `if cond ; then body ; fi` flow through as one segment instead of
+ * three. The whole if/fi span is then executed by exec_compound. */
+static int exec_token_seq(char **toks, int lo, int hi) {
+    int seg_start  = lo;
+    int next_chain = 2;
+    int depth      = 0;
+    int last       = g_last_status;
+    for (int j = lo; j <= hi; j++) {
+        int at_end = (j == hi);
+        if (!at_end) {
+            const char *t = toks[j];
+            if (!t) continue;
+            int d = depth_delta(t);
+            if (d != 0) { depth += d; continue; }
+            if (depth > 0) continue;
+        }
+        int ck = at_end ? 2 : chain_kind(toks[j]);
+        if (!at_end && ck == 0) continue;
+
+        if (!at_end) toks[j] = 0;       /* terminate the segment's argv */
+
+        if (seg_start < j) {
+            int run = 1;
+            if (next_chain ==  1 && g_last_status != 0) run = 0;
+            if (next_chain == -1 && g_last_status == 0) run = 0;
+            if (run) {
+                /* Skip `$` expansion when the segment is a compound
+                 * (if / for / while / function-def / `{`). The compound
+                 * executor recursively calls back into us for body
+                 * sub-ranges; expansion happens there with the
+                 * iteration variable / function arg already set. If we
+                 * expanded the body now, $x in `for x in ...; do echo
+                 * $x; done` would freeze to its pre-loop value. */
+                char *t0 = toks[seg_start];
+                int   is_compound = t0 && (
+                    strcmp(t0, "if")    == 0 ||
+                    strcmp(t0, "for")   == 0 ||
+                    strcmp(t0, "while") == 0 ||
+                    strcmp(t0, "{")     == 0);
+                /* Function definition: NAME() { ... } also skips
+                 * expansion — the body is captured raw and replayed
+                 * per call. */
+                if (!is_compound && t0) {
+                    int tl = 0; while (t0[tl]) tl++;
+                    if (tl >= 3 && t0[tl - 2] == '(' && t0[tl - 1] == ')' &&
+                        seg_start + 1 < j && toks[seg_start + 1] &&
+                        toks[seg_start + 1][0] == '{' &&
+                        toks[seg_start + 1][1] == 0) {
+                        is_compound = 1;
+                    }
+                }
+                if (!is_compound) expand_vars_segment(toks, seg_start, j);
+                g_last_status = execute_segment(toks, seg_start, j);
+                last = g_last_status;
+            }
+        }
+        if (at_end) break;
+        seg_start  = j + 1;
+        next_chain = ck;
+    }
+    return last;
+}
+
+/* Per-segment `$` expansion. expand_vars_segment walks tokens and
+ * rewrites any `$?`, `$VAR`, `$0..$9`, `$@`, `$*`, `$#` reference
+ * into a fresh string in g_dollar_q_pool (declared above so the
+ * compound executors can snapshot it between iterations). Doing it
+ * per-segment (not once per line) is what lets `for x in a b ; do
+ * echo $x ; done` work — each iteration sets $x then re-runs the
+ * body with the new value.
+ *
+ * No word splitting: an env var with spaces collapses into a single
+ * argument. Bash would split unquoted `$FOO` (FOO="a b") into two
+ * args; we do not. Functions / for-loop bodies / etc. all see the
+ * predictable single-token expansion, which is the simpler model
+ * for a small shell. */
+
+/* Emit a decimal int into `out` starting at offset `*o`, capped at `cap`. */
+static void emit_int(char *out, int *o, int cap, int v) {
+    if (v < 0) {
+        if (*o < cap) out[(*o)++] = '-';
+        v = -v;
+    }
+    char tmp[12]; int ti = 0;
+    if (v == 0) tmp[ti++] = '0';
+    while (v) { tmp[ti++] = '0' + v % 10; v /= 10; }
+    while (ti-- && *o < cap) out[(*o)++] = tmp[ti];
+}
+
+/* Emit a NUL-terminated string into `out` at `*o`, capped at `cap`. */
+static void emit_str(char *out, int *o, int cap, const char *s) {
+    if (!s) return;
+    while (*s && *o < cap) out[(*o)++] = *s++;
+}
+
+static void expand_vars_segment(char **toks, int lo, int hi) {
     for (int i = lo; i < hi; i++) {
         char *t = toks[i];
         if (!t) continue;
+        /* Single-quoted tokens are preserved verbatim — bash treats
+         * `'$x'` as the literal three-byte string. */
+        if (i < ARG_MAX && g_tok_raw[i]) continue;
         int has = 0;
         for (int k = 0; t[k]; k++) {
-            if (t[k] == '$' && t[k + 1] == '?') { has = 1; break; }
+            if (t[k] == '$' && t[k + 1]) { has = 1; break; }
         }
         if (!has) continue;
 
-        /* Build the decimal of g_last_status once per token. */
-        char dec[12]; int dn = 0;
-        int v = g_last_status;
-        int neg = v < 0;
-        if (neg) v = -v;
-        if (v == 0) dec[dn++] = '0';
-        while (v) { dec[dn++] = '0' + v % 10; v /= 10; }
-        /* dec is in reverse — we'll consume it back-to-front below. */
-
-        /* Copy into the pool, splicing the decimal for each `$?`. */
         if (g_dollar_q_off >= DOLLAR_Q_POOL_LEN - 1) return;
         char *out = &g_dollar_q_pool[g_dollar_q_off];
         int   o   = 0;
         int   cap = DOLLAR_Q_POOL_LEN - g_dollar_q_off - 1;
-        for (int k = 0; t[k] && o < cap; ) {
-            if (t[k] == '$' && t[k + 1] == '?') {
-                if (neg && o < cap) out[o++] = '-';
-                for (int d = dn - 1; d >= 0 && o < cap; d--) out[o++] = dec[d];
+
+        int k = 0;
+        while (t[k] && o < cap) {
+            if (t[k] != '$' || !t[k + 1]) {
+                out[o++] = t[k++];
+                continue;
+            }
+            char n = t[k + 1];
+            if (n == '?') {
+                emit_int(out, &o, cap, g_last_status);
                 k += 2;
+            } else if (n >= '0' && n <= '9') {
+                int idx = n - '0';
+                if (idx <= g_pos_count) emit_str(out, &o, cap, g_pos[idx]);
+                k += 2;
+            } else if (n == '#') {
+                emit_int(out, &o, cap, g_pos_count);
+                k += 2;
+            } else if (n == '@' || n == '*') {
+                for (int p = 1; p <= g_pos_count; p++) {
+                    if (p > 1 && o < cap) out[o++] = ' ';
+                    emit_str(out, &o, cap, g_pos[p]);
+                }
+                k += 2;
+            } else if ((n >= 'A' && n <= 'Z') || (n >= 'a' && n <= 'z') ||
+                       n == '_') {
+                /* Identifier var: read [A-Za-z0-9_]+ after the $. */
+                char name[32];
+                int  ni = 0;
+                k++;                         /* skip $ */
+                while (t[k] && ((t[k] >= 'A' && t[k] <= 'Z') ||
+                                (t[k] >= 'a' && t[k] <= 'z') ||
+                                (t[k] >= '0' && t[k] <= '9') ||
+                                t[k] == '_')) {
+                    if (ni < (int)sizeof(name) - 1) name[ni++] = t[k];
+                    k++;
+                }
+                name[ni] = 0;
+                emit_str(out, &o, cap, env_get(name));
             } else {
+                /* Bare `$` not followed by a recognised char — pass it
+                 * through literally. */
                 out[o++] = t[k++];
             }
         }
@@ -1651,6 +2451,12 @@ static void expand_dollar_q_segment(char **toks, int lo, int hi) {
         toks[i] = out;
         g_dollar_q_off += o + 1;
     }
+}
+
+/* Compat shim: the old name is now an alias to make the rename land
+ * cleanly with the rest of the codebase intact. */
+static void expand_dollar_q_segment(char **toks, int lo, int hi) {
+    expand_vars_segment(toks, lo, hi);
 }
 
 /* Classify a token: returns +1 if it's `&&`, -1 if `||`, 2 if `;`,
@@ -1673,16 +2479,17 @@ static int chain_kind(const char *t) {
  * `g_last_status` is updated for every segment so `$?` reflects the
  * most recently completed pipeline. */
 static void execute_line(char *line_in) {
-    /* Expand $VAR / $? refs into a fresh buffer before tokenizing.
-     * Splitting the expanded line on whitespace is what gives
-     * word-splitting semantics: FOO="a b" + `echo $FOO` becomes 3
-     * args, not 2. */
+    /* Tokenize the raw input directly. We used to run expand_vars
+     * here for word splitting, but that ran ONCE per line — so
+     * `for x in a b ; do echo $x ; done` would expand $x against
+     * its prior (often-empty) value before the loop iterated. All
+     * $ refs now expand per-segment inside exec_token_seq, after
+     * the loop sets x. The cost: unquoted $VAR no longer word-splits
+     * (one space-bearing var becomes one arg, not many). */
     char line[LINE_MAX];
-    if (expand_vars(line_in, line, sizeof(line)) < 0) {
-        puts("sh: variable expansion overflowed line buffer\n");
-        g_last_status = 2;
-        return;
-    }
+    int  li = 0;
+    while (line_in[li] && li < (int)sizeof(line) - 1) { line[li] = line_in[li]; li++; }
+    line[li] = 0;
 
     char *toks[ARG_MAX];
     int ntok = tokenize(line, toks, ARG_MAX);
@@ -1705,41 +2512,10 @@ static void execute_line(char *line_in) {
     }
     ntok = new_ntok;
 
-    /* Walk segments left to right. Each segment's run/skip decision
-     * depends only on (incoming chain op, g_last_status):
-     *   - `&&` runs the next segment iff prev status == 0
-     *   - `||` runs the next segment iff prev status != 0
-     *   - `;`  (and the implicit head-of-line) always runs
-     * Skipping leaves g_last_status untouched, so `false && a && b`
-     * cascades — every `&&` keeps looking at the original failure. */
-    int seg_start  = 0;
-    int next_chain = 2;          /* first segment runs unconditionally */
-    for (int j = 0; j <= ntok; j++) {
-        int at_end = (j == ntok);
-        int ck     = at_end ? 2 : chain_kind(toks[j]);
-        if (!at_end && ck == 0) continue;
-
-        /* NULL the separator slot so each segment's argv terminates
-         * cleanly when sys_exec walks until NULL. Without this, the
-         * `;` / `&&` / `||` token string would leak into the previous
-         * segment's argv. */
-        if (!at_end) toks[j] = 0;
-
-        if (seg_start < j) {
-            int run = 1;
-            if (next_chain ==  1 && g_last_status != 0) run = 0;
-            if (next_chain == -1 && g_last_status == 0) run = 0;
-            if (run) {
-                /* Substitute $? now — the prior segment just finished
-                 * and g_last_status is fresh. */
-                expand_dollar_q_segment(toks, seg_start, j);
-                g_last_status = execute_segment(toks, seg_start, j);
-            }
-        }
-        if (at_end) break;
-        seg_start  = j + 1;
-        next_chain = ck;
-    }
+    /* Hand off to the recursive token-sequence walker. It handles
+     * `;` / `&&` / `||` at depth 0 AND extends segments to cover
+     * whole `if`/`for`/`while` / `{` ... `}` compounds. */
+    exec_token_seq(toks, 0, ntok);
 }
 
 /* Read a shell script from `path`, execute each line. Blank lines and
@@ -1750,6 +2526,47 @@ static void execute_line(char *line_in) {
  * We read in 64-byte chunks and assemble lines incrementally — avoids
  * pre-allocating a whole-file buffer and naturally streams arbitrarily
  * large scripts (up to LINE_MAX per line). */
+/* Compute the depth delta of a single script line — how many compound
+ * blocks it opens minus how many it closes. Tokenizes a COPY (since
+ * tokenize is destructive) and counts depth_delta over the result.
+ * Used by run_script to decide when to accumulate vs flush.
+ *
+ * Function definitions opened mid-line via `NAME () {` also count: the
+ * `{` increments depth. The matching `}` later closes it. */
+static int line_depth_delta(const char *line) {
+    char copy[LINE_MAX];
+    int i = 0;
+    while (line[i] && i < (int)sizeof(copy) - 1) { copy[i] = line[i]; i++; }
+    copy[i] = 0;
+    char *toks[ARG_MAX];
+    int n = tokenize(copy, toks, ARG_MAX);
+    int d = 0;
+    for (int j = 0; j < n; j++) d += depth_delta(toks[j]);
+    return d;
+}
+
+/* Append a line to the multi-line accumulator buffer, inserting a
+ * `;` between it and prior content so the joined string parses the
+ * same way an actual `\n` would (every shell statement terminator
+ * acts like `;`). Returns -1 if the buffer would overflow. */
+static int script_buf_append(char *buf, int *blen, int cap, const char *line) {
+    int b = *blen;
+    if (b > 0 && b < cap - 1) buf[b++] = ';';
+    if (b > 0 && b < cap - 1) buf[b++] = ' ';
+    for (int i = 0; line[i]; i++) {
+        if (b >= cap - 1) return -1;
+        buf[b++] = line[i];
+    }
+    buf[b] = 0;
+    *blen = b;
+    return 0;
+}
+
+/* Read a script line-by-line, executing each line at depth 0 and
+ * buffering lines while inside a compound block (depth > 0). When
+ * depth returns to 0, the full multi-line block is handed to
+ * execute_line as one synthesized command — `;` glues the lines so
+ * `if cond\n then body\n fi` runs as `if cond ; then body ; fi`. */
 static int run_script(const char *path) {
     int fd = sys_open(path);
     if (fd < 0) return -1;
@@ -1758,6 +2575,12 @@ static int run_script(const char *path) {
     int  pos = 0;
     char chunk[64];
     int  eof = 0;
+
+    /* Multi-line compound accumulator. */
+    static char accum[LINE_MAX * 8];
+    int  accum_len = 0;
+    int  depth     = 0;
+
     while (!eof) {
         int n = sys_read(fd, chunk, sizeof(chunk));
         if (n <= 0) { eof = 1; n = 0; }
@@ -1768,7 +2591,27 @@ static int run_script(const char *path) {
                 line[pos] = 0;
                 int s = 0;
                 while (line[s] == ' ' || line[s] == '\t') s++;
-                if (line[s] && line[s] != '#') execute_line(&line[s]);
+                if (line[s] && line[s] != '#') {
+                    int d = line_depth_delta(&line[s]);
+                    if (depth > 0 || d > 0) {
+                        /* Inside or entering a compound — accumulate. */
+                        if (script_buf_append(accum, &accum_len,
+                                              sizeof(accum), &line[s]) < 0) {
+                            puts("sh: script: compound block too large\n");
+                            accum_len = 0; depth = 0;
+                        } else {
+                            depth += d;
+                            if (depth <= 0) {
+                                depth = 0;
+                                execute_line(accum);
+                                accum_len = 0;
+                                accum[0]  = 0;
+                            }
+                        }
+                    } else {
+                        execute_line(&line[s]);
+                    }
+                }
                 pos = 0;
             } else {
                 line[pos++] = c;
@@ -1780,8 +2623,22 @@ static int run_script(const char *path) {
         line[pos] = 0;
         int s = 0;
         while (line[s] == ' ' || line[s] == '\t') s++;
-        if (line[s] && line[s] != '#') execute_line(&line[s]);
+        if (line[s] && line[s] != '#') {
+            int d = line_depth_delta(&line[s]);
+            if (depth > 0 || d > 0) {
+                if (script_buf_append(accum, &accum_len,
+                                      sizeof(accum), &line[s]) >= 0) {
+                    depth += d;
+                }
+            } else {
+                execute_line(&line[s]);
+            }
+        }
     }
+    /* Flush any leftover compound — if depth is still > 0 the script
+     * was malformed, but try to run whatever we have so the user sees
+     * a parse error from inside execute_line rather than silent loss. */
+    if (accum_len > 0) execute_line(accum);
     sys_close(fd);
     return 0;
 }
@@ -4753,14 +5610,29 @@ int main(int argc, char **argv) {
 
     if (run_selftest) selftest();
 
-    /* Script mode: `sh script.sh` runs the file then exits. Selftest
-     * takes precedence so the headless boot path stays unchanged. */
+    /* Script mode: `sh script.sh [args...]` runs the file then exits.
+     * Selftest takes precedence so the headless boot path stays
+     * unchanged. Args after the script path become $1..$N inside it. */
     if (script_arg && !run_selftest) {
+        /* Walk argv to find args AFTER the script name. We already
+         * recorded its position above; everything after is positional. */
+        char *script_args[POS_MAX];
+        int   nargs = 0;
+        int   seen  = 0;
+        for (int i = 1; i < argc; i++) {
+            if (!seen) {
+                if (argv[i] == script_arg) seen = 1;
+                continue;
+            }
+            if (nargs < POS_MAX - 1) script_args[nargs++] = argv[i];
+        }
+        set_positional(script_arg, script_args, nargs);
+
         if (run_script(script_arg) < 0) {
             puts("sh: cannot open script: "); puts(script_arg); puts("\n");
             sys_exit(1);
         }
-        sys_exit(0);
+        sys_exit(g_last_status);
     }
 
     char line[LINE_MAX];
