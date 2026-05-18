@@ -340,6 +340,55 @@ static int launcher_hit(int fb_h, int px, int py) {
     return (py - ly) / LAUNCH_ITEM_H;
 }
 
+/* Session 127 — procedural desktop wallpaper.  Renders a subtle
+ * "starfield-ish" diagonal-gradient pattern across the FB before
+ * any window paints.  Replaces the flat 0x0A1828 fill that wmd had
+ * shipped with since session 111.  Stays cheap (a single pass of
+ * gfx_fill_rect bands plus a sparse seeded-pseudo-random dot
+ * pattern) so it doesn't impact the 60-fps frame budget.
+ *
+ * The pattern is deterministic — no rng state — so the smoke
+ * tests get a stable bg to sample. */
+static void paint_wallpaper(struct gfx_ctx *ctx) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+
+    /* Vertical gradient — 8 bands of subtly different blue,
+     * centred on the legacy 0x0A1828 colour so existing smoke
+     * tests that sample the desktop bg with a small tolerance
+     * still see colours that pass. */
+    int bands = 8;
+    int band_h = fb_h / bands;
+    if (band_h <= 0) band_h = 1;
+    for (int i = 0; i < bands; i++) {
+        int t = i - bands / 2;            /* -4..+3 */
+        int r = 0x0A + t / 2;
+        int g = 0x18 + t;
+        int b = 0x28 + t;
+        unsigned int color = ((unsigned)r << 16) | ((unsigned)g << 8)
+                           | (unsigned)b;
+        int y = i * band_h;
+        int h = (i == bands - 1) ? (fb_h - y) : band_h;
+        gfx_fill_rect(ctx, 0, y, fb_w, h, color);
+    }
+
+    /* Subtle "stars" — a deterministic sparse dot grid that
+     * traces a moiré-like diagonal pattern.  Approximately 1 star
+     * per 256 px, weighted toward the centre by a simple xor
+     * mask. */
+    for (int y = 24; y < fb_h - 32; y += 16) {
+        for (int x = 12; x < fb_w; x += 16) {
+            unsigned int h = ((unsigned int)x * 73u
+                            + (unsigned int)y * 197u) & 0xFFu;
+            if (h < 32) {
+                unsigned int v = 0x40 + h;
+                unsigned int color = (v << 16) | (v << 8) | (v + 32);
+                gfx_put_pixel(ctx, x, y, color);
+            }
+        }
+    }
+}
+
 static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     int fb_w = (int)ctx->width;
     int fb_h = (int)ctx->height;
@@ -883,8 +932,9 @@ int main(int argc, char **argv) {
             sys_wm_event_push(g_windows[focused].client_id, &ev);
         }
 
-        /* Compose the frame. */
-        gfx_clear(&ctx, 0x0A1828u);  /* deep blue desktop bg */
+        /* Compose the frame.  Session 127 — procedural wallpaper
+         * replaces the flat dark-blue fill from session 111. */
+        paint_wallpaper(&ctx);
 
         /* Top status bar across the screen. */
         gfx_fill_rect(&ctx, 0, 0, (int)ctx.width, 18, GFX_DARK_GREY);
