@@ -1401,8 +1401,7 @@ static struct node *parse_binop_rhs(int min_prec, struct node *lhs) {
 static struct node *parse_expr(void) {
     struct node *lhs = parse_binop_rhs(1, parse_primary());
     /* Session 96 — ternary `c ? a : b` lives at the lowest precedence
-     * above assignment. We don't have assignment-as-expression, so
-     * this is effectively the lowest precedence in cc. */
+     * above assignment. */
     if (tk_cur()->kind == T_QUESTION) {
         g_tk++;
         struct node *t = parse_expr();
@@ -1412,6 +1411,21 @@ static struct node *parse_expr(void) {
         n->a = lhs;
         n->b = t;
         n->c = e;
+        return n;
+    }
+    /* Session 125 — assignment as expression. `NAME = rhs` returns the
+     * stored value, so `if ((x = f()))` and `a = b = c` both work.
+     * Right-associative via the recursive parse_expr on the RHS. LHS
+     * must be a plain NAME — `*p = ...`, `a[i] = ...`, and field
+     * stores stay statement-only. */
+    if (lhs && lhs->kind == N_NAME && tk_cur()->kind == T_ASSIGN) {
+        g_tk++;
+        struct node *rhs = parse_expr();
+        struct node *n = new_node(N_ASSIGN);
+        int i = 0;
+        while (lhs->name[i]) { n->name[i] = lhs->name[i]; i++; }
+        n->name[i] = 0;
+        n->a = rhs;
         return n;
     }
     return lhs;
@@ -3912,6 +3926,14 @@ static void gen_expr(struct node *n) {
              * then evaluates b. The whole expression's value is b. */
             gen_expr(n->a);   /* side-effects only; result in eax discarded */
             gen_expr(n->b);   /* result stays in eax */
+            return;
+        }
+        case N_ASSIGN: {
+            /* Session 125 — assignment as an expression. Reuse the
+             * statement-level codegen; the scalar paths leave the
+             * stored value in eax (struct-assign paths don't, but
+             * struct-as-expression isn't supported anyway). */
+            gen_stmt(n);
             return;
         }
         case N_SIZEOF_NAME: {

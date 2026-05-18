@@ -107,5 +107,16 @@ again:
 done:
     printf("goto_sum         = %d\n", gsum);           /* 0+1+2+3 = 6 */
 
+    /* 8. assignment-as-expression. NAME = expr returns the stored
+     *    value. Right-associative (a = b = c -> a = (b = c)). */
+    int aa;
+    int bb;
+    int cc_;
+    cc_ = (aa = (bb = 7) + 3);
+    /* bb = 7 (returns 7); 7 + 3 = 10; aa = 10; cc_ = 10 */
+    printf("assign_expr_a    = %d\n", aa);             /* 10 */
+    printf("assign_expr_b    = %d\n", bb);             /* 7 */
+    printf("assign_expr_c    = %d\n", cc_);            /* 10 */
+
     return 0;
 }
