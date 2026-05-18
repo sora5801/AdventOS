@@ -142,6 +142,9 @@ typedef unsigned int   size_t;
 #define SYS_VIRTIO_CONSOLE_READ   98
 #define SYS_VIRTIO_BALLOON_STATS  99
 #define SYS_RENAME                101
+/* Session 136 — global clipboard.  102/103 because 101 is SYS_RENAME. */
+#define SYS_CLIPBOARD_SET         102
+#define SYS_CLIPBOARD_GET         103
 
 /* Session 70: syscall sandbox.
  *
@@ -379,6 +382,22 @@ int      sys_virtio_balloon_stats(unsigned int out[4]);
  * /mnt/9p). Returns -1 otherwise; userspace tools should fall back
  * to the copy+unlink path. */
 int      sys_rename (const char *oldp, const char *newp);
+
+/* Session 136 — global clipboard.  Any task may set or get.  Max
+ * payload 4096 bytes.
+ *
+ *   sys_clipboard_set(buf, len)
+ *     0  on success
+ *    -1  on out-of-memory or len > 4096
+ *     (len == 0 clears the clipboard)
+ *
+ *   sys_clipboard_get(buf, cap)
+ *      n  total stored length (NOT bytes copied — caller spots
+ *         truncation by comparing return to cap)
+ *      0  clipboard is empty
+ */
+int      sys_clipboard_set(const void *buf, int len);
+int      sys_clipboard_get(void *buf, int cap);
 
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns
