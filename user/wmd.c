@@ -505,6 +505,23 @@ int main(int argc, char **argv) {
         prev_mx = ms.x;
         prev_my = ms.y;
 
+        /* Session 114 — keyboard input.  Drain any keystrokes from
+         * the kernel ring and forward them to the click-focused
+         * client window (`focused`, not `target` — keyboard focus
+         * is click-based, not hover-based).  Bytes that arrive while
+         * no client window is focused are dropped. */
+        for (int drained = 0; drained < 32; drained++) {
+            int c = sys_kbd_poll();
+            if (c <= 0) break;
+            if (focused < 0
+                || focused >= g_window_count
+                || g_windows[focused].kind != KIND_CLIENT) continue;
+            struct sys_wm_event ev = {0};
+            ev.type    = WM_EV_KEY;
+            ev.keycode = (unsigned int)c;
+            sys_wm_event_push(g_windows[focused].client_id, &ev);
+        }
+
         /* Compose the frame. */
         gfx_clear(&ctx, 0x0A1828u);  /* deep blue desktop bg */
 

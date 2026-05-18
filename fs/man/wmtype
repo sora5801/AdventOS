@@ -1,0 +1,30 @@
+NAME
+    wmtype - text-input WM client (Path C phase 8)
+
+SYNOPSIS
+    wmtype [SECONDS]
+
+DESCRIPTION
+    Open a 320x200 window via SYS_WM_CREATE and act as a tiny
+    text scratchpad.  Keystrokes that arrive while wmtype has
+    keyboard focus (i.e. its window was the last one clicked)
+    are appended to an in-memory buffer and rendered using the
+    8x8 font.
+
+    Special keys:
+      Backspace / DEL    remove last character
+      Enter              insert newline
+      printable ASCII    append
+
+    Click the red "X" in the top-right of the window to clear
+    the buffer.
+
+    Exit after SECONDS (default 30) or when the WM closes the
+    window.
+
+EXIT STATUS
+    0  normal exit (timer or window close)
+    1  SYS_WM_CREATE failed (no wmd running)
+
+SEE ALSO
+    wmd(1), wmhello(1)
