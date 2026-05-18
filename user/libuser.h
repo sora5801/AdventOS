@@ -132,6 +132,9 @@ typedef unsigned int   size_t;
 /* Session 113 — input routing.  See struct sys_wm_event. */
 #define SYS_WM_EVENT_PUSH  94
 #define SYS_WM_EVENT_POLL  95
+/* Session 135 — Alt+Tab channel (separate from the main keyboard
+ * ring so the shell or another reader can't intercept it). */
+#define SYS_WM_POLL_ALTTAB 100
 
 /* Session 119 — Path E phase 2 (virtio-rng / -console / -balloon). */
 #define SYS_GETRANDOM             96
@@ -547,6 +550,10 @@ int      sys_wm_event_push (unsigned int window_id,
                             const struct sys_wm_event *ev);
 int      sys_wm_event_poll (unsigned int window_id,
                             struct sys_wm_event *out);
+/* Session 135 — wmd polls for pending Alt+Tab presses (one tick
+ * per drain).  Returns 1 if at least one is pending and
+ * decrements; 0 otherwise. */
+int      sys_wm_poll_alttab(void);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

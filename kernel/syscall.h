@@ -348,6 +348,12 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
+/* Session 135 — Alt+Tab routing.  USB-HID posts on Alt+Tab via
+ * the in-kernel `wm_post_alttab` helper.  Wmd polls via this
+ * syscall once per frame.  Returns 1 if at least one Alt+Tab
+ * press is pending (and decrements the counter), else 0. */
+#define SYS_WM_POLL_ALTTAB       100
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */
