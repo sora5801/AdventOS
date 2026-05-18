@@ -241,6 +241,42 @@ int sys_audio_play(const void *pcm, int n) {
     return ret;
 }
 
+int sys_getrandom(void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_GETRANDOM), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_console_write(const void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_CONSOLE_WRITE), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_console_read(void *buf, int n) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_CONSOLE_READ), "b"(buf), "c"(n)
+                      : "memory");
+    return ret;
+}
+
+int sys_virtio_balloon_stats(unsigned int out[4]) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_VIRTIO_BALLOON_STATS), "b"(out)
+                      : "memory");
+    return ret;
+}
+
 int sys_block_info(int dev_idx, struct sys_block_info *out) {
     int ret;
     __asm__ volatile ("int $0x80"

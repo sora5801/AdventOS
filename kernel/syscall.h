@@ -323,6 +323,31 @@ struct sys_limits {
                                 * 0 if queue empty, -1 if window isn't
                                 * owned by the calling task. */
 
+#define SYS_GETRANDOM     96   /* (eax=96, ebx=buf, ecx=len) -> bytes
+                                * read, or -1 if no virtio-rng device.
+                                * On no-device, falls back to a PIT-tick
+                                * pseudo-random (NOT cryptographically
+                                * secure — caller should branch on
+                                * sys_getrandom returning -1 if they need
+                                * real entropy and refuse to proceed). */
+
+#define SYS_VIRTIO_CONSOLE_WRITE  97 /* (eax=97, ebx=buf, ecx=n) -> bytes
+                                      * sent, or -1 if no virtio-console.
+                                      * Writes to the FIRST virtio-console
+                                      * port (port 0 on the FIRST virtio-
+                                      * serial controller). */
+
+#define SYS_VIRTIO_CONSOLE_READ   98 /* (eax=98, ebx=buf, ecx=n) -> bytes
+                                      * read (>=0), -1 if no device.
+                                      * Non-blocking: returns 0 if no
+                                      * bytes available right now. */
+
+#define SYS_VIRTIO_BALLOON_STATS  99 /* (eax=99, ebx=uint32_t out[4]) ->
+                                      * 0 on success, -1 if no balloon
+                                      * device. out: [actual_pages,
+                                      * target_pages, num_pages_freed,
+                                      * num_pages_reclaimed]. */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

@@ -9,6 +9,53 @@ CC=${CC:-gcc}
 LD=${LD:-ld}
 OBJCOPY=${OBJCOPY:-objcopy}
 
+# --- Platform / target detection ----------------------------------------
+#
+# AdventOS originally targeted PE/COFF (MSYS2 ucrt64 on Windows hosts).
+# To support Linux / WSL hosts too, we now auto-detect and switch between
+# PE and ELF output for the freestanding kernel + user binaries.  Either
+# way the FINAL artifact (kernel.bin, user/*.bin) is the same flat blob
+# produced by `objcopy -O binary` — the difference is just the linker
+# emulation (-m "$LD_EMUL" vs -m elf_i386) and one compiler flag.
+#
+# Key wrinkle: under PE/COFF, gcc prepends an underscore to every public
+# symbol (`_kmain`, `_bss_start`, ...).  Our hand-written assembly stubs
+# (entry.S, isr_stubs.S, task_switch.S, ap_trampoline.S) are written in
+# that convention.  Native i386-elf gcc does NOT prepend the underscore,
+# so the symbols mismatch — `call _kmain` in entry.S would not resolve.
+# `-fleading-underscore` forces gcc to add the underscore on ELF too,
+# keeping the assembly portable between targets.
+#
+# Override either by exporting TARGET_FORMAT=elf|pe before running.
+if [ -z "${TARGET_FORMAT:-}" ]; then
+    case "$(uname -s)" in
+        Linux*)            TARGET_FORMAT=elf ;;
+        MSYS*|MINGW*|CYGWIN*) TARGET_FORMAT=pe ;;
+        *)                 TARGET_FORMAT=elf ;;
+    esac
+fi
+
+case "$TARGET_FORMAT" in
+    elf)
+        LD_EMUL=elf_i386
+        # -fleading-underscore: emit `_kmain` etc. so the existing
+        # PE-style hand-written asm symbols resolve under ELF.
+        # -mno-stack-arg-probe: on Linux this is a no-op (no __chkstk
+        # is emitted by default), but harmless and keeps PE/ELF flag
+        # parity in case someone copies a single line.
+        TARGET_CC_EXTRA=(-fleading-underscore)
+        ;;
+    pe)
+        LD_EMUL=i386pe
+        TARGET_CC_EXTRA=()
+        ;;
+    *)
+        echo "ERROR: unknown TARGET_FORMAT=$TARGET_FORMAT (want elf or pe)" >&2
+        exit 1
+        ;;
+esac
+echo "[note] target=$TARGET_FORMAT (ld -m $LD_EMUL)"
+
 CFLAGS=(
     -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector
     -fno-asynchronous-unwind-tables -fno-unwind-tables
@@ -31,8 +78,9 @@ CFLAGS=(
     -ffunction-sections
     -Wall -Wextra -Wno-unused-parameter
     -Iinclude -Ikernel
+    "${TARGET_CC_EXTRA[@]}"
 )
-ASFLAGS=(-m32 -nostdlib -nostartfiles)
+ASFLAGS=(-m32 -nostdlib -nostartfiles "${TARGET_CC_EXTRA[@]}")
 
 # Session 80 — opt-in SMP tracing. Set SMP_TRACE=1 in the environment
 # (e.g. `SMP_TRACE=1 bash build.sh`) and the kernel's lock / scheduler
@@ -70,26 +118,17 @@ USER_CFLAGS=(
     -mno-stack-arg-probe          # don't emit __chkstk for big frames
     -nostdlib -nostartfiles
     -O2 -std=gnu11
-    # Session 125 considered enabling -ffunction-sections + --gc-sections
-    # for user programs (same trick as the kernel — session 112), but
-    # two latent issues kept it on the bench:
-    #   1. libuser.c uses indirection through LIBC_TABLE (a fixed-VA
-    #      function-pointer table populated by libc.bin at runtime).
-    #      --gc-sections can't see those references and drops
-    #      putchar / sys_write / etc., leaving them as undefined
-    #      symbols silently resolved to 0 by the PE/COFF linker.
-    #   2. When a process that holds the FB (wmd) fork+exec's a WM
-    #      client, the inherited FB mapping at 0x50000000 goes
-    #      through paging_destroy_user_pd on exec, which then
-    #      pmm_free_page's MMIO addresses.  The bug is latent in
-    #      larger binaries but triggers reliably once gc-sections
-    #      shrinks wmhello (smoke_wmlauncher then sees wmhello's
-    #      taskbar button appear but the surface stays blank).
-    # Both are fixable but out of scope here; tracked for a future
-    # session.  User programs link the full libuser / libgfx / libwm
-    # objects unchanged for now.
+    # Session 132 — function-level sectioning + --gc-sections drops
+    # unreferenced libuser / libgfx / libwm code per binary.  The
+    # libuser indirections through LIBC_TABLE (printf → vprintf,
+    # malloc → libc.bin malloc, etc.) hide their target symbols
+    # from the linker's reachability graph; those wrappers are
+    # tagged __attribute__((used)) in libuser.c so the compiler
+    # emits them and the linker keeps them.
+    -ffunction-sections
     -Wall -Wextra -Wno-unused-parameter
     -Iuser
+    "${TARGET_CC_EXTRA[@]}"
 )
 
 mkdir -p boot kernel user/_obj
@@ -111,7 +150,7 @@ done
 "$CC" "${ASFLAGS[@]}" -c -o boot/boot.o boot/boot.S
 
 echo "[3/7] link bootloader"
-"$LD" -m i386pe -T linker_boot.ld -o boot/boot.elf boot/boot.o
+"$LD" -m "$LD_EMUL" -T linker_boot.ld -o boot/boot.elf boot/boot.o
 "$OBJCOPY" -O binary -j .text boot/boot.elf boot/boot.bin
 boot_size=$(stat -c%s boot/boot.bin)
 if [ "$boot_size" -ne 512 ]; then
@@ -121,7 +160,7 @@ fi
 echo "        boot.bin = $boot_size bytes"
 
 echo "[4/7] link kernel"
-"$LD" -m i386pe -T linker_kernel.ld --gc-sections -o kernel/kernel.elf "${KERNEL_OBJS[@]}"
+"$LD" -m "$LD_EMUL" -T linker_kernel.ld --gc-sections -o kernel/kernel.elf "${KERNEL_OBJS[@]}"
 "$OBJCOPY" -O binary -j .text -j .rdata -j .data -j .up1 -j .up2 kernel/kernel.elf kernel/kernel.bin
 echo "        kernel.bin = $(stat -c%s kernel/kernel.bin) bytes"
 
@@ -133,7 +172,7 @@ for src in libc/*.c; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "$obj" "$src"
     LIBC_OBJS+=("$obj")
 done
-"$LD" -m i386pe -T libc/libc.ld -o libc/_obj/libc.elf "${LIBC_OBJS[@]}"
+"$LD" -m "$LD_EMUL" -T libc/libc.ld -o libc/_obj/libc.elf "${LIBC_OBJS[@]}"
 "$OBJCOPY" -O binary -j .exports -j .text -j .rdata -j .data \
     libc/_obj/libc.elf libc/_obj/libc.bin
 echo "        libc.bin = $(stat -c%s libc/_obj/libc.bin) bytes"
@@ -178,7 +217,7 @@ mkdir -p libwm/_obj
 LIBWM_OBJS=(libwm/_obj/libwm.o)
 echo "        libwm.o = $(stat -c%s libwm/_obj/libwm.o) bytes"
 
-# Session 131 (Path B Phase 1 of the tcc port): build a HOST copy of
+# Session 133 (Path B Phase 1 of the tcc port): build a HOST copy of
 # tcc.  This is a Phase 1 stepping-stone — Phase 2 cross-compiles tcc
 # with USER_CFLAGS for tcc.elf running INSIDE AdventOS, and that's
 # a multi-session libuser-expansion project. The host build verifies
@@ -225,7 +264,9 @@ USER_PROGS=(hello sh echo httpd ed init
             cp mv rm mkdir rmdir chmod touch find
             man
             lua
-            cc)
+            cc
+            aplay
+            rand hvc balloonctl)
 # Session 108+: graphics programs link in libgfx on top of libuser.
 # Same separate-list pattern as the JSON / agent / crypto buckets.
 GFX_PROGS=(gfx mouse wmd)
@@ -243,7 +284,7 @@ WMCLIENT_PROGS=(wmhello wmtype wmclock wmpaint wmpair wmfiles wmsysinfo wmps)
 # libjson linked.
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
@@ -266,7 +307,7 @@ done
 JSON_PROGS=(ls cat wc date ps agentd pluck where count sort grep uniq)
 for name in "${JSON_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBJSON_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -290,7 +331,7 @@ for name in "${AGENT_PROGS[@]}"; do
     # JSONL output of its sub-shell calls. Link libjson alongside
     # libagent — harmless for the other agent selftests (linker
     # discards unreferenced symbols).
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" \
         user/_obj/libuser.o user/_obj/libagent.o \
         "${LIBJSON_OBJS[@]}"
@@ -307,7 +348,7 @@ for name in "${TLS_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBCRYPTO_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -322,7 +363,7 @@ for name in "${GFX_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBGFX_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -339,7 +380,7 @@ for name in "${WMCLIENT_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m i386pe -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBGFX_OBJS[@]}" "${LIBWM_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -483,7 +524,7 @@ echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
 
 echo "[7/7] mkfs + append AdventFS at LBA $fs_lba"
-python mkfs.py
+"${PYTHON:-$(command -v python python3 2>/dev/null | head -1)}" mkfs.py
 fs_offset=$(( fs_lba * 512 ))
 sz=$(stat -c%s os.img)
 if [ "$sz" -lt "$fs_offset" ]; then

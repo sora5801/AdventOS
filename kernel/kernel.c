@@ -46,7 +46,14 @@
 #include "dyld.h"
 #include "ac97.h"
 #include "usb_core.h"
+#include "usb_cdc_acm.h"
 #include "blkdev.h"
+#include "virtio_blk.h"
+#include "virtio_net.h"
+#include "virtio_rng.h"
+#include "virtio_console.h"
+#include "virtio_balloon.h"
+#include "virtio_9p.h"
 
 /* Session 38 gate: 1 = user tasks free to run on any CPU; 0 =
  * pinned to BSP. The BKL machinery + race-fixed task creation are
@@ -197,6 +204,30 @@ void kmain(uint32_t boot_drive) {
     ata_init();
     kputs("ok\n");
 
+    /* virtio-blk: paravirtualized block device. Silent no-op when no
+     * such device is present. Registers as blkdev slot 1 (after ATA's
+     * slot 0) when QEMU was launched with `-device virtio-blk-pci`. */
+    kputs("[boot] probing virtio-blk... ");
+    virtio_blk_init();
+    kputs("done\n");
+
+    /* virtio-rng / -console / -balloon: more paravirtualized devices.
+     * All silently no-op when not present. */
+    kputs("[boot] probing virtio-rng... ");
+    virtio_rng_init();
+    kputs("done\n");
+    kputs("[boot] probing virtio-console... ");
+    virtio_console_init();
+    kputs("done\n");
+    kputs("[boot] probing virtio-balloon... ");
+    virtio_balloon_init();
+    kputs("done\n");
+    /* virtio-9p init does Tversion + Tattach right here; the mount
+     * into the VFS namespace is deferred to after vfs_init below. */
+    kputs("[boot] probing virtio-9p... ");
+    virtio_9p_init();
+    kputs("done\n");
+
     /* Block cache must be live BEFORE fs_init — fs.c reads its
      * superblock through bcache_read on the first call. */
     kputs("[boot] initializing block cache... ");
@@ -227,6 +258,13 @@ void kmain(uint32_t boot_drive) {
     vfs_mkdir("/var");
     vfs_mkdir("/var/kv");
     vfs_mkdir("/var/cron");
+    /* virtio-9p auto-mount: if the device is present + ready, the
+     * host's exported directory shows up at /mnt/9p. Silent no-op
+     * otherwise (e.g. on Windows/MSYS2 QEMU which lacks 9p support). */
+    vfs_mkdir("/mnt");
+    if (virtio_9p_available()) {
+        virtio_9p_mount("/mnt/9p");
+    }
     kputs("ok\n");
 
     {
@@ -283,6 +321,13 @@ void kmain(uint32_t boot_drive) {
     kputs("[boot] starting network stack\n");
     net_init();
 
+    /* If net_init bound virtio-net, start its RX polling task NOW —
+     * before DHCP runs. DHCP blocks waiting for an OFFER reply, and
+     * the virtio-net RX path is polled (no IRQ), so the poller has
+     * to be live for any DHCP packet to be received. The RTL8139
+     * path is IRQ-driven and doesn't care about this ordering. */
+    virtio_net_start_polling();
+
     /* UDP transport — must come before DHCP, which uses port 68/67. */
     udp_init();
 
@@ -325,6 +370,10 @@ void kmain(uint32_t boot_drive) {
      * code has finished, kick off background polling tasks (USB
      * HID, etc.) that need to run on whichever CPU schedule(). */
     usb_start_polling();
+    usb_cdc_acm_start_polling();
+    /* virtio_net_start_polling already fired above before DHCP. */
+    virtio_console_start_polling();
+    virtio_balloon_start_task();
 
     /* If a USB Mass Storage device showed up during USB enumeration,
      * try to mount it as an additional AdventFS instance at /mnt/usb.

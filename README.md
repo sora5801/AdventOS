@@ -23,7 +23,9 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Sandbox masks + per-task resource limits (RSS/CPU/wall/FDs) | ✅ |
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
-| ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage | ✅ |
+| ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
+| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough) | ✅ |
+| AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
 | In-guest httpd, httpsd, sshd, ircd | ✅ |
@@ -93,13 +95,16 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **131 — Path B tcc port, Phase 1 foundation**. See [`docs/118-pathB-tcc-foundation.md`](docs/118-pathB-tcc-foundation.md) for the deep dive. Vendors TinyCC 0.9.28rc at `tcc/`, strips down to the i386 + ELF subset (~22 .c/.h files, ~1.8 MB), wires a host-only build into `build.sh` (step `[5f/7]`). `tcc.exe` is 685 KiB, identifies itself as `tcc version 0.9.28rc-adventos (i386 Linux)` and emits valid i386 ELF object files. Phase 2 (cross-compile to `tcc.elf` + add the ~30 libc functions tcc needs to libuser) is multi-session work; the audit + plan lives in [`tcc/README.AdventOS`](tcc/README.AdventOS).
+Current session: **133 — Path B tcc port, Phase 1 foundation**. See [`docs/119-pathB-tcc-foundation.md`](docs/119-pathB-tcc-foundation.md) for the deep dive. Vendors TinyCC 0.9.28rc at `tcc/`, strips down to the i386 + ELF subset (~22 .c/.h files, ~1.8 MB), wires a host-only build into `build.sh` (step `[5f/7]`). `tcc.exe` is 685 KiB, identifies itself as `tcc version 0.9.28rc-adventos (i386 Linux)` and emits valid i386 ELF object files. Phase 2 (cross-compile to `tcc.elf` + add the ~30 libc functions tcc needs to libuser) is multi-session work; the audit + plan lives in [`tcc/README.AdventOS`](tcc/README.AdventOS).
 
 Recent session deep dives:
-- [Session 131 — Path B tcc port, Phase 1 foundation](docs/118-pathB-tcc-foundation.md)
+- [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
+- [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
 - [Session 121 — Path B Phase 4 capstone (SBV returns, static/extern, fp typedef)](docs/108-pathB-capstone.md)
+- [Session 119 — Path E phase 2: virtio-rng, virtio-console, virtio-balloon](docs/106-pathE-more-virtio.md)
+- [Session 118 — Path E: drivers (virtio-blk, virtio-net, CDC-ACM, aplay)](docs/105-pathE-drivers.md)
 - [Session 107 — Path C phase 1: userspace framebuffer](docs/94-pathC-fb.md)
 - [Session 106 — cc Phase 3 part 10: struct-by-value calls](docs/93-cc-struct-by-value.md)
 - [Session 105 — cc Phase 3 part 9: variadic functions](docs/92-cc-variadics.md)
@@ -144,14 +149,16 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 
 **Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
 
-**Path B — Self-hosting is complete** as of Session 121. Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 (Phase 2) added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Sessions 97–106 (Phase 3) layered on structs (with `.` / `->` / linked-list-style pointer fields / struct-pointer params), function pointers, `sizeof(TYPE)` + scaled pointer arithmetic, multi-file compilation, struct value assignment via `rep movsd`, array-of-struct + indexed member access, `enum`, `typedef`, real user-defined variadic functions, and struct-by-value function arguments. Session 121 (Phase 4 capstone) ships the last three language items: struct-by-value RETURNS (hidden-first-arg cdecl ABI), `static` / `extern` storage-class keywords, and the `typedef RET (*NAME)(ARGS);` function-pointer typedef syntax — see [`docs/108-pathB-capstone.md`](docs/108-pathB-capstone.md). Session 125 follows up with four optimization passes (smart register-allocator codegen, constant folding, rolling peephole, DCE) that shrink cc's output by ~7.5% — see [`docs/112-pathB-optimizations.md`](docs/112-pathB-optimizations.md). Session 131 vendors TinyCC at `tcc/` as Phase 1 of a real C compiler port; cc stays as the always-works backstop while tcc layers on top in future sessions — see [`docs/118-pathB-tcc-foundation.md`](docs/118-pathB-tcc-foundation.md).
+**Path B — Self-hosting is complete** as of Session 121. Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 (Phase 2) added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Sessions 97–106 (Phase 3) layered on structs (with `.` / `->` / linked-list-style pointer fields / struct-pointer params), function pointers, `sizeof(TYPE)` + scaled pointer arithmetic, multi-file compilation, struct value assignment via `rep movsd`, array-of-struct + indexed member access, `enum`, `typedef`, real user-defined variadic functions, and struct-by-value function arguments. Session 121 (Phase 4 capstone) ships the last three language items: struct-by-value RETURNS (hidden-first-arg cdecl ABI), `static` / `extern` storage-class keywords, and the `typedef RET (*NAME)(ARGS);` function-pointer typedef syntax — see [`docs/108-pathB-capstone.md`](docs/108-pathB-capstone.md). Session 125 follows up with four optimization passes (smart register-allocator codegen, constant folding, rolling peephole, DCE) that shrink cc's output by ~7.5% — see [`docs/112-pathB-optimizations.md`](docs/112-pathB-optimizations.md). Session 133 vendors TinyCC at `tcc/` as Phase 1 of a real C compiler port; cc stays as the always-works backstop while tcc layers on top in future sessions — see [`docs/119-pathB-tcc-foundation.md`](docs/119-pathB-tcc-foundation.md).
 
 **Path C — Graphics is started** as of session 107. Userspace can now take ownership of the VBE framebuffer, get it mapped into its address space, and write pixels directly. `gfx.elf` paints a test card; fbcon mutes while a task owns the FB and resumes on release. Follow-ups: software drawing lib (108), mouse driver (109), double-buffer (110), window manager daemon (111).
 
+**Path E — Drivers is the active path.** Phase 1 (session 118) landed virtio-blk (paravirtualized block, slots into the existing `blkdev` table as `vblk0`), virtio-net (paravirtualized NIC, falls back from RTL8139 in `net_init`), USB CDC-ACM (the "USB serial port" class — Arduino/ESP32 dongles work via `-device usb-host` passthrough), and `aplay.elf` (userspace PCM/WAV streamer that feeds the existing AC97 codec via `SYS_AUDIO_PLAY`) — see [`docs/105-pathE-drivers.md`](docs/105-pathE-drivers.md) for the legacy-virtio gotcha where capping qsize silently breaks every request. Phase 2 (session 119) added virtio-rng (entropy with `SYS_GETRANDOM` + `rand`), virtio-console (second serial via `hvc`), and virtio-balloon (cooperative memory pressure via `balloonctl`) — see [`docs/106-pathE-more-virtio.md`](docs/106-pathE-more-virtio.md).
+
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
-- **Path C 108+** — drawing library, mouse, window manager.
-- **Path E — Drivers.** virtio (modern QEMU's preferred device family), more USB device classes, sound consumer.
+- **Path C 108+** — drawing library, mouse, window manager (active path).
+- **Path E — Drivers extension** — sessions 118–120 covered virtio-blk/net/rng/console/balloon/9p + USB CDC-ACM + AC97 consumer + WSL build path. Still candidate: 9p writes (Tlcreate/Twrite), IRQ-driven virtio completion, USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
 
 ## License
 
