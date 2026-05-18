@@ -63,10 +63,16 @@
  * gfx + mouse demos + man pages. After --gc-sections shaved ~21 KiB
  * off kernel.bin, the extra 1 KiB of super-block buffer fits with
  * room to spare. FS_SUPER_SECTORS bumped 9 -> 11 to cover the
- * 5120-byte entry table. Old fs.img files are incompatible. */
-#define FS_SUPER_SECTORS        11u
+ * 5120-byte entry table. Old fs.img files are incompatible.
+ *
+ * Session 137 — bumped to 192 because the tcc-UX work ships ~25
+ * header stubs + runtime sources at /tcc/include and /tcc/lib so
+ * `tcc /hello.c -o /hello.elf` works on stock source.  Each new
+ * entry consumes one slot.  192 * 32 = 6144B entry table + 512B
+ * header = 6656B / 512 = 13 sectors of super, up from 11. */
+#define FS_SUPER_SECTORS        13u
 #define FS_NAME_MAX             16
-#define FS_MAX_FILES            160
+#define FS_MAX_FILES            192
 #define FS_ENTRY_SIZE           32
 #define FS_MAGIC                "ADVENTFS"
 

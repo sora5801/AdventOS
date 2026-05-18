@@ -7,8 +7,12 @@
  * machinery — provide an empty stub. (The C source name `__main`
  * gets one mingw underscore added at compile time, producing the
  * `___main` symbol the linker is looking for.)
+ *
+ * Skipped under tcc — tcc does not emit the ___main call.
  */
+#ifndef __TINYC__
 void __main(void) {}
+#endif
 
 /* ---------- Syscall wrappers --------------------------------------- */
 
@@ -1084,6 +1088,7 @@ int sys_bcache_stats(uint32_t out[5]) {
  * C-visible name is `sigreturn_tramp`; mingw32 prepends an underscore
  * to map C symbols to asm symbols, so the asm label is `_sigreturn_tramp`.
  */
+#ifndef __TINYC__
 __asm__ (
     ".global _sigreturn_tramp        \n"
     "_sigreturn_tramp:               \n"
@@ -1114,6 +1119,18 @@ sighandler_t signal(int sig, sighandler_t handler) {
      * code can use either name. */
     return sigaction(sig, handler);
 }
+#else
+/* Session 137 — tcc build: signal handlers stubbed out.  The
+ * sigreturn_tramp asm uses the mingw underscored symbol convention
+ * (`_sigreturn_tramp`); under tcc-Linux-ELF the assembled label has
+ * no leading underscore and `extern void sigreturn_tramp(void)`
+ * would resolve to the bare name — link mismatch.  Programs that
+ * need real signal handling can hand-roll their own sigaction wrapper. */
+sighandler_t sigaction(int sig, sighandler_t handler) {
+    (void)sig; (void)handler; return (sighandler_t)0;
+}
+sighandler_t signal(int sig, sighandler_t handler) { return sigaction(sig, handler); }
+#endif
 
 /* ---------- Dynamic libc trampolines -------------------------------
  *

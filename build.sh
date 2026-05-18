@@ -257,7 +257,7 @@ echo "[5/7] build user programs"
 # path-A "usable Unix" coreutils gap-fill.
 USER_PROGS=(hello sh echo httpd ed init
             head tail tee tr seq kill pwd
-            nc wget telnet irc ircd beep usbtest vi id fwtest
+            nc wget telnet irc ircd beep usbtest vi id fwtest tcc
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
             smp-hammer
@@ -532,13 +532,18 @@ echo "sizes: kernel.bin $kernel_size/$kernel_budget ($(pct $kernel_size $kernel_
 if [ -d tcc ] && [ -f tcc/tcc.c ] && [ -d tcc/adventos-include ]; then
     echo "[5g/7] cross-compile tcc.elf (Phase 2 — tcc running inside AdventOS)"
     mkdir -p tcc/_obj
-    "$CC" "${USER_CFLAGS[@]}" \
+    # MSYS_NO_PATHCONV=1: keeps MSYS from rewriting "/tcc" in the
+    # -DCONFIG_TCCDIR flag as a Windows absolute path (C:/Program Files/...).
+    # We want the literal string "/tcc" baked into the binary so the
+    # in-AdventOS tcc looks at /tcc/include for stdarg.h etc.
+    MSYS_NO_PATHCONV=1 "$CC" "${USER_CFLAGS[@]}" \
         -nostdinc \
         -U_WIN32 -U_WIN64 -U__WIN32__ -U__WIN32 -U__MINGW32__ -U__MINGW64__ \
         -DTCC_TARGET_I386 -DONE_SOURCE -DCONFIG_TCC_STATIC=1 \
         -DCONFIG_TCC_PREDEFS=1 -DCONFIG_TCC_SEMLOCK=0 \
         -DCONFIG_TCC_BACKTRACE=0 \
         -DTCC_VERSION='"0.9.28adventos"' \
+        -DCONFIG_TCCDIR='"/tcc"' \
         -include tcc/adventos-include/adventos-libc.h \
         -Iuser -Itcc/adventos-include -Itcc -Itcc/include \
         -w -c -o tcc/_obj/tcc-cross.o tcc/tcc.c

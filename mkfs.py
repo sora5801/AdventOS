@@ -34,9 +34,9 @@ EHDR_SIZE         = 52
 PHDR_SIZE         = 32
 
 FS_NAME_MAX       = 16
-FS_MAX_FILES      = 160         # session 112; must match kernel/fs.h
+FS_MAX_FILES      = 192         # session 137; must match kernel/fs.h
 FS_ENTRY_SIZE     = 32          # name(16) + start(4) + size(4) + type(1) + parent(1) + 6 reserved
-FS_SUPER_SECTORS  = 11          # 1 header + 10 entry sectors (160 * 32 = 5120B); must match kernel/fs.h
+FS_SUPER_SECTORS  = 13          # 1 header + 12 entry sectors (192 * 32 = 6144B); must match kernel/fs.h
 
 FS_TYPE_FREE      = 0
 FS_TYPE_FILE      = 1
@@ -54,7 +54,10 @@ DIRECTORIES = [
     'etc',
     'mnt',                   # session 42 — USB drive mounts here at /mnt/usb
     'man',                   # session 85 — man pages (flat layout, no section dirs)
+    'tcc',                   # session 137 — tcc runtime (CONFIG_TCCDIR=/tcc)
     ('ssl', 'etc'),          # session 59 — CA root store + httpsd server cert/key
+    ('lib', 'tcc'),          # session 137 — /tcc/lib (start.c, libuser.c)
+    ('include', 'tcc'),      # session 137 — /tcc/include (system header stubs)
 ]
 
 # (on-disk filename, source binary path, parent directory name or None for root)
@@ -102,7 +105,14 @@ USER_PROGRAMS = [
     # than cc.elf, but supports float, long long, full type system,
     # function-like macros, etc.  Both live alongside; cc is the
     # backstop, tcc is the heavy-duty option.
-    ('tcc.elf',   'tcc/_obj/tcc.bin',    None),
+    #
+    # Session 137: the raw tcc binary is now /tccraw.elf; /tcc.elf
+    # itself is a tiny wrapper (user/tcc.c) that prepends AdventOS-
+    # default flags (-static -nostdlib -Wl,-Ttext=0x40000000 +
+    # /tcc/lib/start.c + /tcc/lib/libuser.c) so users can run
+    # `tcc /hello.c -o /hello.elf` on a stock printf-using source.
+    ('tccraw.elf', 'tcc/_obj/tcc.bin',   None),
+    ('tcc.elf',    'user/_obj/tcc.bin',  None),
     # Session 107: path-C phase 1 — userspace framebuffer demo.
     ('gfx.elf',   'user/_obj/gfx.bin',   None),
     # Session 109: path-C phase 3 — PS/2 mouse demo.
@@ -314,6 +324,51 @@ DATA_FILES = [
     ('thello.c',  'fs/thello.c',  None),
     # Session 135: hello program with own _start so tcc can fully link it.
     ('thello2.c', 'fs/thello2.c', None),
+    # Session 137: a stock hello-world that uses printf — the polished
+    # tcc UX should make `tcc /hello.c -o /hello.elf` work on this with
+    # no flags.
+    ('hello.c',   'fs/_tccrt_hello.c', None),
+
+    # Session 137: tcc runtime + headers shipped at /tcc/.  tcc.elf is
+    # cross-built with -DCONFIG_TCCDIR='"/tcc"' so the in-AdventOS tcc
+    # auto-finds /tcc/include for system headers; the wrapper /tcc.elf
+    # prepends /tcc/lib/start.c + /tcc/lib/libuser.c to the source list
+    # so user programs link cleanly.
+    ('start.c',         'fs/_tccrt_start.c',                                  'lib'),
+    ('libuser.c',       'user/libuser.c',                                     'lib'),
+
+    # tcc's own headers (stdarg, stddef, etc.) — required by every C
+    # source that includes <stdarg.h>.  tcc's built-in include path
+    # search hits CONFIG_TCCDIR/include first, so these live there.
+    ('stdarg.h',        'tcc/include/stdarg.h',                               'include'),
+    ('stddef.h',        'tcc/include/stddef.h',                               'include'),
+    ('stdbool.h',       'tcc/include/stdbool.h',                              'include'),
+    ('float.h',         'tcc/include/float.h',                                'include'),
+    ('stdnoreturn.h',   'tcc/include/stdnoreturn.h',                          'include'),
+    ('stdalign.h',      'tcc/include/stdalign.h',                             'include'),
+
+    # AdventOS stub headers — every one re-includes adventos-libc.h
+    # which pulls in libuser.h and adds the typedefs / macros / inline
+    # stubs tcc references but AdventOS doesn't directly provide.
+    ('libuser.h',       'user/libuser.h',                                     'include'),
+    ('adventos-libc.h', 'tcc/adventos-include/adventos-libc.h',               'include'),
+    ('stdio.h',         'tcc/adventos-include/stdio.h',                       'include'),
+    ('stdlib.h',        'tcc/adventos-include/stdlib.h',                      'include'),
+    ('string.h',        'tcc/adventos-include/string.h',                      'include'),
+    ('ctype.h',         'tcc/adventos-include/ctype.h',                       'include'),
+    ('errno.h',         'tcc/adventos-include/errno.h',                       'include'),
+    ('setjmp.h',        'tcc/adventos-include/setjmp.h',                      'include'),
+    ('time.h',          'tcc/adventos-include/time.h',                        'include'),
+    ('unistd.h',        'tcc/adventos-include/unistd.h',                      'include'),
+    ('fcntl.h',         'tcc/adventos-include/fcntl.h',                       'include'),
+    ('limits.h',        'tcc/adventos-include/limits.h',                      'include'),
+    ('signal.h',        'tcc/adventos-include/signal.h',                      'include'),
+    ('malloc.h',        'tcc/adventos-include/malloc.h',                      'include'),
+    ('math.h',          'tcc/adventos-include/math.h',                        'include'),
+    ('locale.h',        'tcc/adventos-include/locale.h',                      'include'),
+    ('assert.h',        'tcc/adventos-include/assert.h',                      'include'),
+    ('inttypes.h',      'tcc/adventos-include/inttypes.h',                    'include'),
+    ('dlfcn.h',         'tcc/adventos-include/dlfcn.h',                       'include'),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
