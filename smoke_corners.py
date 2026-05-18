@@ -60,6 +60,9 @@ EXPECTED = [
     "assign_expr_c    = 10",
     "switch_total     = 122",
     "array2d_sum      = 21",
+    "static_local_1   = 101",
+    "static_local_2   = 102",
+    "static_local_3   = 103",
 ]
 
 

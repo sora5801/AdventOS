@@ -1064,6 +1064,8 @@ enum {
     N_DEFAULT,       /* default: */
     N_INDEX2,        /* NAME[i][j]      — 2D read */
     N_INDEX2_ASSIGN, /* NAME[i][j] = expr — 2D write (val in n->c) */
+    N_NOP,           /* parse-time no-op (e.g. static locals, after the
+                      * global has been registered and the rename queued) */
 };
 
 struct node {
@@ -1122,6 +1124,31 @@ static struct node *parse_expr(void);
 static struct node *parse_comma_expr(void);
 static struct node *parse_block(void);
 static struct node *parse_stmt(void);
+
+/* Session 125 — `static` LOCAL variable support.
+ *
+ * Inside a function body, `static int x;` (or `static int x = N;`) gives
+ * x persistent storage across calls. Implementation:
+ *
+ *   1. At parse time, mangle x → _sl_<funcname>_<x> and global_declare
+ *      it (with the initializer baked into the data pool if present).
+ *   2. Record a rename entry `x → _sl_funcname_x` in a per-function
+ *      table.
+ *   3. After the body parse completes, walk the body AST and rewrite
+ *      any N_NAME / N_ASSIGN / etc. that references `x` to use the
+ *      mangled name. After the walk, the body looks like ordinary
+ *      global access.
+ *
+ * The rename table is reset at the start of each parse_func. */
+#define MAX_RENAMES_PER_FUNC 16
+struct rename_entry {
+    char from[NAME_MAX];
+    char to[NAME_MAX];        /* mangled name — must fit in NAME_MAX
+                               * since AST node->name is that size */
+};
+static struct rename_entry g_renames[MAX_RENAMES_PER_FUNC];
+static int                 g_n_renames;
+static char                g_cur_parse_fn_name[NAME_MAX];
 
 /* Precedence (higher = tighter). C semantics: */
 static int binop_prec(int t) {
@@ -1654,6 +1681,66 @@ static struct node *parse_stmt(void) {
         n->b = parse_stmt();
         return n;
     }
+    /* Session 125 — `static <type> x [= N];` LOCAL variable. Gets
+     * persistent storage as a mangled global; references to `x`
+     * within this function are rewritten to the mangled name at
+     * end-of-body. */
+    if (t == T_STATIC) {
+        g_tk++;
+        int is_char;
+        if (tk_cur()->kind == T_INT)       is_char = 0;
+        else if (tk_cur()->kind == T_CHAR) is_char = 1;
+        else die_at(tk_cur()->line, "static local: only int/char supported", 0);
+        g_tk++;
+        int is_ptr = accept(T_STAR);
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "static local: expected name", 0);
+        char varname[NAME_MAX];
+        int vi = 0;
+        while (tk_cur()->name[vi] && vi < NAME_MAX - 1) {
+            varname[vi] = tk_cur()->name[vi]; vi++;
+        }
+        varname[vi] = 0;
+        g_tk++;
+        /* Build mangled name. NAME_MAX is 24; concat may truncate
+         * for long names — we just clamp. */
+        char mangled[NAME_MAX];
+        int mi = 0;
+        const char *pfx = "_sl_";
+        for (int j = 0; pfx[j] && mi < NAME_MAX - 1; j++) mangled[mi++] = pfx[j];
+        for (int j = 0; g_cur_parse_fn_name[j] && mi < NAME_MAX - 1; j++)
+            mangled[mi++] = g_cur_parse_fn_name[j];
+        if (mi < NAME_MAX - 1) mangled[mi++] = '_';
+        for (int j = 0; varname[j] && mi < NAME_MAX - 1; j++)
+            mangled[mi++] = varname[j];
+        mangled[mi] = 0;
+        /* Declare the backing global. */
+        int kind = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+        int gi = global_declare(mangled, 4, kind);
+        /* Optional `= N` initializer. */
+        if (accept(T_ASSIGN)) {
+            int neg = 0;
+            if (accept(T_MINUS)) neg = 1;
+            if (tk_cur()->kind != T_NUM)
+                die_at(tk_cur()->line, "static init must be integer literal", 0);
+            int v = tk_cur()->num;
+            if (neg) v = -v;
+            g_tk++;
+            int off = g_globals[gi].offset;
+            g_data_pool[off + 0] = (unsigned char)(v & 0xff);
+            g_data_pool[off + 1] = (unsigned char)((v >>  8) & 0xff);
+            g_data_pool[off + 2] = (unsigned char)((v >> 16) & 0xff);
+            g_data_pool[off + 3] = (unsigned char)((v >> 24) & 0xff);
+        }
+        expect(T_SEMI, "';'");
+        /* Record the rename so end-of-body walk rewrites references. */
+        if (g_n_renames >= MAX_RENAMES_PER_FUNC)
+            die_at(tk_cur()->line, "too many static locals in function", 0);
+        int ri = g_n_renames++;
+        for (int j = 0; j <= vi; j++)  g_renames[ri].from[j] = varname[j];
+        for (int j = 0; j <= mi; j++)  g_renames[ri].to[j]   = mangled[j];
+        return new_node(N_NOP);
+    }
     /* Session 125 — break/continue statements. The codegen enforces
      * "must be inside a loop"; parser just builds the node. */
     if (t == T_BREAK) {
@@ -2039,6 +2126,28 @@ static void parse_param_list(struct node *fn) {
     expect(T_RPAREN, "')'");
 }
 
+static void rewrite_names_in_ast(struct node *n) {
+    if (!n) return;
+    if (n->name[0]) {
+        for (int i = 0; i < g_n_renames; i++) {
+            if (my_streq(n->name, g_renames[i].from)) {
+                int j = 0;
+                while (g_renames[i].to[j] && j < NAME_MAX - 1) {
+                    n->name[j] = g_renames[i].to[j]; j++;
+                }
+                n->name[j] = 0;
+                break;
+            }
+        }
+    }
+    rewrite_names_in_ast(n->a);
+    rewrite_names_in_ast(n->b);
+    rewrite_names_in_ast(n->c);
+    rewrite_names_in_ast(n->body);
+    for (int i = 0; i < n->n_list; i++)   rewrite_names_in_ast(n->list[i]);
+    for (int i = 0; i < n->n_params; i++) rewrite_names_in_ast(n->params[i]);
+}
+
 static struct node *parse_func(void) {
     /* Return type — int/char (with optional *), struct TAG (with optional
      * *), or a typedef name. Session 121 — `struct T NAME(...)` is a
@@ -2052,9 +2161,17 @@ static struct node *parse_func(void) {
     fn->name[i] = 0;
     fn->ret_kind = ret_kind;
     fn->ret_meta = ret_meta;
+    /* Session 125 — set up per-function static-rename context. */
+    int k = 0;
+    while (fn->name[k]) { g_cur_parse_fn_name[k] = fn->name[k]; k++; }
+    g_cur_parse_fn_name[k] = 0;
+    g_n_renames = 0;
     g_tk++;
     parse_param_list(fn);
     fn->body = parse_block();
+    /* Session 125 — apply any static-local renames so the body refers
+     * to the mangled globals. */
+    if (g_n_renames > 0) rewrite_names_in_ast(fn->body);
     return fn;
 }
 
@@ -5070,6 +5187,11 @@ static void gen_stmt(struct node *n) {
         }
         case N_EXPR_STMT:
             gen_expr(n->a);
+            return;
+        case N_NOP:
+            /* Session 125 — parse-time placeholder (e.g. for `static
+             * int x;` after the backing global was registered and
+             * the rename was queued). Emits nothing. */
             return;
     }
     die_at(n->line, "unsupported stmt kind", 0);

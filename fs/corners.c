@@ -28,6 +28,14 @@ union view {
     char *as_str;
 };
 
+/* Session 125 — static LOCAL. Counter persists across calls; each
+ * invocation reads + increments + returns. */
+int bump_counter() {
+    static int counter = 100;
+    counter += 1;
+    return counter;
+}
+
 int main() {
     /* 1. Comma operator. Inner expression evaluates a, then b, and
      *    returns b. */
@@ -148,6 +156,15 @@ done:
     int gsum2;
     gsum2 = g[0][0] + g[0][1] + g[0][2] + g[1][0] + g[1][1] + g[1][2];
     printf("array2d_sum      = %d\n", gsum2);          /* 21 */
+
+    /* 11. static LOCAL. bump_counter has a per-function persistent
+     *     counter initialized to 100. Three calls produce 101, 102, 103. */
+    int c1; c1 = bump_counter();
+    int c2; c2 = bump_counter();
+    int c3; c3 = bump_counter();
+    printf("static_local_1   = %d\n", c1);            /* 101 */
+    printf("static_local_2   = %d\n", c2);            /* 102 */
+    printf("static_local_3   = %d\n", c3);            /* 103 */
 
     return 0;
 }
