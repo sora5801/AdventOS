@@ -3877,9 +3877,15 @@ static void gen_stmt(struct node *n) {
             /* Block scoping: locals declared inside the block stop being
              * NAME-visible when we leave, but their stack space stays
              * reserved by the function prologue. g_locals_bytes is the
-             * watermark used to size `sub esp, N` — never roll it back. */
+             * watermark used to size `sub esp, N` — never roll it back.
+             *
+             * Session 122 — DCE: stop emitting at the first `return` in
+             * a block. Anything after is unreachable. */
             int saved_locals = g_n_locals;
-            for (int i = 0; i < n->n_list; i++) gen_stmt(n->list[i]);
+            for (int i = 0; i < n->n_list; i++) {
+                gen_stmt(n->list[i]);
+                if (n->list[i] && n->list[i]->kind == N_RETURN) break;
+            }
             g_n_locals = saved_locals;
             return;
         }
@@ -4296,6 +4302,19 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_IF: {
+            /* Session 122 — DCE: if the condition was constant-folded
+             * to a literal, only emit the taken branch. Skips both the
+             * conditional emit + jz pair AND the dead branch's body. */
+            if (n->a && n->a->kind == N_NUM) {
+                if (n->a->num) {
+                    /* Then-branch is live. */
+                    gen_stmt(n->b);
+                } else if (n->c) {
+                    /* Else-branch is live. */
+                    gen_stmt(n->c);
+                }
+                return;
+            }
             gen_expr(n->a);
             e_test_eax_eax();
             int jz = e_jz_rel32();
@@ -4311,6 +4330,17 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_WHILE: {
+            /* Session 122 — DCE: `while (0)` emits nothing. `while (1)`
+             * (or any nonzero const) emits the body in a tight infinite
+             * loop without the conditional test. */
+            if (n->a && n->a->kind == N_NUM) {
+                if (n->a->num == 0) return;
+                int top = g_code_len;
+                gen_stmt(n->b);
+                int jback = e_jmp_rel32();
+                patch_d(jback, (unsigned)(top - (jback + 4)));
+                return;
+            }
             int top = g_code_len;
             gen_expr(n->a);
             e_test_eax_eax();
