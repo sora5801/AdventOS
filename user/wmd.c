@@ -85,6 +85,7 @@ static const struct launch_entry g_launch_items[] = {
     { "wmtype",  "/wmtype.elf"  },
     { "wmclock", "/wmclock.elf" },
     { "wmpaint", "/wmpaint.elf" },
+    { "wmpair",  "/wmpair.elf"  },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -512,8 +513,22 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
 
 int main(int argc, char **argv) {
     int seconds = 30;
-    if (argc >= 2) seconds = my_atoi_str(argv[1]);
-    if (seconds <= 0) seconds = 30;
+    int show_demos = 1;
+    /* Session 123 — argv parsing: positional SECONDS plus an
+     * optional --clean flag to suppress the four daemon-internal
+     * demonstration windows from session 111.  Demos default ON
+     * for backward compatibility with the smoke-test suite that
+     * verifies their presence; --clean gives end users a tidy
+     * desktop without them. */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '-' && a[1] == '-') {
+            if (a[2] == 'c') show_demos = 0;
+        } else {
+            int v = my_atoi_str(a);
+            if (v > 0) seconds = v;
+        }
+    }
 
     struct gfx_ctx ctx;
     if (gfx_init_db(&ctx, FB_VA) < 0) {
@@ -531,7 +546,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    init_demo_windows(ctx.width, ctx.height);
+    if (show_demos) init_demo_windows(ctx.width, ctx.height);
 
     unsigned int t0 = sys_time();
     int total_ticks = seconds * 60;
