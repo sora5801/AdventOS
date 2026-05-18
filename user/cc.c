@@ -2249,7 +2249,44 @@ static void patch_d(int off, unsigned int d) {
 /* Instruction primitives. Keep these named after what they do; the
  * compiler logic stays readable while the actual byte patterns are
  * documented here once. */
-static void e_push_eax(void)            { emit_b(0x50); }
+
+/* Session 122 — peephole pass (rolling).
+ *
+ * Returns 1 if any fixup table records an imm32 starting at code_off.
+ * Used by the rolling peephole to avoid rewriting a `mov eax, imm32`
+ * whose imm is actually a placeholder waiting to be patched (string
+ * address, global address, function VA). Forward-declared here so
+ * e_push_eax can call it; defined further down once the fixup tables
+ * exist. */
+static int has_imm_fixup_at(int code_off);
+
+static void e_push_eax(void) {
+    /* Rolling peephole: collapse `mov eax, imm32; push eax` (6 bytes)
+     * into a single `push imm8` (2 bytes) or `push imm32` (5 bytes).
+     * Common pattern from cdecl-style call-arg setup where each
+     * scalar arg is emitted as mov+push.
+     *
+     * Skipped if the previous mov's imm32 has a fixup attached — the
+     * imm bytes are placeholders for string/global/function VAs, not
+     * the actual value. */
+    if (g_code_len >= 5
+        && g_code[g_code_len - 5] == 0xb8
+        && !has_imm_fixup_at(g_code_len - 4)) {
+        int imm = (int)(
+              (unsigned)g_code[g_code_len - 4]
+           | ((unsigned)g_code[g_code_len - 3] <<  8)
+           | ((unsigned)g_code[g_code_len - 2] << 16)
+           | ((unsigned)g_code[g_code_len - 1] << 24));
+        g_code_len -= 5;
+        if (imm >= -128 && imm <= 127) {
+            emit_b(0x6a); emit_b((unsigned char)(imm & 0xff));
+        } else {
+            emit_b(0x68); emit_d((unsigned)imm);
+        }
+        return;
+    }
+    emit_b(0x50);
+}
 static void e_push_ebx(void)            { emit_b(0x53); }
 static void e_pop_eax(void)             { emit_b(0x58); }
 static void e_pop_ebx(void)             { emit_b(0x5b); }
@@ -2688,6 +2725,22 @@ static void record_addr_fixup(int imm_off, int func_idx) {
     g_addr_fixups[g_n_addr_fixups].imm_off  = imm_off;
     g_addr_fixups[g_n_addr_fixups].func_idx = func_idx;
     g_n_addr_fixups++;
+}
+
+/* Session 122 — implementation of the forward-declared peephole helper.
+ * Scans the three imm32-style fixup tables (string, global, addr-of-
+ * function) and returns 1 if any of them recorded the offset. The
+ * call-rel32 fixup table (g_fixups) records DISPLACEMENTS for
+ * `e8 disp32` / `0f 84 disp32`, never imm-loads — so it's not scanned
+ * here. */
+static int has_imm_fixup_at(int code_off) {
+    for (int i = 0; i < g_n_str_fixups; i++)
+        if (g_str_fixups[i].code_off == code_off) return 1;
+    for (int i = 0; i < g_n_glob_fixups; i++)
+        if (g_glob_fixups[i].code_off == code_off) return 1;
+    for (int i = 0; i < g_n_addr_fixups; i++)
+        if (g_addr_fixups[i].imm_off == code_off) return 1;
+    return 0;
 }
 
 static int local_find(const char *name) {
