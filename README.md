@@ -98,7 +98,9 @@ The project advances in numbered "sessions" — each session is a focused chunk 
 Current session: **133 — Path B tcc port, Phase 1 foundation**. See [`docs/119-pathB-tcc-foundation.md`](docs/119-pathB-tcc-foundation.md) for the deep dive. Vendors TinyCC 0.9.28rc at `tcc/`, strips down to the i386 + ELF subset (~22 .c/.h files, ~1.8 MB), wires a host-only build into `build.sh` (step `[5f/7]`). `tcc.exe` is 685 KiB, identifies itself as `tcc version 0.9.28rc-adventos (i386 Linux)` and emits valid i386 ELF object files. Phase 2 (cross-compile to `tcc.elf` + add the ~30 libc functions tcc needs to libuser) is multi-session work; the audit + plan lives in [`tcc/README.AdventOS`](tcc/README.AdventOS).
 
 Recent session deep dives:
+- [Session 134 — Path C phase 27: wmterm terminal emulator](docs/120-pathC-wmterm.md)
 - [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
+- [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
 - [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
@@ -158,7 +160,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–120 covered virtio-blk/net/rng/console/balloon/9p + USB CDC-ACM + AC97 consumer + WSL build path. Still candidate: 9p writes (Tlcreate/Twrite), IRQ-driven virtio completion, USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–121 covered virtio-blk/net/rng/console/balloon/9p (read+write) + USB CDC-ACM + AC97 consumer + WSL build path + IRQ-driven virtio. Still candidate: USB CDC-ECM, virtio-scsi, e1000 NIC, 9p rename, full TTY integration of CDC-ACM.
 
 ## License
 
