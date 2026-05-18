@@ -257,7 +257,7 @@ echo "[5/7] build user programs"
 # path-A "usable Unix" coreutils gap-fill.
 USER_PROGS=(hello sh echo httpd ed init
             head tail tee tr seq kill pwd
-            nc wget telnet irc ircd beep usbtest vi id
+            nc wget telnet irc ircd beep usbtest vi id fwtest
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
             smp-hammer

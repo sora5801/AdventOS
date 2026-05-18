@@ -142,6 +142,8 @@ USER_PROGRAMS = [
     ('httpsget.elf',   'user/_obj/httpsget.bin',   None),
     # Session 41: USB Mass Storage round-trip test.
     ('usbtest.elf',    'user/_obj/usbtest.bin',    None),
+    # Session 135: FILE * write-path smoke (debugging the tcc -c hang).
+    ('fwtest.elf',     'user/_obj/fwtest.bin',     None),
     # Session 46: vi-like modal editor.
     ('vi.elf',         'user/_obj/vi.bin',         None),
     # Session 47: multi-user + login.
@@ -310,6 +312,8 @@ DATA_FILES = [
     ('corners.c', 'fs/corners.c', None),
     # Session 134: minimal source for the in-AdventOS tcc smoke test.
     ('thello.c',  'fs/thello.c',  None),
+    # Session 135: hello program with own _start so tcc can fully link it.
+    ('thello2.c', 'fs/thello2.c', None),
 ]
 
 # Session 47: generate /etc/passwd at build time. Format per line:
