@@ -529,6 +529,14 @@ int sys_wm_event_poll(unsigned int window_id,
                       : "memory");
     return ret;
 }
+int sys_wm_poll_alttab(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_ALTTAB)
+                      : "memory");
+    return ret;
+}
 
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;

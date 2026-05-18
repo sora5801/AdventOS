@@ -348,7 +348,13 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
-#define SYS_RENAME      100 /* (eax=100, ebx=old_path, ecx=new_path) ->
+/* Session 135 — Alt+Tab routing.  USB-HID posts on Alt+Tab via
+ * the in-kernel `wm_post_alttab` helper.  Wmd polls via this
+ * syscall once per frame.  Returns 1 if at least one Alt+Tab
+ * press is pending (and decrements the counter), else 0. */
+#define SYS_WM_POLL_ALTTAB       100
+
+#define SYS_RENAME      101 /* (eax=101, ebx=old_path, ecx=new_path) ->
                              * 0 / -1.  For paths under /mnt/9p the
                              * driver issues an atomic 9P Trenameat;
                              * for AdventFS paths the kernel does NOT

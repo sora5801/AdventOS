@@ -1056,7 +1056,13 @@ int main(int argc, char **argv) {
          * the kernel ring and forward them to the click-focused
          * client window (`focused`, not `target` — keyboard focus
          * is click-based, not hover-based).  Bytes that arrive while
-         * no client window is focused are dropped. */
+         * no client window is focused are dropped.
+         *
+         * Session 135 — Alt+Tab arrives as the sentinel byte 0x80
+         * from the USB-HID layer.  wmd consumes it itself: cycle
+         * `focused` to the next CLIENT window in registration order,
+         * raising + un-minimizing as we go.  Cycling skips
+         * non-client (demo) slots.  Never forwarded to clients. */
         for (int drained = 0; drained < 32; drained++) {
             int c = sys_kbd_poll();
             if (c <= 0) break;
@@ -1067,6 +1073,30 @@ int main(int argc, char **argv) {
             ev.type    = WM_EV_KEY;
             ev.keycode = (unsigned int)c;
             sys_wm_event_push(g_windows[focused].client_id, &ev);
+        }
+
+        /* Session 135 — Alt+Tab arrives on a separate channel
+         * (SYS_WM_POLL_ALTTAB) so the shell or any other reader
+         * of the kbd ring can't intercept it.  Drain everything
+         * pending; each press cycles `focused` to the next CLIENT
+         * window in registration order, wrapping. */
+        while (sys_wm_poll_alttab() > 0) {
+            int start = focused;
+            int next  = -1;
+            for (int step = 1; step <= g_window_count; step++) {
+                int idx = ((start + step) % g_window_count
+                           + g_window_count) % g_window_count;
+                if (g_windows[idx].kind == KIND_CLIENT) {
+                    next = idx;
+                    break;
+                }
+            }
+            if (next >= 0) {
+                g_windows[next].minimized = 0;
+                g_z_counter++;
+                g_windows[next].raised = g_z_counter;
+                focused = next;
+            }
         }
 
         /* Compose the frame.  Session 127 — procedural wallpaper

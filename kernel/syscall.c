@@ -931,6 +931,9 @@ void syscall_dispatch(struct registers *r) {
             ret = b ? wm_poll_event(task_current(), (uint32_t)a,
                                     (struct sys_wm_event *)(uintptr_t)b) : -1;
             break;
+        case SYS_WM_POLL_ALTTAB:
+            ret = wm_poll_alttab(task_current());
+            break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
             extern int virtio_rng_available(void);
