@@ -68,6 +68,15 @@
  *   - struct / typedef / enum
  *   - function pointers
  *   - the linker step (multi-file compilation)
+ *
+ * Session 121 (Path B Phase 4 capstone) adds the remaining language
+ * polish: struct-by-value RETURNS (hidden-first-arg cdecl ABI), the
+ * `static` and `extern` storage-class keywords, and the
+ * `typedef RET (*NAME)(ARGS);` function-pointer typedef syntax.
+ * Together these close out the C-subset surface area; cc now handles
+ * essentially every feature small-to-medium programs need without
+ * having to fall back to pointer-out args, manual prototype tracking,
+ * or `int *` for function-pointer aliases.
  */
 
 #include "libuser.h"
@@ -119,6 +128,8 @@ enum {
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
     T_TYPEDEF,   /* session 104 */
+    T_STATIC,    /* Session 121 — accepted-and-ignored storage-class spec */
+    T_EXTERN,    /* Session 121 — function prototypes only */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE,
     T_LBRACKET, T_RBRACKET,
     T_SEMI, T_COMMA, T_ASSIGN,
@@ -137,6 +148,14 @@ enum {
 };
 
 #define NAME_MAX 24
+
+/* Forward — needed by parse_extern_proto in the parser to register a
+ * function prototype with the symbol table (which lives in the codegen
+ * section below). */
+#define MAX_PARAMS_PER_FUNC 8
+static void register_func_proto(const char *name, int n_params, int is_variadic,
+                                int ret_kind, int ret_meta,
+                                int *param_kinds, int *param_metas);
 
 struct tok_t {
     int  kind;
@@ -254,6 +273,8 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
     if (my_streq(s, "enum"))   return T_ENUM;     /* session 103 */
     if (my_streq(s, "typedef"))return T_TYPEDEF;  /* session 104 */
+    if (my_streq(s, "static")) return T_STATIC;   /* Session 121 */
+    if (my_streq(s, "extern")) return T_EXTERN;   /* Session 121 */
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
@@ -1008,6 +1029,12 @@ struct node {
     struct node  **params;
     int            n_params;
     struct node   *body;
+    /* Session 121 — for N_FUNC_DECL only: return-type info. Default
+     * (LK_INT / 0) covers every non-struct return. LK_STRUCT/LK_STRUCT_PTR
+     * with ret_meta = struct_idx mark struct-by-value / struct-pointer
+     * returns. SBV returns use the hidden-first-arg cdecl convention. */
+    int            ret_kind;
+    int            ret_meta;
 };
 
 static struct node *new_node(int kind) {
@@ -1022,6 +1049,8 @@ static struct node *new_node(int kind) {
     n->list = 0; n->n_list = 0;
     n->params = 0; n->n_params = 0;
     n->body = 0;
+    n->ret_kind = LK_INT;
+    n->ret_meta = 0;
     return n;
 }
 
@@ -1612,24 +1641,60 @@ static struct node *parse_stmt(void) {
     return es;
 }
 
-static struct node *parse_func(void) {
-    /* Return type — int or char or a typedef name. cc doesn't track
-     * the function's return type at codegen, so all of these are
-     * equivalent. We consume the tokens and move on. */
+/* Session 121 — parse a function return type into kind+meta.
+ *
+ *   int [*]              -> LK_INT  / LK_INT_PTR
+ *   char [*]             -> LK_INT  / LK_CHAR_PTR  (scalar char ≡ int)
+ *   struct T [*]         -> LK_STRUCT / LK_STRUCT_PTR  (s121: SBV return)
+ *   typedef-NAME         -> whatever it resolves to
+ *
+ * For non-struct returns we don't actually need the kind at codegen (eax
+ * carries the result regardless), but we DO need to know `LK_STRUCT` so
+ * gen_func can install the hidden-first-arg ABI for SBV returns. */
+static void parse_return_type(int *out_kind, int *out_meta) {
+    *out_kind = LK_INT;
+    *out_meta = 0;
     if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
+        int is_char = (tk_cur()->kind == T_CHAR);
         g_tk++;
-        (void)accept(T_STAR);   /* allow `int *foo()` etc. — session 100 */
-    } else if (tk_cur()->kind == T_NAME && typedef_find(tk_cur()->name) >= 0) {
-        g_tk++;     /* consume typedef-NAME — session 104 */
-    } else {
-        die_at(tk_cur()->line, "expected 'int' / 'char' / typedef-name (return type)", 0);
+        if (accept(T_STAR)) {
+            *out_kind = is_char ? LK_CHAR_PTR : LK_INT_PTR;
+        }
+        return;
     }
-    if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected function name", 0);
-    struct node *fn = new_node(N_FUNC_DECL);
-    int i = 0;
-    while (tk_cur()->name[i]) { fn->name[i] = tk_cur()->name[i]; i++; }
-    fn->name[i] = 0;
-    g_tk++;
+    if (tk_cur()->kind == T_STRUCT) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected struct tag in return type", 0);
+        int sidx = struct_find(tk_cur()->name);
+        if (sidx < 0)
+            die_at(tk_cur()->line, "undefined struct in return type", tk_cur()->name);
+        g_tk++;
+        if (accept(T_STAR)) {
+            *out_kind = LK_STRUCT_PTR;
+        } else {
+            *out_kind = LK_STRUCT;
+        }
+        *out_meta = sidx;
+        return;
+    }
+    if (tk_cur()->kind == T_NAME) {
+        int ti = typedef_find(tk_cur()->name);
+        if (ti >= 0) {
+            g_tk++;
+            *out_kind = g_typedefs[ti].kind;
+            *out_meta = g_typedefs[ti].meta;
+            return;
+        }
+    }
+    die_at(tk_cur()->line,
+           "expected 'int' / 'char' / 'struct TAG' / typedef-name (return type)", 0);
+}
+
+/* Session 121 — parse a parenthesized parameter list into fn->params /
+ * fn->n_params, setting fn->op = 1 if variadic. Consumes the leading
+ * '(' and the trailing ')'. Used by parse_func and parse_extern_proto. */
+static void parse_param_list(struct node *fn) {
     expect(T_LPAREN, "'('");
     int cap = 0;
     while (tk_cur()->kind != T_RPAREN) {
@@ -1675,20 +1740,98 @@ static struct node *parse_func(void) {
             die_at(tk_cur()->line, "expected param type (int/char/struct/typedef)", 0);
             kind = LK_INT;
         }
-        if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected param name", 0);
+        /* Session 121: param name is optional. Real C lets you omit it
+         * in prototypes (`int squared(int);`). We accept the same form
+         * but synthesize a sentinel name `__anonN` so the locals table
+         * doesn't choke on duplicate empty names if a body refers to
+         * `__anonN` (which it won't, since the user never spelled the
+         * name in source). */
         struct node *p = new_node(N_NAME);
-        int j = 0;
-        while (tk_cur()->name[j]) { p->name[j] = tk_cur()->name[j]; j++; }
-        p->name[j] = 0;
+        if (tk_cur()->kind == T_NAME) {
+            int j = 0;
+            while (tk_cur()->name[j]) { p->name[j] = tk_cur()->name[j]; j++; }
+            p->name[j] = 0;
+            g_tk++;
+        } else if (tk_cur()->kind == T_COMMA || tk_cur()->kind == T_RPAREN) {
+            /* Anonymous param. Generate a unique sentinel name; no body
+             * code can reference it. */
+            static int anon_ctr;
+            const char *prefix = "__anon";
+            int j = 0;
+            while (prefix[j]) { p->name[j] = prefix[j]; j++; }
+            int v = anon_ctr++;
+            if (v == 0) { p->name[j++] = '0'; }
+            else {
+                char dig[12]; int dn = 0;
+                while (v) { dig[dn++] = (char)('0' + v % 10); v /= 10; }
+                while (dn--) p->name[j++] = dig[dn];
+            }
+            p->name[j] = 0;
+        } else {
+            die_at(tk_cur()->line, "expected param name or end of list", 0);
+        }
         p->op  = kind;          /* param kind for local-binding */
         p->num = struct_idx;    /* meta (struct_idx for LK_STRUCT_PTR) */
-        g_tk++;
         node_push(&fn->params, &fn->n_params, &cap, p);
         if (!accept(T_COMMA)) break;
     }
     expect(T_RPAREN, "')'");
+}
+
+static struct node *parse_func(void) {
+    /* Return type — int/char (with optional *), struct TAG (with optional
+     * *), or a typedef name. Session 121 — `struct T NAME(...)` is a
+     * struct-by-value-return function. */
+    int ret_kind, ret_meta;
+    parse_return_type(&ret_kind, &ret_meta);
+    if (tk_cur()->kind != T_NAME) die_at(tk_cur()->line, "expected function name", 0);
+    struct node *fn = new_node(N_FUNC_DECL);
+    int i = 0;
+    while (tk_cur()->name[i]) { fn->name[i] = tk_cur()->name[i]; i++; }
+    fn->name[i] = 0;
+    fn->ret_kind = ret_kind;
+    fn->ret_meta = ret_meta;
+    g_tk++;
+    parse_param_list(fn);
     fn->body = parse_block();
     return fn;
+}
+
+/* Session 121 — parse a function prototype after `extern`:
+ *   extern RET NAME ( PARAMS );
+ * No body. We register the function in g_funcs immediately so any later
+ * call site sees the correct param/return info. No AST node is emitted
+ * (gen_func would try to write code we don't have a body for). */
+static void parse_extern_proto(void) {
+    int ret_kind, ret_meta;
+    parse_return_type(&ret_kind, &ret_meta);
+    if (tk_cur()->kind != T_NAME)
+        die_at(tk_cur()->line, "extern: expected function name", 0);
+    char nm[NAME_MAX];
+    int i = 0;
+    while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+    nm[i] = 0;
+    g_tk++;
+    struct node *proto = new_node(N_FUNC_DECL);
+    int j = 0;
+    while (nm[j]) { proto->name[j] = nm[j]; j++; }
+    proto->name[j] = 0;
+    parse_param_list(proto);
+    expect(T_SEMI, "';'");
+    /* Register in g_funcs now so call sites see correct argc/kinds.
+     * register_func_proto is defined in the symbol-table section; the
+     * forward declaration sits at the top of the file. */
+    int np = proto->n_params;
+    if (np > MAX_PARAMS_PER_FUNC) np = MAX_PARAMS_PER_FUNC;
+    int kinds[MAX_PARAMS_PER_FUNC];
+    int metas[MAX_PARAMS_PER_FUNC];
+    for (int k = 0; k < np; k++) {
+        kinds[k] = proto->params[k]->op;
+        metas[k] = proto->params[k]->num;
+    }
+    register_func_proto(nm, proto->n_params, proto->op ? 1 : 0,
+                        ret_kind, ret_meta, kinds, metas);
+    /* No AST emission — the prototype is just metadata. */
 }
 
 /* Session 93 — parse a top-level global declaration. The current
@@ -1927,12 +2070,50 @@ static void parse_enum_top(void) {
 
 /* Session 104 — parse a top-level typedef:
  *   typedef BASE NAME;
- * where BASE is int [*] / char [*] / struct TAG [*]. */
+ * where BASE is int [*] / char [*] / struct TAG [*].
+ *
+ * Session 121 — also accept the function-pointer form:
+ *   typedef RET (*NAME)(PARAMS);
+ * where PARAMS is any token sequence with balanced parens (we don't
+ * record arg types — cc doesn't typecheck indirect calls). The
+ * resulting alias has kind LK_INT_PTR (same shape as the bare
+ * `int *fp` representation cc has used for function pointers since
+ * session 98). */
 static void parse_typedef_top(void) {
     expect(T_TYPEDEF, "'typedef'");
     int kind, meta;
     if (!try_consume_type(&kind, &meta))
         die_at(tk_cur()->line, "typedef: expected base type", 0);
+    /* Function-pointer typedef:  ( * NAME ) ( ARGS ) ; */
+    if (tk_cur()->kind == T_LPAREN
+        && tk_peek(1)->kind == T_STAR
+        && tk_peek(2)->kind == T_NAME
+        && tk_peek(3)->kind == T_RPAREN
+        && tk_peek(4)->kind == T_LPAREN) {
+        g_tk++;     /* ( */
+        g_tk++;     /* * */
+        char fp_name[NAME_MAX];
+        int i = 0;
+        while (tk_cur()->name[i]) { fp_name[i] = tk_cur()->name[i]; i++; }
+        fp_name[i] = 0;
+        g_tk++;     /* NAME */
+        g_tk++;     /* ) */
+        expect(T_LPAREN, "'(' before fp arg list");
+        /* Skip args, balance parens — we don't typecheck them. */
+        int depth = 1;
+        while (depth > 0 && tk_cur()->kind != T_END) {
+            if (tk_cur()->kind == T_LPAREN) depth++;
+            else if (tk_cur()->kind == T_RPAREN) {
+                depth--;
+                if (depth == 0) break;
+            }
+            g_tk++;
+        }
+        expect(T_RPAREN, "')' after fp arg list");
+        expect(T_SEMI, "';'");
+        typedef_add(fp_name, LK_INT_PTR, 0);
+        return;
+    }
     if (tk_cur()->kind != T_NAME)
         die_at(tk_cur()->line, "typedef: expected new type name", 0);
     typedef_add(tk_cur()->name, kind, meta);
@@ -1944,11 +2125,6 @@ static struct node *parse_program(void) {
     struct node *p = new_node(N_PROGRAM);
     int cap = 0;
     while (tk_cur()->kind != T_END) {
-        /* Session 97 — `struct` at top level. */
-        if (tk_cur()->kind == T_STRUCT) {
-            parse_struct_top();
-            continue;
-        }
         /* Session 103 — `enum` at top level. */
         if (tk_cur()->kind == T_ENUM) {
             parse_enum_top();
@@ -1957,6 +2133,50 @@ static struct node *parse_program(void) {
         /* Session 104 — `typedef` at top level. */
         if (tk_cur()->kind == T_TYPEDEF) {
             parse_typedef_top();
+            continue;
+        }
+        /* Session 121 — `static` is accepted as a storage-class modifier
+         * but has no semantic effect: every cc-compiled symbol is already
+         * private to the translation unit. Just swallow the keyword
+         * and fall through to the underlying decl. */
+        if (tk_cur()->kind == T_STATIC) g_tk++;
+        /* Session 121 — `extern RET NAME(PARAMS);` is a function prototype.
+         * Registers signature info in g_funcs so subsequent calls see
+         * argc/kind info even if the definition appears in a later TU
+         * (or never, for cross-file declarations in multi-file builds —
+         * the linker step would catch undefined refs). No body. */
+        if (tk_cur()->kind == T_EXTERN) {
+            g_tk++;
+            parse_extern_proto();
+            continue;
+        }
+        /* Session 97 / 120 — `struct` at top level.
+         *   struct T { ... };        definition
+         *   struct T [*] NAME;       global value/pointer decl
+         *   struct T NAME[N];        global array-of-struct (parse_struct_top)
+         *   struct T [*] NAME(...)   struct-by-value-return function (s121)
+         *
+         * Distinguish by peeking past the optional `*` and the var/func
+         * name. */
+        if (tk_cur()->kind == T_STRUCT) {
+            /* tk_peek(0)=struct, tk_peek(1)=TAG. */
+            if (tk_peek(2)->kind == T_LBRACE) {
+                /* Definition. */
+                parse_struct_top();
+                continue;
+            }
+            int peek = 2;
+            if (tk_peek(peek)->kind == T_STAR) peek++;
+            if (tk_peek(peek)->kind != T_NAME)
+                die_at(tk_peek(peek)->line, "expected name after struct TAG", 0);
+            peek++;
+            if (tk_peek(peek)->kind == T_LPAREN) {
+                /* Struct-returning function. parse_func handles the
+                 * full `struct T [*] NAME(...)` signature. */
+                node_push(&p->list, &p->n_list, &cap, parse_func());
+            } else {
+                parse_struct_top();
+            }
             continue;
         }
         /* Top-level disambiguation between function and global decl.
@@ -2253,7 +2473,8 @@ static void e_test_eax_eax(void) {
 #define MAX_LOCALS 64
 #define MAX_FIXUPS 256
 
-#define MAX_PARAMS_PER_FUNC 8
+/* MAX_PARAMS_PER_FUNC is declared near the top of the file so the
+ * parser's parse_extern_proto can reference it. */
 struct func_info {
     char name[NAME_MAX];
     int  entry_off;     /* byte offset within g_code where the function starts */
@@ -2265,6 +2486,11 @@ struct func_info {
      * full param info regardless of definition order. */
     int  param_kinds[MAX_PARAMS_PER_FUNC];
     int  param_metas[MAX_PARAMS_PER_FUNC];
+    /* Session 121 — return-type info. LK_INT default; LK_STRUCT with
+     * ret_meta = struct_idx means struct-by-value return (caller passes
+     * hidden first arg = dest pointer, callee writes through it). */
+    int  ret_kind;
+    int  ret_meta;
 };
 
 static struct func_info g_funcs[MAX_FUNCS];
@@ -2303,6 +2529,14 @@ struct local_slot {
 static struct local_slot g_locals[MAX_LOCALS];
 static int               g_n_locals;
 static int               g_locals_bytes;    /* total bytes of locals in current fn */
+
+/* Session 121 — current function's return-type info. Used by
+ * gen_stmt(N_RETURN) to decide whether to emit a scalar epilogue
+ * (mov eax, ...; ret) or a struct-return memcpy + ret. Set by
+ * gen_func at the top of each function, restored on exit (we don't
+ * have nested function defs so this can stay a flat pair). */
+static int g_cur_ret_kind;
+static int g_cur_ret_meta;
 
 
 /* Returns the size (in bytes) the pointee of this pointer occupies.
@@ -2357,7 +2591,28 @@ static int func_intern(const char *name, int n_params) {
     g_funcs[idx].n_params   = n_params;
     g_funcs[idx].defined    = 0;
     g_funcs[idx].is_variadic = 0;
+    g_funcs[idx].ret_kind   = LK_INT;
+    g_funcs[idx].ret_meta   = 0;
     return idx;
+}
+
+/* Session 121 — record a function prototype (from `extern RET NAME(...);`)
+ * in the symbol table without emitting a body. Called from
+ * parse_extern_proto via a forward declaration at the top of the file
+ * (so the parser doesn't need to know the layout of struct func_info). */
+static void register_func_proto(const char *name, int n_params, int is_variadic,
+                                int ret_kind, int ret_meta,
+                                int *param_kinds, int *param_metas) {
+    int idx = func_intern(name, n_params);
+    g_funcs[idx].is_variadic = is_variadic;
+    g_funcs[idx].ret_kind = ret_kind;
+    g_funcs[idx].ret_meta = ret_meta;
+    int np = n_params;
+    if (np > MAX_PARAMS_PER_FUNC) np = MAX_PARAMS_PER_FUNC;
+    for (int k = 0; k < np; k++) {
+        g_funcs[idx].param_kinds[k] = param_kinds[k];
+        g_funcs[idx].param_metas[k] = param_metas[k];
+    }
 }
 
 /* Session 98 — address-fixup table.
@@ -2756,23 +3011,12 @@ static int is_intrinsic(const char *name) {
         || my_streq(name, "va_end");
 }
 
-static void gen_call(struct node *call) {
-    if (is_intrinsic(call->name)) {
-        emit_syscall_intrinsic(call->name, call);
-        return;
-    }
+/* Session 121 — emit the cdecl right-to-left arg push for `call`.
+ * Returns total bytes pushed (so the caller can `add esp, N` to clean
+ * up). Used by gen_call and by struct-returning call sites in
+ * gen_stmt(N_ASSIGN) / gen_stmt(N_RETURN). */
+static int push_call_args(struct node *call, int callee_idx) {
     int argc = call->n_list;
-    /* Session 106 — look up the called function's param kinds so we
-     * know which args are struct-by-value (LK_STRUCT). For indirect
-     * calls and not-yet-seen forward refs we default to 4-byte ints. */
-    int callee_idx = -1;
-    int local_off = local_find(call->name);
-    int global_gi = (local_off == 0) ? global_find(call->name) : -1;
-    int is_indirect = (local_off != 0 || global_gi >= 0);
-    if (!is_indirect) callee_idx = func_find(call->name);
-
-    /* Push args right-to-left (cdecl). For each, decide if it's a
-     * struct-by-value or a plain 4-byte arg. */
     int total_push = 0;
     for (int i = argc - 1; i >= 0; i--) {
         int p_kind = LK_INT;
@@ -2830,6 +3074,34 @@ static void gen_call(struct node *call) {
             total_push += 4;
         }
     }
+    return total_push;
+}
+
+static void gen_call(struct node *call) {
+    if (is_intrinsic(call->name)) {
+        emit_syscall_intrinsic(call->name, call);
+        return;
+    }
+    int argc = call->n_list;
+    /* Session 106 — look up the called function's param kinds so we
+     * know which args are struct-by-value (LK_STRUCT). For indirect
+     * calls and not-yet-seen forward refs we default to 4-byte ints. */
+    int callee_idx = -1;
+    int local_off = local_find(call->name);
+    int global_gi = (local_off == 0) ? global_find(call->name) : -1;
+    int is_indirect = (local_off != 0 || global_gi >= 0);
+    if (!is_indirect) callee_idx = func_find(call->name);
+
+    /* Session 121 — struct-returning calls can't appear as bare
+     * expressions because we'd have nowhere to put the result. They
+     * must be the RHS of an assignment (handled in gen_stmt) or a
+     * return (handled there). */
+    if (callee_idx >= 0 && g_funcs[callee_idx].ret_kind == LK_STRUCT)
+        die_at(call->line,
+               "struct-returning call must be assigned to a struct lvalue",
+               call->name);
+
+    int total_push = push_call_args(call, callee_idx);
     /* Session 98 — indirect (variable holds function pointer) or
      * direct call. */
     if (is_indirect) {
@@ -3345,11 +3617,38 @@ static void gen_stmt(struct node *n) {
              * be NAMEs of the same struct kind. Emit a memcpy via
              * rep movsd. Restriction documented: RHS must be a plain
              * struct-name; `p = *q` or `p = func_returning_struct()`
-             * aren't supported (we don't have struct-by-value calls). */
+             * aren't supported (we don't have struct-by-value calls).
+             *
+             * Session 121: also accepts `lhs = FUNC(...)` where FUNC
+             * returns a struct by value. In that case we route through
+             * the hidden-dest-pointer ABI: push &lhs as the hidden
+             * first arg, push the rest of the args, call, clean up. */
             if (k == LK_STRUCT) {
                 struct node *rhs = n->a;
+                /* Session 121 — struct-returning call as RHS. */
+                if (rhs && rhs->kind == N_CALL && !is_intrinsic(rhs->name)) {
+                    int fi = func_find(rhs->name);
+                    if (fi >= 0 && g_funcs[fi].ret_kind == LK_STRUCT) {
+                        if (g_funcs[fi].ret_meta != sidx)
+                            die_at(n->line,
+                                   "SBV call return type doesn't match lhs", n->name);
+                        int total_push = push_call_args(rhs, fi);
+                        /* Push hidden dest pointer = &lhs. */
+                        if (is_local) e_lea_eax_ebp(off);
+                        else          emit_addrof_global(gi);
+                        e_push_eax();
+                        total_push += 4;
+                        int disp_off = e_call_rel32();
+                        if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+                        g_fixups[g_n_fixups].call_disp_off = disp_off;
+                        g_fixups[g_n_fixups].func_idx = fi;
+                        g_n_fixups++;
+                        if (total_push > 0) e_add_esp_imm32(total_push);
+                        return;
+                    }
+                }
                 if (!rhs || rhs->kind != N_NAME)
-                    die_at(n->line, "struct = must be struct-NAME = struct-NAME", n->name);
+                    die_at(n->line, "struct = must be struct-NAME = struct-NAME or = SBV_call", n->name);
                 int r_off = local_find(rhs->name);
                 int r_is_local = (r_off != 0);
                 int r_gi = r_is_local ? -1 : global_find(rhs->name);
@@ -3563,9 +3862,89 @@ static void gen_stmt(struct node *n) {
             return;
         }
         case N_RETURN: {
+            /* Session 121 — struct-by-value-return path. The callee
+             * received a hidden destination pointer at [ebp+8]; we
+             * memcpy the source struct into that slot, then return
+             * the pointer (some callers chain on it; harmless if not).
+             *
+             * Supported RHS shapes for SBV returns:
+             *   return STRUCT_LOCAL_NAME;
+             *   return FUNC(...);     // forward another SBV call into
+             *                          // OUR caller's dest slot
+             *
+             * `return;` (no expression) in an SBV function is a bug;
+             * we tolerate it by leaving the dest untouched. */
+            if (g_cur_ret_kind == LK_STRUCT) {
+                if (!n->a) {
+                    /* No expression. Just return whatever's in the
+                     * dest pointer slot (the slot's contents are
+                     * undefined; this is documented as a user bug). */
+                    e_load_local(8);
+                    e_mov_esp_ebp();
+                    e_pop_ebp();
+                    e_ret();
+                    return;
+                }
+                /* `return FUNC(...);` where FUNC also returns SBV of
+                 * the same struct — forward our hidden dest pointer
+                 * directly. Avoids an intermediate copy. */
+                if (n->a->kind == N_CALL && !is_intrinsic(n->a->name)) {
+                    int fi = func_find(n->a->name);
+                    if (fi >= 0 && g_funcs[fi].ret_kind == LK_STRUCT
+                                && g_funcs[fi].ret_meta == g_cur_ret_meta) {
+                        int total_push = push_call_args(n->a, fi);
+                        e_load_local(8);          /* eax = our hidden dest */
+                        e_push_eax();
+                        total_push += 4;
+                        int disp_off = e_call_rel32();
+                        if (g_n_fixups >= MAX_FIXUPS) die("too many fixups");
+                        g_fixups[g_n_fixups].call_disp_off = disp_off;
+                        g_fixups[g_n_fixups].func_idx = fi;
+                        g_n_fixups++;
+                        if (total_push > 0) e_add_esp_imm32(total_push);
+                        e_load_local(8);
+                        e_mov_esp_ebp();
+                        e_pop_ebp();
+                        e_ret();
+                        return;
+                    }
+                }
+                /* `return STRUCT_LOCAL_NAME;` — memcpy the named struct
+                 * into [ebp+8]. (Globals as the source aren't supported
+                 * here for the same reason struct-by-value args from
+                 * globals aren't — would need an extra address-load
+                 * branch. Documented limit.) */
+                if (n->a->kind != N_NAME)
+                    die_at(n->line,
+                           "SBV return: RHS must be a struct NAME or a "
+                           "matching-struct-returning call", 0);
+                int r_off = local_find(n->a->name);
+                if (r_off == 0)
+                    die_at(n->line, "SBV return: undefined or non-local", n->a->name);
+                int r_k = local_kind(n->a->name);
+                int r_sidx = local_meta(n->a->name);
+                if (r_k != LK_STRUCT || r_sidx != g_cur_ret_meta)
+                    die_at(n->line, "SBV return: struct type mismatch", n->a->name);
+                int sz = g_structs[r_sidx].size;
+                int dwords = sz / 4;
+                /* push esi; push edi; copy from [ebp+r_off] to [[ebp+8]] */
+                emit_b(0x56); emit_b(0x57);         /* push esi; push edi */
+                e_load_local(8);                    /* eax = hidden dest ptr */
+                emit_b(0x89); emit_b(0xc7);         /* mov edi, eax */
+                e_lea_eax_ebp(r_off);
+                emit_b(0x89); emit_b(0xc6);         /* mov esi, eax */
+                emit_b(0xb9); emit_d((unsigned)dwords);  /* mov ecx, dwords */
+                emit_b(0xf3); emit_b(0xa5);         /* rep movsd */
+                emit_b(0x5f); emit_b(0x5e);         /* pop edi; pop esi */
+                e_load_local(8);                    /* return dest pointer */
+                e_mov_esp_ebp();
+                e_pop_ebp();
+                e_ret();
+                return;
+            }
+            /* Scalar return path. */
             if (n->a) gen_expr(n->a);
             else      e_mov_eax_imm(0);
-            /* Function epilogue. */
             e_mov_esp_ebp();
             e_pop_ebp();
             e_ret();
@@ -3611,6 +3990,12 @@ static void gen_func(struct node *fn) {
     if (pre_idx >= 0) g_funcs[pre_idx].is_variadic = fn->op ? 1 : 0;
     int idx = func_intern(fn->name, fn->n_params);
     g_funcs[idx].is_variadic = fn->op ? 1 : 0;
+    /* Session 121 — propagate ret_kind so gen_stmt(N_RETURN) and any
+     * gen_call seeing this function knows the ABI. */
+    g_funcs[idx].ret_kind = fn->ret_kind;
+    g_funcs[idx].ret_meta = fn->ret_meta;
+    g_cur_ret_kind = fn->ret_kind;
+    g_cur_ret_meta = fn->ret_meta;
     /* Session 100 — multi-file compilation can produce duplicate
      * function definitions if a user puts the same function body in
      * two source files. Catch it here. (For single-file builds this
@@ -3626,7 +4011,12 @@ static void gen_func(struct node *fn) {
     g_locals_bytes = 0;
 
     /* Prologue: push ebp; mov ebp, esp.
-     * Params live at [ebp+8], [ebp+12], ... (after saved ebp + return addr). */
+     * Params live at [ebp+8], [ebp+12], ... (after saved ebp + return addr).
+     *
+     * Session 121 — struct-by-value-returning functions receive a HIDDEN
+     * first arg at [ebp+8] that points to the caller-allocated return
+     * slot. Real params start at [ebp+12]. The hidden ptr is not named
+     * — N_RETURN-time codegen loads it directly via e_load_local(8). */
     e_push_ebp();
     e_mov_ebp_esp();
 
@@ -3641,7 +4031,7 @@ static void gen_func(struct node *fn) {
      * Session 106: support struct-by-value params. Each LK_STRUCT
      * param occupies (struct.size padded to 4) bytes on the stack
      * rather than the standard 4. Use a cumulative offset. */
-    int cum_off = 8;
+    int cum_off = (fn->ret_kind == LK_STRUCT) ? 12 : 8;
     for (int i = 0; i < fn->n_params; i++) {
         if (g_n_locals >= MAX_LOCALS) die("too many locals");
         int j = 0;
@@ -3669,8 +4059,16 @@ static void gen_func(struct node *fn) {
 
     /* If the function fell through without an explicit return,
      * emit a default return-0 epilogue so we don't run into the next
-     * function's bytes. */
-    e_mov_eax_imm(0);
+     * function's bytes. Session 121 — for struct-return functions,
+     * "default return" returns the hidden dest pointer (which sits
+     * at [ebp+8]); the slot's contents are whatever the caller left
+     * there. Falling through without an explicit return in an SBV
+     * function is technically a bug; we just don't crash. */
+    if (g_cur_ret_kind == LK_STRUCT) {
+        e_load_local(8);
+    } else {
+        e_mov_eax_imm(0);
+    }
     e_mov_esp_ebp();
     e_pop_ebp();
     e_ret();
@@ -4343,6 +4741,9 @@ int main(int argc, char **argv) {
         if (!fn || fn->kind != N_FUNC_DECL) continue;
         int idx = func_intern(fn->name, fn->n_params);
         g_funcs[idx].is_variadic = fn->op ? 1 : 0;
+        /* Session 121 — also propagate return-type info. */
+        g_funcs[idx].ret_kind = fn->ret_kind;
+        g_funcs[idx].ret_meta = fn->ret_meta;
         int np = fn->n_params;
         if (np > MAX_PARAMS_PER_FUNC) np = MAX_PARAMS_PER_FUNC;
         for (int j = 0; j < np; j++) {
