@@ -1643,9 +1643,12 @@ static struct node *parse_stmt(void) {
             expect(T_SEMI, "';'");
             struct node *n = new_node(N_ARR_DECL);
             for (int j = 0; j <= i; j++) n->name[j] = nm[j];
-            n->num    = sz;
-            n->n_list = dim2;       /* inner-dim count or 0 for 1D */
-            n->op     = is_char ? LK_CHAR_ARR : LK_INT_ARR;
+            n->num      = sz;
+            n->ret_meta = dim2;     /* session 125 — inner-dim count or 0 for 1D.
+                                     * Stored on ret_meta (rather than n_list)
+                                     * because list-iterating AST walkers would
+                                     * deref NULL n->list when n_list > 0. */
+            n->op       = is_char ? LK_CHAR_ARR : LK_INT_ARR;
             return n;
         }
         struct node *n = new_node(N_VAR_DECL);
@@ -2144,7 +2147,9 @@ static void rewrite_names_in_ast(struct node *n) {
     rewrite_names_in_ast(n->b);
     rewrite_names_in_ast(n->c);
     rewrite_names_in_ast(n->body);
-    for (int i = 0; i < n->n_list; i++)   rewrite_names_in_ast(n->list[i]);
+    if (n->list) {
+        for (int i = 0; i < n->n_list; i++) rewrite_names_in_ast(n->list[i]);
+    }
     for (int i = 0; i < n->n_params; i++) rewrite_names_in_ast(n->params[i]);
 }
 
@@ -4491,17 +4496,16 @@ static void gen_stmt(struct node *n) {
              * the array (lowest address = element 0).
              *
              * Session 125 — also handles `TYPE NAME[N][M];` (2D). The
-             * inner dim M is in n->n_list; if non-zero, total bytes is
-             * N * M * elem_size, and dim2 is recorded on the local_slot
-             * so N_INDEX2 can compute (i * M + j) * elem. */
+             * inner dim M is in n->ret_meta; if non-zero, total bytes
+             * is N * M * elem_size, and dim2 is recorded on the
+             * local_slot so N_INDEX2 can compute (i * M + j) * elem. */
             int kind = n->op;     /* LK_INT_ARR or LK_CHAR_ARR */
             int elem = (kind == LK_CHAR_ARR) ? 1 : 4;
-            int n_elements = (n->n_list > 0) ? (n->num * n->n_list) : n->num;
+            int M    = n->ret_meta;
+            int n_elements = (M > 0) ? (n->num * M) : n->num;
             int bytes = elem * n_elements;
             local_declare_sized(n->name, bytes, kind);
-            if (n->n_list > 0) {
-                g_locals[g_n_locals - 1].dim2 = n->n_list;
-            }
+            if (M > 0) g_locals[g_n_locals - 1].dim2 = M;
             return;
         }
         case N_STRUCT_DECL: {
