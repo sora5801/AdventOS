@@ -706,16 +706,57 @@ const char  *strrchr(const char *s, int c);
 const char  *strstr (const char *h, const char *n);
 
 /* ctype.h. ASCII only. */
-int      isalpha(int c);
-int      isdigit(int c);
-int      isspace(int c);
-int      isalnum(int c);
-int      isupper(int c);
-int      islower(int c);
-int      toupper(int c);
-int      tolower(int c);
+int      isalpha (int c);
+int      isdigit (int c);
+int      isxdigit(int c);
+int      isspace (int c);
+int      isalnum (int c);
+int      isupper (int c);
+int      islower (int c);
+int      toupper (int c);
+int      tolower (int c);
 
 /* Self-introspection: out[0]=magic, out[1]=version, out[2]=count. */
 void     libc_info(uint32_t out[3]);
+
+/* Session 132 — FILE * surface (Path B tcc port phase 2).
+ *
+ * FILE is opaque to user code; mirror struct lives in libc/libc.h.
+ * fopen "r" loads the full file into a malloc'd buffer at open time;
+ * "w" / "a" buffer writes and flush on fclose via sys_fs_write. So
+ * there's no real kernel seek — fseek/ftell move a cursor inside
+ * the buffer. stdin/stdout/stderr are SENTINEL POINTER values (1,2,3),
+ * never dereferenced; fwrite/fputs/fprintf detect them and dispatch
+ * to sys_write directly.
+ *
+ * Limits: 16 FILE* open at once, max 4MB read-file size. */
+struct __libc_FILE;
+typedef struct __libc_FILE FILE;
+
+#define EOF        (-1)
+#define SEEK_SET    0
+#define SEEK_CUR    1
+#define SEEK_END    2
+
+#define stdin   ((FILE *)1)
+#define stdout  ((FILE *)2)
+#define stderr  ((FILE *)3)
+
+FILE   *fopen   (const char *path, const char *mode);
+int     fclose  (FILE *f);
+size_t  fread   (void *ptr, size_t sz, size_t nm, FILE *f);
+size_t  fwrite  (const void *ptr, size_t sz, size_t nm, FILE *f);
+int     fseek   (FILE *f, long offset, int whence);
+long    ftell   (FILE *f);
+int     fputs   (const char *s, FILE *f);
+int     fputc   (int c, FILE *f);
+int     ferror  (FILE *f);
+int     feof    (FILE *f);
+int     remove  (const char *path);
+int     fflush  (FILE *f);
+char   *fgets   (char *s, int n, FILE *f);
+int     fgetc   (FILE *f);
+int     fprintf (FILE *f, const char *fmt, ...);
+int     vfprintf(FILE *f, const char *fmt, va_list ap);
 
 #endif

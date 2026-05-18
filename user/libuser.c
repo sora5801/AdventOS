@@ -1138,10 +1138,26 @@ sighandler_t signal(int sig, sighandler_t handler) {
 #define LIBC_FN_VPRINTF     42
 #define LIBC_FN_VSPRINTF    43
 #define LIBC_FN_VSNPRINTF   44
+#define LIBC_FN_ISXDIGIT     38
+#define LIBC_FN_VFPRINTF     45
+#define LIBC_FN_FOPEN        46
+#define LIBC_FN_FCLOSE       47
+#define LIBC_FN_FREAD        48
+#define LIBC_FN_FWRITE       49
 #define LIBC_FN_MALLOC_BRK   50
 #define LIBC_FN_MALLOC_USED  51
 #define LIBC_FN_MALLOC_FREE_ 52
 #define LIBC_FN_MALLOC_TOTAL 53
+#define LIBC_FN_FSEEK        54
+#define LIBC_FN_FTELL        55
+#define LIBC_FN_FPUTS        56
+#define LIBC_FN_FPUTC        57
+#define LIBC_FN_FERROR       58
+#define LIBC_FN_FEOF         59
+#define LIBC_FN_REMOVE       60
+#define LIBC_FN_FFLUSH       61
+#define LIBC_FN_FGETS        62
+#define LIBC_FN_FGETC        63
 
 /* String — direct pass-through. */
 size_t strlen(const char *s) {
@@ -1239,14 +1255,15 @@ uint32_t malloc_free_bytes(void) {
 }
 
 /* ctype — all freestanding, no syscalls. Trivial dispatches. */
-int isalpha(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALPHA])(c); }
-int isdigit(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISDIGIT])(c); }
-int isspace(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISSPACE])(c); }
-int isalnum(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALNUM])(c); }
-int isupper(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISUPPER])(c); }
-int islower(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISLOWER])(c); }
-int toupper(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOUPPER])(c); }
-int tolower(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOLOWER])(c); }
+int isalpha (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALPHA ])(c); }
+int isdigit (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISDIGIT ])(c); }
+int isxdigit(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISXDIGIT])(c); }
+int isspace (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISSPACE ])(c); }
+int isalnum (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALNUM ])(c); }
+int isupper (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISUPPER ])(c); }
+int islower (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISLOWER ])(c); }
+int toupper (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOUPPER ])(c); }
+int tolower (int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOLOWER ])(c); }
 
 /* Stdio. putchar/puts forward straight into libc's putchar_/puts_. */
 void putchar(char c) {
@@ -1292,6 +1309,72 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
 
 void libc_info(uint32_t out[3]) {
     ((void (*)(uint32_t *))LIBC_TABLE[LIBC_FN_LIBC_INFO])(out);
+}
+
+/* Session 132 — FILE * surface for the tcc port. All trampoline
+ * into libc.bin's libc/file.c.  See libc/libc.h for the design notes
+ * (read-mode files load whole, write-mode buffer in RAM and flush
+ * on fclose, stdin/stdout/stderr are sentinel pointer values). */
+FILE *fopen(const char *path, const char *mode) {
+    return ((FILE *(*)(const char *, const char *))
+            LIBC_TABLE[LIBC_FN_FOPEN])(path, mode);
+}
+int fclose(FILE *f) {
+    return ((int (*)(FILE *))LIBC_TABLE[LIBC_FN_FCLOSE])(f);
+}
+size_t fread(void *ptr, size_t sz, size_t nm, FILE *f) {
+    return ((size_t (*)(void *, size_t, size_t, FILE *))
+            LIBC_TABLE[LIBC_FN_FREAD])(ptr, sz, nm, f);
+}
+size_t fwrite(const void *ptr, size_t sz, size_t nm, FILE *f) {
+    return ((size_t (*)(const void *, size_t, size_t, FILE *))
+            LIBC_TABLE[LIBC_FN_FWRITE])(ptr, sz, nm, f);
+}
+int fseek(FILE *f, long offset, int whence) {
+    return ((int (*)(FILE *, long, int))
+            LIBC_TABLE[LIBC_FN_FSEEK])(f, offset, whence);
+}
+long ftell(FILE *f) {
+    return ((long (*)(FILE *))LIBC_TABLE[LIBC_FN_FTELL])(f);
+}
+int fputs(const char *s, FILE *f) {
+    return ((int (*)(const char *, FILE *))
+            LIBC_TABLE[LIBC_FN_FPUTS])(s, f);
+}
+int fputc(int c, FILE *f) {
+    return ((int (*)(int, FILE *))LIBC_TABLE[LIBC_FN_FPUTC])(c, f);
+}
+int ferror(FILE *f) {
+    return ((int (*)(FILE *))LIBC_TABLE[LIBC_FN_FERROR])(f);
+}
+int feof(FILE *f) {
+    return ((int (*)(FILE *))LIBC_TABLE[LIBC_FN_FEOF])(f);
+}
+int remove(const char *path) {
+    return ((int (*)(const char *))LIBC_TABLE[LIBC_FN_REMOVE])(path);
+}
+int fflush(FILE *f) {
+    return ((int (*)(FILE *))LIBC_TABLE[LIBC_FN_FFLUSH])(f);
+}
+char *fgets(char *s, int n, FILE *f) {
+    return ((char *(*)(char *, int, FILE *))
+            LIBC_TABLE[LIBC_FN_FGETS])(s, n, f);
+}
+int fgetc(FILE *f) {
+    return ((int (*)(FILE *))LIBC_TABLE[LIBC_FN_FGETC])(f);
+}
+/* varargs shim — forwards to libc's vfprintf_. */
+int fprintf(FILE *f, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = ((int (*)(FILE *, const char *, va_list))
+             LIBC_TABLE[LIBC_FN_VFPRINTF])(f, fmt, args);
+    va_end(args);
+    return n;
+}
+int vfprintf(FILE *f, const char *fmt, va_list ap) {
+    return ((int (*)(FILE *, const char *, va_list))
+            LIBC_TABLE[LIBC_FN_VFPRINTF])(f, fmt, ap);
 }
 
 /* Non-zero-initialized marker: forces user.ld's .data section to be
