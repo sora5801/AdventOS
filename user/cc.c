@@ -125,6 +125,7 @@ enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
     T_BREAK, T_CONTINUE, T_GOTO,    /* session 125 */
+    T_SWITCH, T_CASE, T_DEFAULT,    /* session 125 */
     T_STRUCT,    /* session 97 */
     T_UNION,     /* session 125 */
     T_SIZEOF,    /* session 99 */
@@ -287,6 +288,9 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "break"))  return T_BREAK;    /* session 125 */
     if (my_streq(s, "continue"))return T_CONTINUE; /* session 125 */
     if (my_streq(s, "goto"))   return T_GOTO;     /* session 125 */
+    if (my_streq(s, "switch")) return T_SWITCH;   /* session 125 */
+    if (my_streq(s, "case"))   return T_CASE;     /* session 125 */
+    if (my_streq(s, "default"))return T_DEFAULT;  /* session 125 */
     if (my_streq(s, "return")) return T_RETURN;
     if (my_streq(s, "for"))    return T_FOR;
     return T_NAME;
@@ -1055,6 +1059,9 @@ enum {
     N_SIZEOF_NAME,   /* sizeof NAME — folded at codegen when locals are bound */
     N_LABEL,         /* NAME: stmt — body in n->body */
     N_GOTO,          /* goto NAME; */
+    N_SWITCH,        /* switch (n->a) n->b — body must be a block */
+    N_CASE,          /* case N: — n->num is the case value */
+    N_DEFAULT,       /* default: */
 };
 
 struct node {
@@ -1658,6 +1665,41 @@ static struct node *parse_stmt(void) {
         for (int j = 0; j <= i; j++) n->name[j] = nm[j];
         n->body = parse_stmt();
         return n;
+    }
+    /* Session 125 — switch (expr) stmt.  Body is typically a block of
+     * `case N:`, `default:`, and regular statements. */
+    if (t == T_SWITCH) {
+        g_tk++;
+        expect(T_LPAREN, "'('");
+        struct node *e = parse_comma_expr();
+        expect(T_RPAREN, "')'");
+        struct node *body = parse_stmt();
+        struct node *n = new_node(N_SWITCH);
+        n->a = e;
+        n->b = body;
+        return n;
+    }
+    /* Session 125 — case N: — only integer-literal values supported
+     * (cc has no parse-time constant folding for arithmetic in this
+     * branch). For `case -N:` accept a leading minus. */
+    if (t == T_CASE) {
+        g_tk++;
+        int neg = 0;
+        if (accept(T_MINUS)) neg = 1;
+        if (tk_cur()->kind != T_NUM)
+            die_at(tk_cur()->line, "case value must be integer literal", 0);
+        int v = tk_cur()->num;
+        if (neg) v = -v;
+        g_tk++;
+        expect(T_COLON, "':' after case value");
+        struct node *n = new_node(N_CASE);
+        n->num = v;
+        return n;
+    }
+    if (t == T_DEFAULT) {
+        g_tk++;
+        expect(T_COLON, "':' after default");
+        return new_node(N_DEFAULT);
     }
     /* Session 125 — `do stmt while (cond);`. Body in n->a, cond in n->b. */
     if (t == T_DO) {
@@ -4741,6 +4783,115 @@ static void gen_stmt(struct node *n) {
             gen_stmt(n->body);
             return;
         }
+        case N_SWITCH: {
+            /* Session 125 — switch (expr) { case N: ... default: ... }.
+             *
+             * Codegen:
+             *   1. Evaluate the switch expression into EAX.
+             *   2. Emit a dispatch chain: cmp eax, N; je case_N_target
+             *      for each non-default case. The case_target offsets
+             *      are recorded as we walk the body.
+             *   3. After the dispatch chain, emit one unconditional jmp:
+             *      to `default:` if present, else to end of switch.
+             *   4. Walk the body — each N_CASE / N_DEFAULT records its
+             *      g_code_len position; everything else gen_stmts.
+             *   5. Patch the dispatch chain and break jumps.
+             *
+             * Restrictions: case/default labels must be top-level in
+             * the switch body (no nested cases inside if/while inside
+             * the switch). Case values must be integer literals (no
+             * compile-time folding of expressions in this branch).
+             *
+             * Fall-through between cases works because we don't insert
+             * any jumps between case targets — users add `break;` to
+             * end a case explicitly. */
+            if (!n->b || n->b->kind != N_BLOCK)
+                die_at(n->line, "switch body must be a block", 0);
+
+            gen_expr(n->a);                     /* eax = switch value */
+
+            #define MAX_CASES_PER_SWITCH 32
+            int    case_vals[MAX_CASES_PER_SWITCH];
+            int    case_is_default[MAX_CASES_PER_SWITCH];
+            int    case_targets[MAX_CASES_PER_SWITCH];
+            int    dispatch_jmps[MAX_CASES_PER_SWITCH];
+            int    n_cases = 0;
+            int    default_idx = -1;
+
+            /* Pre-scan top-level body stmts to find cases / default. */
+            for (int i = 0; i < n->b->n_list; i++) {
+                struct node *s = n->b->list[i];
+                if (!s) continue;
+                if (s->kind == N_CASE) {
+                    if (n_cases >= MAX_CASES_PER_SWITCH) die_at(s->line, "too many cases", 0);
+                    case_vals[n_cases]       = s->num;
+                    case_is_default[n_cases] = 0;
+                    n_cases++;
+                } else if (s->kind == N_DEFAULT) {
+                    if (n_cases >= MAX_CASES_PER_SWITCH) die_at(s->line, "too many cases", 0);
+                    case_is_default[n_cases] = 1;
+                    default_idx = n_cases;
+                    n_cases++;
+                }
+            }
+
+            /* Emit dispatch chain. */
+            for (int i = 0; i < n_cases; i++) {
+                if (case_is_default[i]) continue;
+                /* cmp eax, imm32  →  3d imm32 */
+                emit_b(0x3d); emit_d((unsigned)case_vals[i]);
+                /* je rel32  →  0f 84 imm32 (same as jz) */
+                dispatch_jmps[i] = e_jz_rel32();
+            }
+            /* Fall-through jmp: to default if present, else to end. */
+            int default_jmp = e_jmp_rel32();
+
+            /* Push loop ctx (is_switch=1) so break works, continue
+             * passes through to any enclosing loop. */
+            struct loop_ctx *lc = loop_push(-1, 1);
+
+            /* Walk the body — record case-label positions and emit
+             * everything else. */
+            int case_idx = 0;
+            for (int i = 0; i < n->b->n_list; i++) {
+                struct node *s = n->b->list[i];
+                if (!s) continue;
+                if (s->kind == N_CASE || s->kind == N_DEFAULT) {
+                    case_targets[case_idx++] = g_code_len;
+                    /* No body — case labels are just position markers.
+                     * Fall-through to the next non-label stmt. */
+                } else {
+                    gen_stmt(s);
+                }
+            }
+
+            /* Patch each non-default dispatch jmp. */
+            for (int i = 0; i < n_cases; i++) {
+                if (case_is_default[i]) continue;
+                patch_d(dispatch_jmps[i],
+                        (unsigned)(case_targets[i] - (dispatch_jmps[i] + 4)));
+            }
+            /* Patch the default / end jmp. */
+            if (default_idx >= 0) {
+                patch_d(default_jmp,
+                        (unsigned)(case_targets[default_idx] - (default_jmp + 4)));
+            } else {
+                patch_d(default_jmp,
+                        (unsigned)(g_code_len - (default_jmp + 4)));
+            }
+            /* Patch break jumps to end. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i],
+                        (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
+            return;
+        }
+        case N_CASE:
+        case N_DEFAULT:
+            /* Only reachable as a top-level switch-body stmt; otherwise
+             * an error. The N_SWITCH codegen handles them inline. */
+            die_at(n->line, "case/default outside switch", 0);
+            return;
         case N_GOTO: {
             /* Session 125 — emit forward jmp placeholder, record fixup
              * for resolution at end of gen_func. */

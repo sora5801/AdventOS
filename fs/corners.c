@@ -118,5 +118,27 @@ done:
     printf("assign_expr_b    = %d\n", bb);             /* 7 */
     printf("assign_expr_c    = %d\n", cc_);            /* 10 */
 
+    /* 9. switch / case / default + fall-through + break. */
+    int total;
+    total = 0;
+    int kk;
+    kk = 0;
+    while (kk < 5) {
+        switch (kk) {
+        case 0:
+        case 1:
+            total += 10;     /* falls into both 0 and 1 */
+            break;
+        case 3:
+            total += 100;
+            break;
+        default:
+            total += 1;
+        }
+        kk += 1;
+    }
+    /* k=0: 10. k=1: 10. k=2: 1 (default). k=3: 100. k=4: 1. Total 122. */
+    printf("switch_total     = %d\n", total);
+
     return 0;
 }

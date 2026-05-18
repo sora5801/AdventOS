@@ -58,6 +58,7 @@ EXPECTED = [
     "assign_expr_a    = 10",
     "assign_expr_b    = 7",
     "assign_expr_c    = 10",
+    "switch_total     = 122",
 ]
 
 
