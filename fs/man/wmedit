@@ -1,0 +1,42 @@
+NAME
+    wmedit - text editor WM client (Path C phase 30)
+
+SYNOPSIS
+    wmedit [PATH] [SECONDS]
+
+DESCRIPTION
+    Open a 640x400 editor window over the file at PATH (defaults
+    to /tmp/edit if omitted).  Missing files open as empty
+    buffers — Ctrl+S creates them on first save.  SECONDS is
+    the lifetime cap (default 600 = 10 minutes); Ctrl+Q exits
+    early.
+
+    Keys (only delivered when the window has keyboard focus —
+    click into the window first):
+      printable ASCII   insert at cursor
+      Enter             insert newline
+      Backspace / DEL   delete char before cursor
+      Tab               insert 4 spaces
+      Arrow keys        move cursor up/down/left/right
+      Ctrl+S            save buffer to PATH
+      Ctrl+Q            quit
+      Ctrl+C            copy entire buffer to the global clipboard
+      Ctrl+V            paste clipboard contents at the cursor
+
+    Mouse: clicking in the text region positions the cursor on
+    the row/col under the click.
+
+    The window title shows "wmedit  Ctrl-S save  Ctrl-Q quit"
+    when focused.  The bottom status bar shows the path, a
+    [*] marker if there are unsaved edits, and the current
+    cursor position as "L<row>:<col> B<total-bytes>".
+
+LIMITATIONS
+    Single 8 KiB buffer cap.  No selection, search, undo, or
+    file picker — those are future polish.  Arrow-key support
+    relies on the kernel's ANSI CSI passthrough for arrows
+    (ESC '[' A/B/C/D), same path the shell uses for history
+    navigation.
+
+SEE ALSO
+    wmtype(1), wmterm(1), wmd(1)

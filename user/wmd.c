@@ -101,6 +101,7 @@ static const struct launch_entry g_launch_items[] = {
     { "sysinfo", "/wmsysinfo.elf" },
     { "wmps",    "/wmps.elf"     },
     { "wmterm",  "/wmterm.elf"   },
+    { "wmedit",  "/wmedit.elf"   },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
