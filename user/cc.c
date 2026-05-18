@@ -126,6 +126,7 @@ enum {
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
     T_BREAK, T_CONTINUE,    /* session 125 */
     T_STRUCT,    /* session 97 */
+    T_UNION,     /* session 125 */
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
     T_TYPEDEF,   /* session 104 */
@@ -273,6 +274,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "int"))    return T_INT;
     if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
     if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
+    if (my_streq(s, "union"))  return T_UNION;    /* session 125 */
     if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
     if (my_streq(s, "enum"))   return T_ENUM;     /* session 103 */
     if (my_streq(s, "typedef"))return T_TYPEDEF;  /* session 104 */
@@ -873,6 +875,7 @@ struct struct_info {
     int  n_fields;
     int  size;        /* total bytes (== n_fields * 4 currently) */
     int  defined;     /* 0 = forward-declared only */
+    int  is_union;    /* session 125 — 1 = union (all fields at offset 0) */
 };
 static struct struct_info g_structs[MAX_STRUCTS];
 static int                g_n_structs;
@@ -980,13 +983,16 @@ static int try_consume_type(int *out_kind, int *out_meta) {
         *out_meta = 0;
         return 1;
     }
-    if (tk == T_STRUCT) {
+    if (tk == T_STRUCT || tk == T_UNION) {
+        /* Session 125 — unions share the LK_STRUCT/LK_STRUCT_PTR kinds.
+         * The is_union flag on the struct_info handles the field-offset
+         * difference; downstream codegen doesn't need to distinguish. */
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag", 0);
+            die_at(tk_cur()->line, "expected struct/union tag", 0);
         int sidx = struct_find(tk_cur()->name);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct", tk_cur()->name);
+            die_at(tk_cur()->line, "undefined struct/union", tk_cur()->name);
         g_tk++;
         *out_kind = accept(T_STAR) ? LK_STRUCT_PTR : LK_STRUCT;
         *out_meta = sidx;
@@ -1132,13 +1138,13 @@ static struct node *parse_primary(void) {
         g_tk++;
         expect(T_LPAREN, "'('");
         int sz;
-        if (tk_cur()->kind == T_STRUCT) {
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
-                die_at(tk_cur()->line, "sizeof: expected struct tag", 0);
+                die_at(tk_cur()->line, "sizeof: expected struct/union tag", 0);
             int idx = struct_find(tk_cur()->name);
             if (idx < 0)
-                die_at(tk_cur()->line, "sizeof: unknown struct", tk_cur()->name);
+                die_at(tk_cur()->line, "sizeof: unknown struct/union", tk_cur()->name);
             g_tk++;
             if (accept(T_STAR)) sz = 4;
             else                sz = g_structs[idx].size;
@@ -1448,10 +1454,10 @@ static struct node *parse_stmt(void) {
      *   struct TAG *NAME;       a pointer to a struct
      *   struct TAG NAME[N];     array of N struct values     (s102)
      *   No initializer support (would need brace-init parsing). */
-    if (t == T_STRUCT) {
+    if (t == T_STRUCT || t == T_UNION) {
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag", 0);
+            die_at(tk_cur()->line, "expected struct/union tag", 0);
         char tag[NAME_MAX];
         int ti = 0;
         while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
@@ -1459,7 +1465,7 @@ static struct node *parse_stmt(void) {
         g_tk++;
         int sidx = struct_find(tag);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct", tag);
+            die_at(tk_cur()->line, "undefined struct/union", tag);
         int is_ptr = accept(T_STAR);
         if (tk_cur()->kind != T_NAME)
             die_at(tk_cur()->line, "expected variable name", 0);
@@ -1754,13 +1760,13 @@ static void parse_return_type(int *out_kind, int *out_meta) {
         }
         return;
     }
-    if (tk_cur()->kind == T_STRUCT) {
+    if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag in return type", 0);
+            die_at(tk_cur()->line, "expected struct/union tag in return type", 0);
         int sidx = struct_find(tk_cur()->name);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct in return type", tk_cur()->name);
+            die_at(tk_cur()->line, "undefined struct/union in return type", tk_cur()->name);
         g_tk++;
         if (accept(T_STAR)) {
             *out_kind = LK_STRUCT_PTR;
@@ -1801,10 +1807,10 @@ static void parse_param_list(struct node *fn) {
         int kind, struct_idx = 0;
         /* Session 97/106 — `struct T *p` (pointer) or `struct T p`
          * (by-value) parameter. */
-        if (tk_cur()->kind == T_STRUCT) {
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
-                die_at(tk_cur()->line, "expected struct tag in param", 0);
+                die_at(tk_cur()->line, "expected struct/union tag in param", 0);
             char tag[NAME_MAX];
             int x = 0;
             while (tk_cur()->name[x]) { tag[x] = tk_cur()->name[x]; x++; }
@@ -1812,7 +1818,7 @@ static void parse_param_list(struct node *fn) {
             g_tk++;
             struct_idx = struct_find(tag);
             if (struct_idx < 0)
-                die_at(tk_cur()->line, "undefined struct in param", tag);
+                die_at(tk_cur()->line, "undefined struct/union in param", tag);
             int is_ptr = accept(T_STAR);
             kind = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
         } else if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
@@ -2009,11 +2015,26 @@ static void parse_global_decl(void) {
 
 /* Session 97 — parse `struct TAG { int field; ... };` or `struct TAG NAME;`
  * at file scope. Disambiguates by peeking past `struct TAG` to look for
- * a brace. */
+ * a brace.
+ *
+ * Session 125 — also handles `union TAG { ... };` / `union TAG NAME;`.
+ * Internally a union is just a struct_info with `is_union=1`, all field
+ * offsets stamped at 0, and size = max(field sizes) — since every cc
+ * field is 4 bytes that's just 4. The existing field-access codegen
+ * works without modification: u.field becomes
+ * `mov eax, [ebp + off + 0]` and writes to the same memory slot for
+ * every field. */
 static void parse_struct_top(void) {
-    expect(T_STRUCT, "'struct'");
+    int is_union;
+    if (tk_cur()->kind == T_UNION) {
+        is_union = 1;
+        g_tk++;
+    } else {
+        expect(T_STRUCT, "'struct' or 'union'");
+        is_union = 0;
+    }
     if (tk_cur()->kind != T_NAME)
-        die_at(tk_cur()->line, "expected struct tag name", 0);
+        die_at(tk_cur()->line, "expected struct/union tag name", 0);
     char tag[NAME_MAX];
     int ti = 0;
     while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
@@ -2033,9 +2054,11 @@ static void parse_struct_top(void) {
             g_structs[sidx].n_fields = 0;
             g_structs[sidx].size = 0;
             g_structs[sidx].defined = 0;
+            g_structs[sidx].is_union = is_union;
         }
         if (g_structs[sidx].defined)
-            die_at(tk_cur()->line, "struct redefined", tag);
+            die_at(tk_cur()->line, "struct/union redefined", tag);
+        g_structs[sidx].is_union = is_union;
 
         int field_off = 0;
         while (tk_cur()->kind != T_RBRACE) {
@@ -2043,10 +2066,10 @@ static void parse_struct_top(void) {
              * struct OTHER *NAME;   — last is for linked-list-style. */
             int field_kind;
             int field_meta = 0;
-            if (tk_cur()->kind == T_STRUCT) {
+            if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
                 g_tk++;
                 if (tk_cur()->kind != T_NAME)
-                    die_at(tk_cur()->line, "field: expected struct tag", 0);
+                    die_at(tk_cur()->line, "field: expected struct/union tag", 0);
                 char inner_tag[NAME_MAX];
                 int k = 0;
                 while (tk_cur()->name[k]) { inner_tag[k] = tk_cur()->name[k]; k++; }
@@ -2087,18 +2110,22 @@ static void parse_struct_top(void) {
                 g_structs[sidx].fields[fi].name[k] = tk_cur()->name[k]; k++;
             }
             g_structs[sidx].fields[fi].name[k] = 0;
-            g_structs[sidx].fields[fi].offset = field_off;
-            g_structs[sidx].fields[fi].size   = 4;  /* every field is 4-byte */
+            /* Session 125 — union: every field shares offset 0. struct:
+             * offsets march by 4 (field_off advances after each). */
+            g_structs[sidx].fields[fi].offset = is_union ? 0 : field_off;
+            g_structs[sidx].fields[fi].size   = 4;
             g_structs[sidx].fields[fi].kind   = field_kind;
             g_structs[sidx].fields[fi].meta   = field_meta;
             g_structs[sidx].n_fields++;
-            field_off += 4;
+            if (!is_union) field_off += 4;
             g_tk++;
             expect(T_SEMI, "';'");
         }
         expect(T_RBRACE, "'}'");
         expect(T_SEMI, "';'");
-        g_structs[sidx].size    = field_off;
+        /* Session 125 — for unions, size is max(field sizes). Since
+         * every cc field is 4 bytes that's just 4. */
+        g_structs[sidx].size    = is_union ? (g_structs[sidx].n_fields ? 4 : 0) : field_off;
         g_structs[sidx].defined = 1;
         return;
     }
@@ -2250,8 +2277,8 @@ static struct node *parse_program(void) {
          *
          * Distinguish by peeking past the optional `*` and the var/func
          * name. */
-        if (tk_cur()->kind == T_STRUCT) {
-            /* tk_peek(0)=struct, tk_peek(1)=TAG. */
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
+            /* tk_peek(0)=struct/union, tk_peek(1)=TAG. */
             if (tk_peek(2)->kind == T_LBRACE) {
                 /* Definition. */
                 parse_struct_top();
@@ -2260,7 +2287,7 @@ static struct node *parse_program(void) {
             int peek = 2;
             if (tk_peek(peek)->kind == T_STAR) peek++;
             if (tk_peek(peek)->kind != T_NAME)
-                die_at(tk_peek(peek)->line, "expected name after struct TAG", 0);
+                die_at(tk_peek(peek)->line, "expected name after struct/union TAG", 0);
             peek++;
             if (tk_peek(peek)->kind == T_LPAREN) {
                 /* Struct-returning function. parse_func handles the

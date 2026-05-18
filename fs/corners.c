@@ -20,6 +20,14 @@
  *  11. static LOCAL               module-private state in a function
  */
 
+/* Session 125 — union: every field shares offset 0. Reading one field
+ * sees the bits written by the most recent write to any field.
+ * Common idiom: store an int, observe the bytes as a char*. */
+union view {
+    int  as_int;
+    char *as_str;
+};
+
 int main() {
     /* 1. Comma operator. Inner expression evaluates a, then b, and
      *    returns b. */
@@ -68,6 +76,15 @@ int main() {
         bsum += j;
     }
     printf("break_continue   = %d\n", bsum);     /* 1+2+4+5+7 = 19 */
+
+    /* 5. union — one storage shared by multiple field views. Writing
+     *    `as_int` and then reading `as_str` reads the same 4 bytes
+     *    back as a pointer. Here we go the other way for clarity. */
+    union view u;
+    u.as_int = 42;
+    printf("union_as_int     = %d\n", u.as_int); /* 42 */
+    u.as_str = "ok";                              /* same storage rewritten */
+    printf("union_as_str     = %s\n", u.as_str); /* ok */
 
     return 0;
 }

@@ -49,6 +49,8 @@ EXPECTED = [
     "b_shr_eq         = 2",
     "do_while_sum     = 15",
     "break_continue   = 19",
+    "union_as_int     = 42",
+    "union_as_str     = ok",
 ]
 
 
