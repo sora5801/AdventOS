@@ -129,7 +129,7 @@ static int rx_init(struct vnet *v) {
     return 0;
 }
 
-/* ---- RX polling ----------------------------------------------- */
+/* ---- RX drain ------------------------------------------------- */
 
 static void rx_drain(struct vnet *v) {
     while ((uint16_t)(v->rx_vq.used->idx - v->rx_vq.last_used) != 0) {
@@ -155,21 +155,23 @@ static void rx_drain(struct vnet *v) {
     outw(v->io + VIRTIO_PCI_QUEUE_NOTIFY, v->rx_vq.qidx);
 }
 
-static void virtio_net_rx_task(void) {
-    struct vnet *v = &g_vnet;
-    for (;;) {
-        rx_drain(v);
-        /* 20 ms — same order of magnitude as a SLIRP RTT, gives ample
-         * headroom over PIT granularity (10 ms), keeps idle CPU use
-         * low. */
-        pit_sleep(20);
-    }
+/* IRQ-context shim. Called from virtio.c's master dispatcher when
+ * this device's ISR signals queue activity. Walking the RX used
+ * ring from IRQ context is fine — rtl8139's IRQ handler does the
+ * same shape (hand-up frames via net_rx_frame which descends into
+ * the TCP/UDP stack under net_lock). */
+static void virtio_net_irq_drain(void *cookie) {
+    rx_drain((struct vnet *)cookie);
 }
 
 void virtio_net_start_polling(void) {
-    if (!g_vnet.in_use) return;
-    task_make_runnable(task_create(virtio_net_rx_task, "virtio-net-rx"));
-    kprintf("virtio-net: RX polling task started\n");
+    /* IRQ-driven now (see virtio_install_irq call in virtio_net_init).
+     * Kept under the old name + symbol for kmain compatibility — the
+     * polling task that used to live here is gone. */
+    if (g_vnet.in_use) {
+        kprintf("virtio-net: RX is IRQ-driven (IRQ %u)\n",
+                (unsigned)g_vnet.pci.irq_line);
+    }
 }
 
 /* ---- TX ------------------------------------------------------- */
@@ -269,6 +271,10 @@ int virtio_net_init(struct mac_addr *out_mac) {
         virtio_status_failed(v->io);
         return -1;
     }
+
+    /* Install our IRQ handler BEFORE DRIVER_OK so we don't miss the
+     * first RX completion. */
+    virtio_install_irq(v->io, v->pci.irq_line, virtio_net_irq_drain, v);
 
     /* Tell the device we're done configuring before we start posting
      * RX buffers — some virtio implementations gate ring access on

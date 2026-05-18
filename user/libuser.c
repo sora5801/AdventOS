@@ -268,6 +268,15 @@ int sys_virtio_console_read(void *buf, int n) {
     return ret;
 }
 
+int sys_rename(const char *oldp, const char *newp) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_RENAME), "b"(oldp), "c"(newp)
+                      : "memory");
+    return ret;
+}
+
 int sys_virtio_balloon_stats(unsigned int out[4]) {
     int ret;
     __asm__ volatile ("int $0x80"
@@ -517,6 +526,32 @@ int sys_wm_event_poll(unsigned int window_id,
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_WM_EVENT_POLL), "b"(window_id), "c"(out)
+                      : "memory");
+    return ret;
+}
+int sys_wm_poll_alttab(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_ALTTAB)
+                      : "memory");
+    return ret;
+}
+
+/* Session 136 — clipboard. */
+int sys_clipboard_set(const void *buf, int len) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CLIPBOARD_SET), "b"(buf), "c"(len)
+                      : "memory");
+    return ret;
+}
+int sys_clipboard_get(void *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_CLIPBOARD_GET), "b"(buf), "c"(cap)
                       : "memory");
     return ret;
 }

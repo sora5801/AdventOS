@@ -52,6 +52,7 @@ void virtio_rng_init(void) {
         virtio_status_failed(v->io);
         return;
     }
+    virtio_install_irq(v->io, v->pci.irq_line, 0, v);
     virtio_status_driver_ok(v->io);
 
     v->in_use = 1;

@@ -97,18 +97,19 @@ static void rx_drain(struct vcons *v) {
     outw(v->io + VIRTIO_PCI_QUEUE_NOTIFY, v->rx_vq.qidx);
 }
 
-static void virtio_console_rx_task(void) {
-    struct vcons *v = &g_vcons;
-    for (;;) {
-        rx_drain(v);
-        pit_sleep(50);
-    }
+/* IRQ-context drain. The byte ring (ring_lock) is the only state
+ * touched outside IRQ context — its spinlock disables IRQs on
+ * acquire, so a concurrent SYS_VIRTIO_CONSOLE_READ from a user task
+ * can't race us. */
+static void virtio_console_irq_drain(void *cookie) {
+    rx_drain((struct vcons *)cookie);
 }
 
 void virtio_console_start_polling(void) {
-    if (!g_vcons.in_use) return;
-    task_make_runnable(task_create(virtio_console_rx_task, "vcons-rx"));
-    kprintf("virtio-console: RX polling task started\n");
+    if (g_vcons.in_use) {
+        kprintf("virtio-console: RX is IRQ-driven (IRQ %u)\n",
+                (unsigned)g_vcons.pci.irq_line);
+    }
 }
 
 int virtio_console_write(const void *buf, int n) {
@@ -182,6 +183,7 @@ void virtio_console_init(void) {
         virtio_status_failed(v->io);
         return;
     }
+    virtio_install_irq(v->io, v->pci.irq_line, virtio_console_irq_drain, v);
     virtio_status_driver_ok(v->io);
 
     /* RX buffers. */

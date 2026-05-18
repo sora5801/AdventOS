@@ -42,4 +42,14 @@ int  virtio_9p_fd_read(int inode_slot, uint32_t offset,
  * from SYS_CLOSE's release_fd path. */
 void virtio_9p_fd_close(int inode_slot);
 
+/* Remove `rel_path` (relative to the 9p mount point) from the host
+ * share. is_dir = 0 for files (Tunlinkat), 1 for empty directories
+ * (Tunlinkat with AT_REMOVEDIR). Returns 0 / -1. Called from SYS_UNLINK
+ * and SYS_RMDIR when the path lives under the 9p mount. */
+int  virtio_9p_unlink_path(const char *rel_path, int is_dir);
+
+/* Atomic rename via 9P Trenameat. Both paths are relative to the
+ * mount point. Returns 0 / -1. Called from SYS_RENAME. */
+int  virtio_9p_rename_path(const char *old_rel, const char *new_rel);
+
 #endif

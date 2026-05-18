@@ -24,7 +24,9 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
 | ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
-| virtio-blk + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough) | ✅ |
+| AHCI SATA controller (modern hard-disk interface) | ✅ |
+| virtio-blk + virtio-scsi + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
+| e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
@@ -100,6 +102,14 @@ Current session: **134 — Path B tcc port, Phase 2 (running inside AdventOS)**.
 Recent session deep dives:
 - [Session 134 — Path B tcc port, Phase 2 (running inside AdventOS)](docs/120-pathB-tcc-phase2.md)
 - [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
+- [Session 139 — Path C phase 32: wmcalc calculator](docs/125-pathC-wmcalc.md)
+- [Session 138 — Path C phase 31: snap-to-edge + drop shadows](docs/124-pathC-snap-shadows.md)
+- [Session 137 — Path C phase 30: wmedit text editor](docs/123-pathC-wmedit.md)
+- [Session 134 — Path C phase 27: wmterm terminal emulator](docs/120-pathC-wmterm.md)
+- [Session 124 — Path E phase 7: virtio-scsi + CDC-ACM TTY](docs/122-pathE-vscsi-cdc-tty.md)
+- [Session 123 — Path E phase 6: AHCI SATA controller](docs/110-pathE-ahci.md)
+- [Session 122 — Path E phase 5: e1000 NIC + 9p atomic rename](docs/109-pathE-e1000-and-rename.md)
+- [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
 - [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
 - [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
@@ -159,7 +169,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–120 covered virtio-blk/net/rng/console/balloon/9p + USB CDC-ACM + AC97 consumer + WSL build path. Still candidate: 9p writes (Tlcreate/Twrite), IRQ-driven virtio completion, USB CDC-ECM, virtio-scsi, full TTY integration of CDC-ACM.
+- **Path E — Drivers extension** — sessions 118–124 covered virtio-blk/scsi/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM with `/dev/ttyACM0` userspace device + AC97 consumer + WSL build path + IRQ-driven virtio + chain-style shared-PCI-IRQ dispatch + e1000 NIC + AHCI. Still candidate: USB EHCI (USB 2.0), USB CDC-ECM, NVMe, AHCI IRQ + NCQ.
 
 ## License
 

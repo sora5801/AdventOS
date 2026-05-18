@@ -72,14 +72,23 @@ int main(int argc, char **argv) {
                 case WM_EV_UNFOCUS: has_focus = 0; break;
                 case WM_EV_KEY: {
                     unsigned int k = ev.keycode;
-                    if (k == 0x08 || k == 0x7F) {        /* backspace / DEL */
+                    if (k == 0x03) {                     /* Ctrl+C — copy */
+                        wm_clipboard_set(buf, len);
+                    } else if (k == 0x16) {              /* Ctrl+V — paste */
+                        char pb[BUF_MAX];
+                        int pn = wm_clipboard_get(pb, (int)sizeof(pb));
+                        if (pn > 0) {
+                            if (pn > BUF_MAX - len - 1) pn = BUF_MAX - len - 1;
+                            for (int i = 0; i < pn; i++) buf[len++] = pb[i];
+                        }
+                    } else if (k == 0x08 || k == 0x7F) { /* backspace / DEL */
                         if (len > 0) len--;
                     } else if (k == '\r' || k == '\n') {
                         if (len < BUF_MAX - 1) buf[len++] = '\n';
                     } else if (k >= 0x20 && k <= 0x7E) {  /* printable */
                         if (len < BUF_MAX - 1) buf[len++] = (char)k;
                     }
-                    /* Other keys (arrows, ctrl, ...) ignored for now. */
+                    /* Other keys (arrows, other ctrl, ...) ignored. */
                     break;
                 }
                 case WM_EV_MOUSE_PRESS:

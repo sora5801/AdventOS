@@ -348,6 +348,25 @@ struct sys_limits {
                                       * target_pages, num_pages_freed,
                                       * num_pages_reclaimed]. */
 
+/* Session 135 — Alt+Tab routing.  USB-HID posts on Alt+Tab via
+ * the in-kernel `wm_post_alttab` helper.  Wmd polls via this
+ * syscall once per frame.  Returns 1 if at least one Alt+Tab
+ * press is pending (and decrements the counter), else 0. */
+#define SYS_WM_POLL_ALTTAB       100
+
+#define SYS_RENAME      101 /* (eax=101, ebx=old_path, ecx=new_path) ->
+                             * 0 / -1.  For paths under /mnt/9p the
+                             * driver issues an atomic 9P Trenameat;
+                             * for AdventFS paths the kernel does NOT
+                             * implement rename (caller falls back to
+                             * the userspace copy+unlink in mv.c). */
+
+/* Session 136 — global single-slot clipboard.  Any task can write
+ * (last-writer-wins) and read.  Max payload 4096 bytes; kernel
+ * kmalloc's a single buffer.  See clipboard.h. */
+#define SYS_CLIPBOARD_SET  102  /* (eax=102, ebx=buf, ecx=len)  -> 0 / -1 */
+#define SYS_CLIPBOARD_GET  103  /* (eax=103, ebx=buf, ecx=cap)  -> stored_len or 0 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

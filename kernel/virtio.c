@@ -24,6 +24,8 @@
 #include "kprintf.h"
 #include "string.h"
 #include "pit.h"
+#include "isr.h"
+#include "pic.h"
 #include "../include/io.h"
 
 /* In legacy virtio, queue size is set by the device (QUEUE_NUM is
@@ -184,6 +186,59 @@ void virtio_submit(uint16_t io_base, struct virtqueue *vq, uint16_t head) {
     /* Notify the host. Some devices set NO_NOTIFY in used.flags
      * once they're polling; for simplicity we always kick. */
     outw(io_base + VIRTIO_PCI_QUEUE_NOTIFY, vq->qidx);
+}
+
+/* ---- shared PCI INTx dispatch ----------------------------------- */
+
+#define VIRTIO_MAX_IRQ_SLOTS  8
+
+struct virtio_irq_slot {
+    int        irq;
+    uint16_t   io_base;
+    void     (*fn)(void *);
+    void      *cookie;
+};
+static struct virtio_irq_slot g_irq_slots[VIRTIO_MAX_IRQ_SLOTS];
+static int g_irq_slot_count;
+/* Track which IRQs we've already wired isr_register_irq for, so
+ * subsequent installs for the same line don't overwrite each other. */
+static uint8_t g_irq_master_installed[16];
+
+static void virtio_master_irq(struct registers *r) {
+    int irq = (int)r->int_no - 32;
+    /* Walk every slot for this IRQ; check each device's ISR (read-
+     * to-clear) to see if it actually fired. Devices on the same
+     * PCI line all read the same edge but ISR distinguishes which
+     * one had queue activity. */
+    for (int i = 0; i < g_irq_slot_count; i++) {
+        if (g_irq_slots[i].irq != irq) continue;
+        uint8_t isr = inb(g_irq_slots[i].io_base + VIRTIO_PCI_ISR);
+        /* ISR bit 0 = "queue had activity" (used.idx advanced).
+         * Bit 1 = "device config changed" — we ignore for now. */
+        if ((isr & 1) && g_irq_slots[i].fn) {
+            g_irq_slots[i].fn(g_irq_slots[i].cookie);
+        }
+    }
+}
+
+void virtio_install_irq(uint16_t io_base, int irq,
+                        void (*fn)(void *), void *cookie)
+{
+    if (irq < 0 || irq >= 16) return;
+    if (g_irq_slot_count >= VIRTIO_MAX_IRQ_SLOTS) return;
+    g_irq_slots[g_irq_slot_count].irq     = irq;
+    g_irq_slots[g_irq_slot_count].io_base = io_base;
+    g_irq_slots[g_irq_slot_count].fn      = fn;
+    g_irq_slots[g_irq_slot_count].cookie  = cookie;
+    g_irq_slot_count++;
+    /* Install the master dispatcher exactly once per IRQ line; the
+     * isr.c chain handles co-existence with non-virtio drivers (e.g.
+     * e1000 on the same line). */
+    if (!g_irq_master_installed[irq]) {
+        isr_register_irq(irq, virtio_master_irq);
+        pic_clear_mask((uint8_t)irq);
+        g_irq_master_installed[irq] = 1;
+    }
 }
 
 int virtio_wait_used(uint16_t io_base, struct virtqueue *vq,

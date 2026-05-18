@@ -1,0 +1,38 @@
+NAME
+    wmcalc - calculator WM client (Path C phase 32)
+
+SYNOPSIS
+    wmcalc [SECONDS]
+
+DESCRIPTION
+    Open a 220x320 calculator window.  SECONDS is the lifetime
+    cap (default 600 = 10 minutes); Ctrl-Q exits early.
+
+    Four-function integer calculator using two-register
+    evaluation (pending op + accumulator).  Sequence "12 + 34 ="
+    yields 46; chained ops fold left-to-right.
+
+    Keys (delivered when the window has keyboard focus):
+      0-9             digit
+      + - * /         operator
+      = or Enter      evaluate
+      c or C          clear all
+      Backspace       drop last digit of current entry
+      _               toggle sign of current entry
+      .               (no-op; integer-only build)
+      Ctrl-Q          quit
+
+    Mouse: click any button.  Buttons briefly highlight (one
+    frame burst) when pressed.
+
+    The pending operator is shown in the top-left of the display
+    panel ('+', '-', '*', '/') while a chain is in progress.
+
+LIMITATIONS
+    Integer-only — libuser has no ftoa yet, so the '.' button is
+    a placeholder.  Division truncates (e.g. 7 / 2 = 3).  Range:
+    signed 64-bit, but digit entry caps at 11 digits to fit the
+    display.  Division by zero shows "ERR" in red; clear with C.
+
+SEE ALSO
+    wmterm(1), wmedit(1), wmd(1)
