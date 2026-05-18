@@ -31,6 +31,8 @@
 #include "string.h"
 #include "pit.h"
 #include "task.h"
+#include "mouse.h"
+#include "vbe.h"
 
 /* HID Usage IDs (USB HID Usage Tables §10) → ASCII. Indexed by
  * Usage ID 0..0x73. Two parallel tables for unshifted/shifted. */
@@ -100,6 +102,24 @@ struct hid_kbd {
 
 #define MAX_HID_KBD 2
 static struct hid_kbd g_kbds[MAX_HID_KBD];
+
+/* Session 141 — USB tablet (HID class, non-boot protocol).  QEMU's
+ * `-device usb-tablet` enumerates with bInterfaceProtocol = 0 and
+ * delivers an 8-byte report-protocol report carrying absolute X / Y
+ * in tablet logical units (0..32767 across the full display).
+ * Bridging this to the kernel mouse state via mouse_set_absolute()
+ * keeps the wmd-drawn cursor locked to QEMU's host pointer — no
+ * grab/release, no PS/2-acceleration drift. */
+struct hid_tablet {
+    int           in_use;
+    struct usb_device *dev;
+    int           ep;
+    int           ep_max;
+    int           interval_ms;
+    int           toggle;
+};
+#define MAX_HID_TABLET 2
+static struct hid_tablet g_tablets[MAX_HID_TABLET];
 
 /* Look up usage in the new report; return 1 if the usage was
  * present, 0 otherwise. */
@@ -201,13 +221,62 @@ static void usb_hid_kbd_task(void) {
     }
 }
 
+/* Session 141 — parse one QEMU usb-tablet report.  Layout:
+ *
+ *   byte 0       : buttons (bit0=L, bit1=R, bit2=M, bit3..7 padding)
+ *   bytes 1..2   : X (uint16 LE, logical 0..32767)
+ *   bytes 3..4   : Y (uint16 LE, logical 0..32767)
+ *   byte 5       : vertical wheel (signed 8-bit, ignored for now)
+ *   bytes 6..7   : padding
+ *
+ * Logical 0..32767 spans the full display in each axis; scale to FB
+ * dimensions and push into the kernel mouse state. */
+static void poll_one_tablet(struct hid_tablet *t) {
+    uint8_t report[8] = {0};
+    /* Request 8 bytes but the QEMU usb-tablet only sends 6 (buttons +
+     * X + Y + wheel).  uhci_int_in returns the actual byte count;
+     * we only touch report[0..4] so a short read is fine. */
+    int rc = uhci_int_in(t->dev->addr, t->dev->low_speed, t->ep_max,
+                         t->ep, report, 8, &t->toggle);
+    if (rc <= 0) return;     /* NAK / timeout = no new state */
+
+    int buttons = report[0] & 0x07;
+    int raw_x   = (int)report[1] | ((int)report[2] << 8);
+    int raw_y   = (int)report[3] | ((int)report[4] << 8);
+
+    const struct vbe_state *v = vbe_state();
+    int fb_w = (v && v->enabled) ? (int)v->width  : 1024;
+    int fb_h = (v && v->enabled) ? (int)v->height : 768;
+    int x = (raw_x * (fb_w - 1)) / 32767;
+    int y = (raw_y * (fb_h - 1)) / 32767;
+
+    mouse_set_absolute(x, y, buttons);
+#ifdef USB_HID_TRACE
+    kprintf("[usb-hid] tablet raw=(%d,%d) -> (%d,%d) btns=%x\n",
+            raw_x, raw_y, x, y, buttons);
+#endif
+}
+
+static void usb_hid_tablet_task(void) {
+    for (;;) {
+        for (int i = 0; i < MAX_HID_TABLET; i++) {
+            if (g_tablets[i].in_use) poll_one_tablet(&g_tablets[i]);
+        }
+        /* Faster than keyboard polling — a 15 ms loop gives ~66 Hz
+         * cursor updates, smoother than the 30 fps WM frame rate. */
+        pit_sleep(15);
+    }
+}
+
 /* The HID boot-mouse path that lived here was removed when AdventOS
  * narrowed to a CLI-only OS for developers and AI agents. Only the
  * boot-keyboard path remains. If a HID interface enumerates with
  * USB_HID_PROTOCOL_MOUSE we just decline it. */
 
 /* Called from usb_core's enumeration once it identifies a HID
- * interface. Routes to keyboard; ignores mice. */
+ * interface.  Routes to keyboard (boot protocol) or tablet
+ * (non-boot, absolute positioning).  Boot-protocol mice (relative)
+ * remain declined — use usb-tablet instead. */
 void usb_hid_attach(struct usb_device *d,
                     const uint8_t *cfg_buf, int cfg_len,
                     int iface_num, int proto, int ep_addr,
@@ -215,17 +284,19 @@ void usb_hid_attach(struct usb_device *d,
 {
     (void)cfg_buf; (void)cfg_len; (void)ep_interval;
 
-    /* Switch to boot protocol so we get the fixed-format reports
-     * regardless of what the HID report descriptor would otherwise
-     * mandate. SET_IDLE(0) tells the device "only report on change",
-     * suppressing duplicate idle-timeout reports. */
-    if (usb_hid_set_protocol(d, iface_num, USB_HID_PROTOCOL_BOOT) != USB_OK) {
-        kprintf("[usb] addr %d: SET_PROTOCOL(BOOT) failed\n", d->addr);
-        return;
-    }
-    usb_hid_set_idle(d, iface_num, 0);
-
     if (proto == USB_HID_PROTOCOL_KEYBOARD) {
+        /* Switch to boot protocol so we get the fixed-format 8-byte
+         * keyboard report regardless of what the HID report descriptor
+         * would otherwise mandate.  SET_IDLE(0) tells the device "only
+         * report on change", suppressing duplicate idle-timeout
+         * reports. */
+        if (usb_hid_set_protocol(d, iface_num,
+                                 USB_HID_PROTOCOL_BOOT) != USB_OK) {
+            kprintf("[usb] addr %d: SET_PROTOCOL(BOOT) failed\n", d->addr);
+            return;
+        }
+        usb_hid_set_idle(d, iface_num, 0);
+
         struct hid_kbd *k = 0;
         for (int i = 0; i < MAX_HID_KBD; i++) {
             if (!g_kbds[i].in_use) { k = &g_kbds[i]; break; }
@@ -243,7 +314,32 @@ void usb_hid_attach(struct usb_device *d,
     }
 
     if (proto == USB_HID_PROTOCOL_MOUSE) {
-        kprintf("[usb] HID mouse ignored — AdventOS is CLI-only\n");
+        kprintf("[usb] HID boot-mouse ignored — use usb-tablet\n");
+        return;
+    }
+
+    /* Session 141 — proto = 0 means "no boot protocol available",
+     * which is how QEMU's usb-tablet advertises itself.  Register as
+     * absolute-positioning tablet.  We deliberately do NOT issue
+     * SET_PROTOCOL(BOOT) because the tablet doesn't support it;
+     * report protocol is the default after SET_CONFIGURATION and is
+     * what we want. */
+    if (proto == 0) {
+        struct hid_tablet *t = 0;
+        for (int i = 0; i < MAX_HID_TABLET; i++) {
+            if (!g_tablets[i].in_use) { t = &g_tablets[i]; break; }
+        }
+        if (!t) { kprintf("[usb] no free HID tablet slot\n"); return; }
+        memset(t, 0, sizeof(*t));
+        t->in_use      = 1;
+        t->dev         = d;
+        t->ep          = ep_addr;
+        t->ep_max      = ep_max < 8 ? 8 : ep_max;
+        t->interval_ms = ep_interval > 0 ? ep_interval : 10;
+        t->toggle      = 0;
+        kprintf("[usb] HID tablet registered "
+                "(vid=%x pid=%x, polling starts late)\n",
+                d->vendor_id, d->product_id);
         return;
     }
 
@@ -253,11 +349,18 @@ void usb_hid_attach(struct usb_device *d,
 void usb_start_polling(void);    /* fwd-decl, defined below */
 void usb_start_polling(void) {
     int kbd_any = 0;
+    int tablet_any = 0;
     for (int i = 0; i < MAX_HID_KBD; i++)
         if (g_kbds[i].in_use) kbd_any = 1;
+    for (int i = 0; i < MAX_HID_TABLET; i++)
+        if (g_tablets[i].in_use) tablet_any = 1;
 
     if (kbd_any) {
         task_make_runnable(task_create(usb_hid_kbd_task, "usb-hid-kbd"));
         kprintf("[usb] HID keyboard polling task started\n");
+    }
+    if (tablet_any) {
+        task_make_runnable(task_create(usb_hid_tablet_task, "usb-hid-tablet"));
+        kprintf("[usb] HID tablet polling task started\n");
     }
 }

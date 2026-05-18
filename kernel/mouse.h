@@ -32,4 +32,12 @@ void mouse_process_byte(uint8_t b);
  * 3-bit mask: bit 0 = left, bit 1 = right, bit 2 = middle. */
 void mouse_get_state(int *x_out, int *y_out, int *buttons_out);
 
+/* Session 141 — absolute pointer override.  USB tablet reports
+ * carry absolute X / Y (in tablet logical units 0..32767 over
+ * the full display).  The HID driver scales those to FB pixels
+ * and calls this; subsequent PS/2 packets keep updating the
+ * same state but tablet reports overwrite both deltas and
+ * absolute positions on each tick.  Buttons is a 3-bit mask. */
+void mouse_set_absolute(int x, int y, int buttons);
+
 #endif

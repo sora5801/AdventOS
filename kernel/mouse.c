@@ -152,3 +152,19 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
     if (y_out)       *y_out = g_mouse_y;
     if (buttons_out) *buttons_out = g_buttons;
 }
+
+/* Session 141 — USB tablet absolute-positioning entry point.
+ * Called from kernel/usb_hid.c's tablet polling task.  No PS/2
+ * packet bookkeeping — just overwrite the position. */
+void mouse_set_absolute(int x, int y, int buttons) {
+    const struct vbe_state *v = vbe_state();
+    int max_x = (v && v->enabled) ? (int)v->width  - 1 : 1023;
+    int max_y = (v && v->enabled) ? (int)v->height - 1 : 767;
+    if (x < 0)     x = 0;
+    if (y < 0)     y = 0;
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+    g_mouse_x = x;
+    g_mouse_y = y;
+    g_buttons = buttons & 0x07;
+}
