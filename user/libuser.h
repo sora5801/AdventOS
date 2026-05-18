@@ -132,12 +132,19 @@ typedef unsigned int   size_t;
 /* Session 113 — input routing.  See struct sys_wm_event. */
 #define SYS_WM_EVENT_PUSH  94
 #define SYS_WM_EVENT_POLL  95
+/* Session 135 — Alt+Tab channel (separate from the main keyboard
+ * ring so the shell or another reader can't intercept it). */
+#define SYS_WM_POLL_ALTTAB 100
 
 /* Session 119 — Path E phase 2 (virtio-rng / -console / -balloon). */
 #define SYS_GETRANDOM             96
 #define SYS_VIRTIO_CONSOLE_WRITE  97
 #define SYS_VIRTIO_CONSOLE_READ   98
 #define SYS_VIRTIO_BALLOON_STATS  99
+#define SYS_RENAME                101
+/* Session 136 — global clipboard.  102/103 because 101 is SYS_RENAME. */
+#define SYS_CLIPBOARD_SET         102
+#define SYS_CLIPBOARD_GET         103
 
 /* Session 70: syscall sandbox.
  *
@@ -370,6 +377,28 @@ int      sys_virtio_console_write(const void *buf, int n);
 int      sys_virtio_console_read (void *buf, int n);
 int      sys_virtio_balloon_stats(unsigned int out[4]);
 
+/* Atomic rename via the kernel. Only works for paths both living
+ * under a filesystem that supports it (currently just /mnt/9p ↔
+ * /mnt/9p). Returns -1 otherwise; userspace tools should fall back
+ * to the copy+unlink path. */
+int      sys_rename (const char *oldp, const char *newp);
+
+/* Session 136 — global clipboard.  Any task may set or get.  Max
+ * payload 4096 bytes.
+ *
+ *   sys_clipboard_set(buf, len)
+ *     0  on success
+ *    -1  on out-of-memory or len > 4096
+ *     (len == 0 clears the clipboard)
+ *
+ *   sys_clipboard_get(buf, cap)
+ *      n  total stored length (NOT bytes copied — caller spots
+ *         truncation by comparing return to cap)
+ *      0  clipboard is empty
+ */
+int      sys_clipboard_set(const void *buf, int len);
+int      sys_clipboard_get(void *buf, int cap);
+
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns
  * the device's block_size + n_blocks + name; READ/WRITE transfer
@@ -547,6 +576,10 @@ int      sys_wm_event_push (unsigned int window_id,
                             const struct sys_wm_event *ev);
 int      sys_wm_event_poll (unsigned int window_id,
                             struct sys_wm_event *out);
+/* Session 135 — wmd polls for pending Alt+Tab presses (one tick
+ * per drain).  Returns 1 if at least one is pending and
+ * decrements; 0 otherwise. */
+int      sys_wm_poll_alttab(void);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

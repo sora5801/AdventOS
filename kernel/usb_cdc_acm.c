@@ -35,6 +35,13 @@
 #include "spinlock.h"
 
 #define MAX_CDC_DEVICES  2
+/* 4 KiB / port is plenty: the polling task runs at 20 Hz with a
+ * 64-byte max packet — 1.28 KiB/s worst case, so 4 KiB holds ~3
+ * seconds of unread data before a userland reader starts losing
+ * bytes. The ring is a single producer (RX task) / single consumer
+ * (sys_read) so a head/tail with no locking would race; we still
+ * hold rx_lock for atomicity of the head pointer. */
+#define CDC_RX_RING       4096
 
 struct cdc_device {
     struct usb_device *dev;
@@ -47,6 +54,10 @@ struct cdc_device {
     int                out_toggle;
     int                in_use;
     spinlock_t         tx_lock;
+    spinlock_t         rx_lock;
+    uint8_t            rx_buf[CDC_RX_RING];
+    uint32_t           rx_head;          /* next write slot */
+    uint32_t           rx_tail;          /* next read slot  */
 };
 
 static struct cdc_device g_cdc[MAX_CDC_DEVICES];
@@ -122,7 +133,10 @@ void usb_cdc_acm_attach(struct usb_device *d, int data_iface,
     c->in_toggle  = 0;
     c->out_toggle = 0;
     c->in_use     = 1;
+    c->rx_head    = 0;
+    c->rx_tail    = 0;
     spin_lock_init(&c->tx_lock);
+    spin_lock_init(&c->rx_lock);
 
     /* Configure the line: 115200 8N1. Most CDC-ACM devices accept
      * anything (the rate is informational over USB), but some firmware
@@ -183,10 +197,20 @@ static void cdc_poll_one(struct cdc_device *c) {
         /* Persistent error — back off but don't disable. */
         return;
     }
-    /* Route incoming bytes to the kernel serial sink. */
+    /* Push into the per-port RX ring. Overflow drops the oldest
+     * unread byte (advance tail) so the producer never blocks — for
+     * a TTY this is the same trade-off the kernel's tty driver
+     * already makes when userland is too slow. */
+    spin_lock(&c->rx_lock);
     for (int i = 0; i < rc; i++) {
-        kputc((char)buf[i]);
+        uint32_t next = (c->rx_head + 1) % CDC_RX_RING;
+        if (next == c->rx_tail) {
+            c->rx_tail = (c->rx_tail + 1) % CDC_RX_RING;
+        }
+        c->rx_buf[c->rx_head] = buf[i];
+        c->rx_head = next;
     }
+    spin_unlock(&c->rx_lock);
 }
 
 static void usb_cdc_acm_rx_task(void) {
@@ -203,4 +227,44 @@ void usb_cdc_acm_start_polling(void) {
     if (g_n_cdc == 0) return;
     task_make_runnable(task_create(usb_cdc_acm_rx_task, "usb-cdc-acm"));
     kprintf("[cdc-acm] RX polling task started\n");
+}
+
+int usb_cdc_acm_port_count(void) {
+    return g_n_cdc;
+}
+
+int usb_cdc_acm_read(int port, void *buf, int n) {
+    if (port < 0 || port >= g_n_cdc) return -1;
+    struct cdc_device *c = &g_cdc[port];
+    if (!c->in_use)                  return -1;
+    if (n <= 0)                      return 0;
+
+    uint8_t *out = (uint8_t *)buf;
+    int copied = 0;
+    spin_lock(&c->rx_lock);
+    while (copied < n && c->rx_tail != c->rx_head) {
+        out[copied++] = c->rx_buf[c->rx_tail];
+        c->rx_tail = (c->rx_tail + 1) % CDC_RX_RING;
+    }
+    spin_unlock(&c->rx_lock);
+    return copied;
+}
+
+int usb_cdc_acm_write_port(int port, const void *data, int len) {
+    if (port < 0 || port >= g_n_cdc) return -1;
+    struct cdc_device *c = &g_cdc[port];
+    if (!c->in_use)                  return -1;
+    if (len <= 0 || len > 4096)      return -1;
+
+    void *kbuf = kmalloc(len);
+    if (!kbuf) return -1;
+    memcpy(kbuf, data, len);
+
+    spin_lock(&c->tx_lock);
+    int rc = uhci_bulk_out(c->dev->addr, c->ep_max, c->ep_out,
+                           kbuf, len, &c->out_toggle);
+    spin_unlock(&c->tx_lock);
+
+    kfree(kbuf);
+    return rc >= 0 ? rc : -1;
 }

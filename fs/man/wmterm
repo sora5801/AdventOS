@@ -1,0 +1,37 @@
+NAME
+    wmterm - terminal-emulator WM client (Path C phase 27)
+
+SYNOPSIS
+    wmterm [SECONDS]
+
+DESCRIPTION
+    Open a 540x240 WM window hosting a 60x24 grid of text and
+    spawn sh.elf inside a PTY whose master end is the wmterm
+    process and whose slave is the shell's stdin/stdout/stderr.
+
+    The window forwards every keystroke (WM_EV_KEY) into the
+    master fd, so the focused window's keyboard ends up at the
+    shell exactly as if it were a "real" terminal.  Anything
+    the shell writes to stdout / stderr goes through the master
+    fd back out and into the local text grid.
+
+    The grid is repainted every frame in light-green text on a
+    near-black background.  A blinking white caret marks the
+    cursor.  ANSI escape sequences (CSI '... <final>') are
+    stripped — colour codes are recognised but ignored; the
+    terminal renders plain characters only.
+
+    Special key handling (kernel keyboard layer):
+      Enter           sends '\r' / '\n' (depending on TTY mode)
+      Backspace       sends 0x7F (DEL)
+      Arrow keys      come through as ESC '[' 'A'/'B'/'C'/'D'
+
+    Mouse interactions happen at the WM level (drag title bar,
+    resize from corner, close X) and don't reach the shell.
+
+    Exit after SECONDS (default 120) or when the WM closes the
+    window.  Closing wmterm leaves the child sh.elf running
+    until its own EOF on stdin — there's no SIGHUP wiring yet.
+
+SEE ALSO
+    sh(1), wmd(1), wmtype(1)

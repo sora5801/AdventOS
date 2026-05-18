@@ -67,6 +67,17 @@ struct window {
     unsigned int  client_id;
     unsigned int *client_pixels;
     unsigned int  surface_w, surface_h;
+
+    /* Session 133 — min/max state.  When `minimized` is set, the
+     * compositor skips painting this window entirely (taskbar
+     * button still shown so the user can click it to unhide).
+     * When `maximized` is set, x/y/w/h have been overwritten to
+     * fill the entire usable FB and the saved_* fields hold the
+     * previous values so a second click on the max button can
+     * restore. */
+    int  minimized;
+    int  maximized;
+    int  saved_x, saved_y, saved_w, saved_h;
 };
 
 static struct window g_windows[MAX_WINDOWS];
@@ -89,6 +100,9 @@ static const struct launch_entry g_launch_items[] = {
     { "wmfiles", "/wmfiles.elf" },
     { "sysinfo", "/wmsysinfo.elf" },
     { "wmps",    "/wmps.elf"     },
+    { "wmterm",  "/wmterm.elf"   },
+    { "wmedit",  "/wmedit.elf"   },
+    { "wmcalc",  "/wmcalc.elf"   },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -250,11 +264,29 @@ static void paint_client(struct gfx_ctx *ctx, struct window *w) {
 static void paint_window(struct gfx_ctx *ctx, struct window *w,
                          int has_focus, unsigned int t_sec,
                          unsigned int frame_no) {
-    /* Outer drop-shadow (1 px black to the right and below). Tiny
-     * touch but distinguishes overlapping windows even without
-     * alpha blending. */
-    gfx_fill_rect(ctx, w->x + 2, w->y + w->h, w->w, 2, GFX_BLACK);
-    gfx_fill_rect(ctx, w->x + w->w, w->y + 2, 2, w->h, GFX_BLACK);
+    /* Session 138 — soft drop-shadow.  Six 1-pixel-wide strips
+     * stepping from near-black at the window edge to nearly the
+     * wallpaper colour 6 pixels out.  No alpha blending — we just
+     * pick darker shades of the wallpaper's blue band so the
+     * shadow reads as "depth" against any of the 8 bands.
+     * The shadow is offset by +2 in each axis so the corner
+     * forms a small light-source cue (top-left lit). */
+    {
+        static const unsigned int sh[6] = {
+            0x000308u, 0x040810u, 0x060C16u,
+            0x070E1Au, 0x081020u, 0x091525u,
+        };
+        for (int i = 0; i < 6; i++) {
+            unsigned int c = sh[i];
+            int off = 2 + i;            /* shadow displacement */
+            /* Right strip */
+            gfx_fill_rect(ctx, w->x + w->w + i, w->y + off,
+                          1, w->h, c);
+            /* Bottom strip */
+            gfx_fill_rect(ctx, w->x + off, w->y + w->h + i,
+                          w->w, 1, c);
+        }
+    }
 
     /* Title bar. */
     unsigned int title_bg = has_focus ? w->frame_color : GFX_DARK_GREY;
@@ -262,15 +294,24 @@ static void paint_window(struct gfx_ctx *ctx, struct window *w,
     gfx_text(ctx, w->x + 6, w->y + 5, w->title,
              GFX_WHITE, GFX_TRANSPARENT);
 
-    /* Session 116 — close button on every CLIENT window, top-right
-     * of the title bar.  Drawn as a 14×14 red square with a white
-     * X glyph centred inside.  Click handling lives in the main
-     * loop; here we just paint. */
+    /* Sessions 116 + 133 — title-bar buttons on every CLIENT
+     * window.  Layout from right to left: [close] [maximize]
+     * [minimize].  Each is a 14×14 square with a single-character
+     * glyph; the colours encode the action: red close, green
+     * maximize, yellow minimize.  Click handling lives in the
+     * main loop; here we just paint. */
     if (w->kind == KIND_CLIENT) {
-        int bx = w->x + w->w - 16;
         int by = w->y + 2;
-        gfx_fill_rect(ctx, bx, by, 14, 14, GFX_RED);
-        gfx_text(ctx, bx + 3, by + 3, "x", GFX_WHITE, GFX_TRANSPARENT);
+        int cbx = w->x + w->w - 16;
+        int mxbx = cbx - 16;
+        int mnbx = mxbx - 16;
+        gfx_fill_rect(ctx, mnbx, by, 14, 14, GFX_YELLOW);
+        gfx_text(ctx, mnbx + 3, by + 3, "_", GFX_WHITE, GFX_TRANSPARENT);
+        gfx_fill_rect(ctx, mxbx, by, 14, 14, GFX_GREEN);
+        gfx_text(ctx, mxbx + 3, by + 3,
+                 w->maximized ? "o" : "[", GFX_WHITE, GFX_TRANSPARENT);
+        gfx_fill_rect(ctx, cbx, by, 14, 14, GFX_RED);
+        gfx_text(ctx, cbx + 3, by + 3, "x", GFX_WHITE, GFX_TRANSPARENT);
     }
 
     /* Frame outline. */
@@ -332,6 +373,8 @@ static int hit_test(int px, int py) {
     /* Top→bottom in z. */
     for (int i = g_window_count - 1; i >= 0; i--) {
         struct window *w = &g_windows[order[i]];
+        /* Session 133 — minimized windows don't accept input. */
+        if (w->minimized) continue;
         if (px >= w->x && px < w->x + w->w &&
             py >= w->y && py < w->y + w->h) {
             return order[i];
@@ -807,6 +850,10 @@ int main(int argc, char **argv) {
             int tb_hit = taskbar_hit((int)ctx.width, (int)ctx.height,
                                      ms.x, ms.y);
             if (tb_hit >= 0) {
+                /* Session 133 — clicking a taskbar button restores
+                 * a minimized window in addition to raising +
+                 * focusing it. */
+                g_windows[tb_hit].minimized = 0;
                 g_z_counter++;
                 g_windows[tb_hit].raised = g_z_counter;
                 focused = tb_hit;
@@ -815,25 +862,60 @@ int main(int argc, char **argv) {
             }
             int hit = hit_test(ms.x, ms.y);
             if (hit >= 0) {
-                /* Session 116 — close-button intercept.  The
-                 * 14x14 red box at the top-right of every CLIENT
-                 * window: if click lands there, send WM_EV_CLOSE
-                 * to the client and don't otherwise process the
-                 * click (no raise, no drag, no focus change). */
+                /* Sessions 116 + 133 — title-bar button intercepts.
+                 * Three 14x14 boxes from right to left at the top
+                 * of every CLIENT window: close (red), maximize
+                 * (green), minimize (yellow).  Each consumes the
+                 * click entirely (no raise, no drag, no focus
+                 * change beyond what the button itself triggers). */
                 struct window *cw = &g_windows[hit];
-                int close_hit = 0;
+                int button_hit = 0;
                 if (cw->kind == KIND_CLIENT) {
-                    int bx = cw->x + cw->w - 16;
                     int by = cw->y + 2;
-                    if (ms.x >= bx && ms.x < bx + 14 &&
-                        ms.y >= by && ms.y < by + 14) {
-                        close_hit = 1;
-                        struct sys_wm_event ev = {0};
-                        ev.type = WM_EV_CLOSE;
-                        sys_wm_event_push(cw->client_id, &ev);
+                    int cbx = cw->x + cw->w - 16;
+                    int mxbx = cbx - 16;
+                    int mnbx = mxbx - 16;
+                    if (ms.y >= by && ms.y < by + 14) {
+                        if (ms.x >= cbx && ms.x < cbx + 14) {
+                            /* close */
+                            button_hit = 1;
+                            struct sys_wm_event ev = {0};
+                            ev.type = WM_EV_CLOSE;
+                            sys_wm_event_push(cw->client_id, &ev);
+                        } else if (ms.x >= mxbx && ms.x < mxbx + 14) {
+                            /* maximize toggle */
+                            button_hit = 1;
+                            if (cw->maximized) {
+                                cw->x = cw->saved_x;
+                                cw->y = cw->saved_y;
+                                cw->w = cw->saved_w;
+                                cw->h = cw->saved_h;
+                                cw->maximized = 0;
+                            } else {
+                                cw->saved_x = cw->x;
+                                cw->saved_y = cw->y;
+                                cw->saved_w = cw->w;
+                                cw->saved_h = cw->h;
+                                cw->x = 0;
+                                cw->y = 18;            /* below top status bar */
+                                cw->w = (int)ctx.width;
+                                cw->h = (int)ctx.height - 18 - TASKBAR_H;
+                                cw->maximized = 1;
+                            }
+                            /* Still raise + focus so the click
+                             * brings the maximized window to top. */
+                            g_z_counter++;
+                            cw->raised = g_z_counter;
+                            focused = hit;
+                        } else if (ms.x >= mnbx && ms.x < mnbx + 14) {
+                            /* minimize */
+                            button_hit = 1;
+                            cw->minimized = 1;
+                            if (focused == hit) focused = -1;
+                        }
                     }
                 }
-                if (!close_hit) {
+                if (!button_hit) {
                     /* Raise. */
                     g_z_counter++;
                     g_windows[hit].raised = g_z_counter;
@@ -850,10 +932,36 @@ int main(int argc, char **argv) {
                         g_resize_anchor_my = ms.y;
                     } else if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
                         /* Start drag if in title bar (but not in
-                         * the close box, already excluded above). */
+                         * the close box, already excluded above).
+                         *
+                         * Session 138 — if the window is currently
+                         * snapped (maximized flag set), un-snap it
+                         * first so the user gets their original
+                         * size back as they drag.  Place the
+                         * window so the cursor stays at the same
+                         * relative position in the *restored*
+                         * title bar. */
+                        struct window *cw = &g_windows[hit];
+                        if (cw->maximized) {
+                            int rel_x = ms.x - cw->x;
+                            int old_w = cw->w;
+                            if (old_w < 1) old_w = 1;
+                            cw->w = cw->saved_w;
+                            cw->h = cw->saved_h;
+                            cw->maximized = 0;
+                            /* Scale rel_x from the snapped width to
+                             * the restored width so the cursor lands
+                             * at the same relative point in the new
+                             * title bar. */
+                            cw->x = ms.x - (rel_x * cw->w / old_w);
+                            if (cw->x < 0) cw->x = 0;
+                            if (cw->x > (int)ctx.width - cw->w)
+                                cw->x = (int)ctx.width - cw->w;
+                            cw->y = ms.y - 5;
+                        }
                         g_drag_idx   = hit;
-                        g_drag_off_x = ms.x - g_windows[hit].x;
-                        g_drag_off_y = ms.y - g_windows[hit].y;
+                        g_drag_off_x = ms.x - cw->x;
+                        g_drag_off_y = ms.y - cw->y;
                     }
                 }
             } else {
@@ -883,6 +991,53 @@ int main(int argc, char **argv) {
             prev_focus_id = new_focus_id;
         }
         if (released) {
+            /* Session 138 — snap-to-edge.  If a title-bar drag is
+             * releasing within SNAP_PX of any screen edge, snap
+             * the window: top → maximize, left → fill-left-half,
+             * right → fill-right-half, bottom → fill-bottom-half.
+             * Saves the pre-snap geometry into saved_* so the
+             * maximize-button restore path still works. */
+            if (g_drag_idx >= 0) {
+                #define SNAP_PX 8
+                struct window *w = &g_windows[g_drag_idx];
+                int fb_w_i = (int)ctx.width;
+                int fb_h_i = (int)ctx.height;
+                int usable_top = 18;              /* below top status bar */
+                int usable_bot = fb_h_i - TASKBAR_H;
+                int usable_h   = usable_bot - usable_top;
+                int do_snap    = 0;
+                int new_x, new_y, new_w, new_h;
+                if (ms.y < usable_top + SNAP_PX) {
+                    /* top → maximize */
+                    new_x = 0;            new_y = usable_top;
+                    new_w = fb_w_i;       new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.x < SNAP_PX) {
+                    /* left → fill-left-half */
+                    new_x = 0;            new_y = usable_top;
+                    new_w = fb_w_i / 2;   new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.x > fb_w_i - SNAP_PX) {
+                    /* right → fill-right-half */
+                    new_x = fb_w_i / 2;   new_y = usable_top;
+                    new_w = fb_w_i / 2;   new_h = usable_h;
+                    do_snap = 1;
+                } else if (ms.y > fb_h_i - TASKBAR_H - SNAP_PX) {
+                    /* bottom → fill-bottom-half */
+                    new_x = 0;            new_y = usable_top + usable_h / 2;
+                    new_w = fb_w_i;       new_h = usable_h / 2;
+                    do_snap = 1;
+                }
+                if (do_snap && !w->maximized) {
+                    w->saved_x  = w->x;
+                    w->saved_y  = w->y;
+                    w->saved_w  = w->w;
+                    w->saved_h  = w->h;
+                    w->x = new_x; w->y = new_y;
+                    w->w = new_w; w->h = new_h;
+                    w->maximized = 1;     /* repurposed as "snapped" */
+                }
+            }
             g_drag_idx   = -1;
             g_resize_idx = -1;
         }
@@ -994,7 +1149,13 @@ int main(int argc, char **argv) {
          * the kernel ring and forward them to the click-focused
          * client window (`focused`, not `target` — keyboard focus
          * is click-based, not hover-based).  Bytes that arrive while
-         * no client window is focused are dropped. */
+         * no client window is focused are dropped.
+         *
+         * Session 135 — Alt+Tab arrives as the sentinel byte 0x80
+         * from the USB-HID layer.  wmd consumes it itself: cycle
+         * `focused` to the next CLIENT window in registration order,
+         * raising + un-minimizing as we go.  Cycling skips
+         * non-client (demo) slots.  Never forwarded to clients. */
         for (int drained = 0; drained < 32; drained++) {
             int c = sys_kbd_poll();
             if (c <= 0) break;
@@ -1005,6 +1166,30 @@ int main(int argc, char **argv) {
             ev.type    = WM_EV_KEY;
             ev.keycode = (unsigned int)c;
             sys_wm_event_push(g_windows[focused].client_id, &ev);
+        }
+
+        /* Session 135 — Alt+Tab arrives on a separate channel
+         * (SYS_WM_POLL_ALTTAB) so the shell or any other reader
+         * of the kbd ring can't intercept it.  Drain everything
+         * pending; each press cycles `focused` to the next CLIENT
+         * window in registration order, wrapping. */
+        while (sys_wm_poll_alttab() > 0) {
+            int start = focused;
+            int next  = -1;
+            for (int step = 1; step <= g_window_count; step++) {
+                int idx = ((start + step) % g_window_count
+                           + g_window_count) % g_window_count;
+                if (g_windows[idx].kind == KIND_CLIENT) {
+                    next = idx;
+                    break;
+                }
+            }
+            if (next >= 0) {
+                g_windows[next].minimized = 0;
+                g_z_counter++;
+                g_windows[next].raised = g_z_counter;
+                focused = next;
+            }
         }
 
         /* Compose the frame.  Session 127 — procedural wallpaper
@@ -1036,6 +1221,9 @@ int main(int argc, char **argv) {
         z_order(order);
         for (int i = 0; i < g_window_count; i++) {
             int idx = order[i];
+            /* Session 133 — minimized windows aren't drawn (taskbar
+             * button is still drawn; click it to restore). */
+            if (g_windows[idx].minimized) continue;
             paint_window(&ctx, &g_windows[idx],
                          idx == focused, t_sec, (unsigned int)tick);
         }

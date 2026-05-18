@@ -188,6 +188,12 @@ void virtio_blk_init(void) {
         return;
     }
 
+    /* Install IRQ handler before DRIVER_OK so we don't miss the
+     * first completion. fn = NULL — sync waiters in virtio_wait_used
+     * already poll used.idx; the IRQ just clears VIRTIO_PCI_ISR and
+     * lets `hlt` wake up faster than the next PIT tick. */
+    virtio_install_irq(v->io, v->pci.irq_line, 0, v);
+
     virtio_status_driver_ok(v->io);
 
     /* Read capacity from device-specific config space. Legacy layout
