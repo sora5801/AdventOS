@@ -759,4 +759,54 @@ int     fgetc   (FILE *f);
 int     fprintf (FILE *f, const char *fmt, ...);
 int     vfprintf(FILE *f, const char *fmt, va_list ap);
 
+/* Session 132 — POSIX fd layer over a fake-fd table.  open() loads
+ * read-only files entirely into RAM; lseek/read serve from buffer.
+ * Write-mode open() pairs with fdopen() to share a FILE * buffer.
+ * Fake fds occupy [100, 116); real kernel fds are below that.
+ * unlink/getenv/system are stubs around their natural backing. */
+#define O_RDONLY    0
+#define O_WRONLY    1
+#define O_RDWR      2
+#define O_CREAT     0100
+#define O_TRUNC     01000
+#define O_APPEND    02000
+#define O_BINARY    0           /* no-op on Unix-style FS */
+
+int      open  (const char *path, int flags, ...);
+int      read  (int fd, void *buf, int n);
+int      write (int fd, const void *buf, int n);
+long     lseek (int fd, long offset, int whence);
+int      close (int fd);
+int      unlink(const char *path);
+FILE    *fdopen(int fd, const char *mode);
+
+/* Process / env stragglers. exit forwards to sys_exit. abort exits
+ * with code 134 (128 + SIGABRT — same convention as POSIX shells).
+ * getenv/system are deliberate stubs (no env, no shell exec). */
+void     exit  (int code) __attribute__((noreturn));
+void     abort (void)     __attribute__((noreturn));
+char    *getenv(const char *name);
+int      system(const char *cmd);
+
+extern int errno;
+
+/* time(NULL) -> wall-clock seconds.  out, if non-NULL, also stores it. */
+unsigned int time(unsigned int *out);
+
+/* gettimeofday — second-resolution; tv_usec stays 0. */
+struct timeval { long tv_sec; long tv_usec; };
+int      gettimeofday(struct timeval *tv, void *tz);
+
+/* setjmp/longjmp — i386 ABI, jmp_buf = 6 ints (ebx,esi,edi,ebp,esp,eip).
+ * Implementation lives in user/libuser.c as inline asm. */
+typedef int jmp_buf[6];
+int      setjmp (jmp_buf env);
+void     longjmp(jmp_buf env, int val) __attribute__((noreturn));
+
+/* qsort + strtoll + strerror trampoline into libc.bin. */
+void     qsort   (void *base, size_t nm, size_t sz,
+                  int (*cmp)(const void *, const void *));
+long long strtoll(const char *s, char **end, int base);
+const char *strerror(int errnum);
+
 #endif

@@ -57,6 +57,7 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_MEMMOVE]      = memmove,
     [LIBC_FN_MEMCMP]       = memcmp,
     [LIBC_FN_MEMCHR]       = memchr,
+    [LIBC_FN_STRERROR]     = strerror,
 
     [LIBC_FN_ATOI]         = atoi,
     [LIBC_FN_ATOL]         = atol,
@@ -66,6 +67,8 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_FREE]         = free,
     [LIBC_FN_CALLOC]       = calloc,
     [LIBC_FN_REALLOC]      = realloc,
+    [LIBC_FN_QSORT]        = qsort,
+    [LIBC_FN_STRTOLL]      = strtoll,
 
     [LIBC_FN_ISALPHA]      = isalpha,
     [LIBC_FN_ISDIGIT]      = isdigit,

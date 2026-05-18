@@ -73,6 +73,7 @@ enum {
     LIBC_FN_MEMMOVE     = 12,
     LIBC_FN_MEMCMP      = 13,
     LIBC_FN_MEMCHR      = 14,
+    LIBC_FN_STRERROR    = 15,    /* session 132 */
 
     /* stdlib.h */
     LIBC_FN_ATOI        = 20,
@@ -83,6 +84,8 @@ enum {
     LIBC_FN_FREE        = 25,
     LIBC_FN_CALLOC      = 26,
     LIBC_FN_REALLOC     = 27,
+    LIBC_FN_QSORT       = 28,    /* session 132 */
+    LIBC_FN_STRTOLL     = 29,    /* session 132 */
 
     /* ctype.h */
     LIBC_FN_ISALPHA     = 30,
@@ -165,16 +168,20 @@ void  *memcpy(void *d, const void *s, size_t n);
 void  *memmove(void *d, const void *s, size_t n);
 int    memcmp(const void *a, const void *b, size_t n);
 const void *memchr(const void *p, int c, size_t n);
+const char *strerror(int errnum);
 
 /* stdlib.h prototypes */
-int    atoi(const char *s);
-long   atol(const char *s);
-long   strtol(const char *s, char **end, int base);
-int    abs(int x);
-void  *malloc(size_t n);
-void   free(void *p);
-void  *calloc(size_t nm, size_t sz);
-void  *realloc(void *p, size_t n);
+int       atoi(const char *s);
+long      atol(const char *s);
+long      strtol(const char *s, char **end, int base);
+long long strtoll(const char *s, char **end, int base);
+int       abs(int x);
+void     *malloc(size_t n);
+void      free(void *p);
+void     *calloc(size_t nm, size_t sz);
+void     *realloc(void *p, size_t n);
+void      qsort(void *base, size_t nm, size_t sz,
+                int (*cmp)(const void *, const void *));
 
 /* ctype.h prototypes */
 int    isalpha(int c);

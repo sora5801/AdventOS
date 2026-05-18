@@ -1125,6 +1125,9 @@ sighandler_t signal(int sig, sighandler_t handler) {
 #define LIBC_FN_FREE        25
 #define LIBC_FN_CALLOC      26
 #define LIBC_FN_REALLOC     27
+#define LIBC_FN_QSORT       28
+#define LIBC_FN_STRTOLL     29
+#define LIBC_FN_STRERROR    15
 #define LIBC_FN_ISALPHA     30
 #define LIBC_FN_ISDIGIT     31
 #define LIBC_FN_ISSPACE     32
@@ -1375,6 +1378,244 @@ int fprintf(FILE *f, const char *fmt, ...) {
 int vfprintf(FILE *f, const char *fmt, va_list ap) {
     return ((int (*)(FILE *, const char *, va_list))
             LIBC_TABLE[LIBC_FN_VFPRINTF])(f, fmt, ap);
+}
+
+/* Session 132 — stdlib stragglers (qsort / strtoll trampoline through
+ * libc.bin v2). */
+void qsort(void *base, size_t nm, size_t sz,
+           int (*cmp)(const void *, const void *)) {
+    ((void (*)(void *, size_t, size_t,
+               int (*)(const void *, const void *)))
+     LIBC_TABLE[LIBC_FN_QSORT])(base, nm, sz, cmp);
+}
+long long strtoll(const char *s, char **end, int base) {
+    return ((long long (*)(const char *, char **, int))
+            LIBC_TABLE[LIBC_FN_STRTOLL])(s, end, base);
+}
+const char *strerror(int errnum) {
+    return ((const char *(*)(int))LIBC_TABLE[LIBC_FN_STRERROR])(errnum);
+}
+
+/* exit / abort — tcc calls these on fatal errors. exit forwards to
+ * sys_exit; abort emits a clear "abnormal termination" code. */
+void exit(int code) {
+    sys_exit(code);
+}
+void abort(void) {
+    sys_exit(134);    /* 128 + SIGABRT */
+}
+
+/* AdventOS has no per-task errno register yet. Expose a single global
+ * int that the libc layer never sets — strerror is paged off this. */
+int errno = 0;
+
+/* time(NULL) — wall-clock seconds.  tcc uses this to seed __DATE__
+ * and __TIME__ predefined macros.  The arg, if non-NULL, gets the
+ * same value stored through it. */
+unsigned int time(unsigned int *out) {
+    unsigned int t = sys_time();
+    if (out) *out = t;
+    return t;
+}
+
+/* gettimeofday — tcc uses it for "compilation took N ms" timing.
+ * AdventOS's sys_time is second-resolution; tv_usec stays 0. tz is
+ * historical, always ignored. Struct timeval declared in libuser.h. */
+int gettimeofday(struct timeval *tv, void *tz) {
+    (void)tz;
+    if (tv) { tv->tv_sec = (long)sys_time(); tv->tv_usec = 0; }
+    return 0;
+}
+
+/* getenv — AdventOS has no environment. Always NULL. */
+char *getenv(const char *name) { (void)name; return (char *)0; }
+
+/* system — AdventOS has no popen/system path; tcc only uses this for
+ * an assembler fallback we never reach. */
+int system(const char *cmd) { (void)cmd; return -1; }
+
+/* unlink — exposes the raw syscall under the POSIX-flavored name. */
+int unlink(const char *path) { return sys_unlink(path); }
+
+/* ---- setjmp / longjmp -------------------------------------------------
+ *
+ * tcc's error handling uses setjmp at the libtcc API entry points and
+ * longjmps from any parse error.  We provide the standard i386 ABI:
+ * jmp_buf is a 6-int array storing { ebx, esi, edi, ebp, esp, eip }.
+ * longjmp restores them and jumps to eip. The asm bodies live in a
+ * top-level __asm__ block so we control the exact instruction layout
+ * (similar to sigreturn_tramp above). */
+__asm__ (
+    ".global _setjmp                 \n"
+    "_setjmp:                        \n"
+    "    movl    4(%esp), %eax       \n"   /* eax = jmp_buf * */
+    "    movl    %ebx,  0(%eax)      \n"
+    "    movl    %esi,  4(%eax)      \n"
+    "    movl    %edi,  8(%eax)      \n"
+    "    movl    %ebp, 12(%eax)      \n"
+    "    leal    4(%esp), %ecx       \n"   /* esp as seen by caller */
+    "    movl    %ecx, 16(%eax)      \n"
+    "    movl    0(%esp), %ecx       \n"   /* return address */
+    "    movl    %ecx, 20(%eax)      \n"
+    "    xorl    %eax, %eax          \n"
+    "    ret                         \n"
+);
+
+__asm__ (
+    ".global _longjmp                \n"
+    "_longjmp:                       \n"
+    "    movl    4(%esp), %edx       \n"   /* edx = jmp_buf * */
+    "    movl    8(%esp), %eax       \n"   /* eax = value */
+    "    testl   %eax, %eax          \n"
+    "    jne     1f                  \n"
+    "    movl    $1, %eax            \n"   /* longjmp(env,0) -> 1 */
+    "1:                              \n"
+    "    movl     0(%edx), %ebx      \n"
+    "    movl     4(%edx), %esi      \n"
+    "    movl     8(%edx), %edi      \n"
+    "    movl    12(%edx), %ebp      \n"
+    "    movl    16(%edx), %esp      \n"
+    "    jmp     *20(%edx)           \n"
+);
+
+/* ---- Buffered POSIX-fd layer -----------------------------------------
+ *
+ * tcc opens object/source files via raw `open()` + uses lseek() to
+ * jump around. AdventOS has no kernel seek, so the userspace open()
+ * loads the whole file into a malloc'd buffer at open time and
+ * lseek/read serve from it.  Write-mode open() creates a write FILE *
+ * via fopen("w") and caches it so fdopen() can hand the same handle
+ * back later (tcc's output path opens with `open(...)` and then
+ * `fdopen(fd, "wb")` to wrap as a FILE * for fwrite).
+ *
+ * fake fds live in the range [100, 100+POSIX_FDS). open() returns
+ * one of those; read/write/lseek/close use the offset to index back
+ * into the slot table. Real kernel fds (returned by sys_open / sys_socket
+ * etc.) never collide because they live in the kernel range [0..N). */
+#define POSIX_FDS         16
+#define POSIX_FD_BASE    100
+
+struct posix_slot {
+    int   in_use;
+    FILE *f;              /* set for write-mode (returned by fdopen) */
+    char *rbuf;           /* read-mode buffer */
+    size_t rlen;
+    size_t rpos;
+};
+static struct posix_slot g_posix[POSIX_FDS];
+
+/* POSIX open() flag bits — values follow Linux/UAPI semantics. */
+#define O_RDONLY    0
+#define O_WRONLY    1
+#define O_RDWR      2
+#define O_CREAT     0100
+#define O_TRUNC     01000
+#define O_APPEND    02000
+#define O_BINARY    0       /* no-op outside Windows */
+
+int open(const char *path, int flags, ...) {
+    int slot = -1;
+    for (int i = 0; i < POSIX_FDS; i++)
+        if (!g_posix[i].in_use) { slot = i; break; }
+    if (slot < 0) return -1;
+    struct posix_slot *s = &g_posix[slot];
+    s->in_use = 1;
+    s->f      = (FILE *)0;
+    s->rbuf   = (char *)0;
+    s->rlen   = 0;
+    s->rpos   = 0;
+
+    int wmode = (flags & 3) != 0;
+    if (wmode) {
+        s->f = fopen(path, "w");
+        if (!s->f) { s->in_use = 0; return -1; }
+    } else {
+        int sz = sys_fs_size(path);
+        if (sz < 0) { s->in_use = 0; return -1; }
+        if (sz > 0) {
+            s->rbuf = (char *)malloc((size_t)sz);
+            if (!s->rbuf) { s->in_use = 0; return -1; }
+            int fd = sys_open(path);
+            if (fd < 0) { free(s->rbuf); s->in_use = 0; return -1; }
+            int got = 0;
+            while (got < sz) {
+                int n = sys_read(fd, s->rbuf + got, sz - got);
+                if (n <= 0) break;
+                got += n;
+            }
+            sys_close(fd);
+            s->rlen = (size_t)got;
+        }
+    }
+    return POSIX_FD_BASE + slot;
+}
+
+static struct posix_slot *posix_slot_for(int fd) {
+    int i = fd - POSIX_FD_BASE;
+    if (i < 0 || i >= POSIX_FDS) return (struct posix_slot *)0;
+    if (!g_posix[i].in_use) return (struct posix_slot *)0;
+    return &g_posix[i];
+}
+
+int read(int fd, void *buf, int n) {
+    struct posix_slot *s = posix_slot_for(fd);
+    if (!s) return sys_read(fd, buf, n);
+    if (s->f) return 0;                 /* write-mode fake fd; nothing to read */
+    if (s->rpos >= s->rlen) return 0;
+    int avail = (int)(s->rlen - s->rpos);
+    int take = (n < avail) ? n : avail;
+    memcpy(buf, s->rbuf + s->rpos, (size_t)take);
+    s->rpos += (size_t)take;
+    return take;
+}
+
+int write(int fd, const void *buf, int n) {
+    struct posix_slot *s = posix_slot_for(fd);
+    if (!s) return sys_write(fd, buf, n);
+    if (s->f) {
+        size_t wrote = fwrite(buf, 1, (size_t)n, s->f);
+        return (int)wrote;
+    }
+    return -1;
+}
+
+long lseek(int fd, long offset, int whence) {
+    struct posix_slot *s = posix_slot_for(fd);
+    if (!s) return -1;                  /* lseek on a kernel fd is unsupported */
+    if (s->f) {                         /* write-mode: defer to FILE * seek */
+        if (fseek(s->f, offset, whence) != 0) return -1;
+        return ftell(s->f);
+    }
+    long np;
+    if      (whence == 0) np = offset;
+    else if (whence == 1) np = (long)s->rpos + offset;
+    else if (whence == 2) np = (long)s->rlen + offset;
+    else return -1;
+    if (np < 0) return -1;
+    s->rpos = (size_t)np;
+    return np;
+}
+
+int close(int fd) {
+    struct posix_slot *s = posix_slot_for(fd);
+    if (!s) return sys_close(fd);
+    if (s->f) fclose(s->f);
+    if (s->rbuf) free(s->rbuf);
+    s->in_use = 0;
+    s->f = (FILE *)0;
+    s->rbuf = (char *)0;
+    return 0;
+}
+
+FILE *fdopen(int fd, const char *mode) {
+    (void)mode;
+    struct posix_slot *s = posix_slot_for(fd);
+    if (!s) return (FILE *)0;
+    /* Hand the cached FILE * back; the underlying buffer is shared so
+     * fwrite()s through this and write()s on the raw fd both target the
+     * same accumulator. Close happens via either fclose OR close — we
+     * only flush once because s->f is cleared after either path. */
+    return s->f;
 }
 
 /* Non-zero-initialized marker: forces user.ld's .data section to be
