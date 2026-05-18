@@ -672,16 +672,50 @@ int      sys_bcache_stats(uint32_t out[5]);
 void     putchar(char c);
 void     puts(const char *s);
 void     printf(const char *fmt, ...);
+/* sprintf / snprintf are varargs shims; the v* variants take a va_list
+ * already (useful for forwarding from another varargs function). All
+ * trampoline into libc.bin's shared formatter core. */
+int      sprintf (char *buf, const char *fmt, ...);
+int      snprintf(char *buf, size_t cap, const char *fmt, ...);
+int      vsprintf (char *buf, const char *fmt, va_list ap);
+int      vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap);
 
 size_t   strlen(const char *s);
 int      strcmp(const char *a, const char *b);
 int      strncmp(const char *a, const char *b, size_t n);
-void    *memset(void *p, int c, size_t n);
-void    *memcpy(void *d, const void *s, size_t n);
-int      memcmp(const void *a, const void *b, size_t n);
+char    *strcpy (char *d, const char *s);
+char    *strncpy(char *d, const char *s, size_t n);
+char    *strcat (char *d, const char *s);
+void    *memset (void *p, int c, size_t n);
+void    *memcpy (void *d, const void *s, size_t n);
+void    *memmove(void *d, const void *s, size_t n);
+int      memcmp (const void *a, const void *b, size_t n);
+const void  *memchr (const void *p, int c, size_t n);
 
-/* Common C-library bits used by the coreutils sweep (session 26). */
+/* Common C-library bits used by the coreutils sweep (session 26)
+ * and grown out to a full C-subset surface for session 132 (Path B
+ * tcc port Phase 2). All trampoline into libc.bin at LIBC_BASE. */
 int          atoi  (const char *s);
-const char  *strchr(const char *s, int c);
+long         atol  (const char *s);
+long         strtol(const char *s, char **end, int base);
+int          abs   (int x);
+void        *calloc (size_t nm, size_t sz);
+void        *realloc(void *p, size_t n);
+const char  *strchr (const char *s, int c);
+const char  *strrchr(const char *s, int c);
+const char  *strstr (const char *h, const char *n);
+
+/* ctype.h. ASCII only. */
+int      isalpha(int c);
+int      isdigit(int c);
+int      isspace(int c);
+int      isalnum(int c);
+int      isupper(int c);
+int      islower(int c);
+int      toupper(int c);
+int      tolower(int c);
+
+/* Self-introspection: out[0]=magic, out[1]=version, out[2]=count. */
+void     libc_info(uint32_t out[3]);
 
 #endif

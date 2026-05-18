@@ -1125,6 +1125,14 @@ sighandler_t signal(int sig, sighandler_t handler) {
 #define LIBC_FN_FREE        25
 #define LIBC_FN_CALLOC      26
 #define LIBC_FN_REALLOC     27
+#define LIBC_FN_ISALPHA     30
+#define LIBC_FN_ISDIGIT     31
+#define LIBC_FN_ISSPACE     32
+#define LIBC_FN_ISALNUM     33
+#define LIBC_FN_ISUPPER     34
+#define LIBC_FN_ISLOWER     35
+#define LIBC_FN_TOUPPER     36
+#define LIBC_FN_TOLOWER     37
 #define LIBC_FN_PUTCHAR     40
 #define LIBC_FN_PUTS        41
 #define LIBC_FN_VPRINTF     42
@@ -1146,8 +1154,25 @@ int strncmp(const char *a, const char *b, size_t n) {
     return ((int (*)(const char *, const char *, size_t))
             LIBC_TABLE[LIBC_FN_STRNCMP])(a, b, n);
 }
+char *strcpy(char *d, const char *s) {
+    return ((char *(*)(char *, const char *))LIBC_TABLE[LIBC_FN_STRCPY])(d, s);
+}
+char *strncpy(char *d, const char *s, size_t n) {
+    return ((char *(*)(char *, const char *, size_t))
+            LIBC_TABLE[LIBC_FN_STRNCPY])(d, s, n);
+}
+char *strcat(char *d, const char *s) {
+    return ((char *(*)(char *, const char *))LIBC_TABLE[LIBC_FN_STRCAT])(d, s);
+}
 const char *strchr(const char *s, int c) {
     return ((const char *(*)(const char *, int))LIBC_TABLE[LIBC_FN_STRCHR])(s, c);
+}
+const char *strrchr(const char *s, int c) {
+    return ((const char *(*)(const char *, int))LIBC_TABLE[LIBC_FN_STRRCHR])(s, c);
+}
+const char *strstr(const char *h, const char *n) {
+    return ((const char *(*)(const char *, const char *))
+            LIBC_TABLE[LIBC_FN_STRSTR])(h, n);
 }
 
 /* Memory. */
@@ -1158,14 +1183,32 @@ void *memcpy(void *d, const void *s, size_t n) {
     return ((void *(*)(void *, const void *, size_t))
             LIBC_TABLE[LIBC_FN_MEMCPY])(d, s, n);
 }
+void *memmove(void *d, const void *s, size_t n) {
+    return ((void *(*)(void *, const void *, size_t))
+            LIBC_TABLE[LIBC_FN_MEMMOVE])(d, s, n);
+}
 int memcmp(const void *a, const void *b, size_t n) {
     return ((int (*)(const void *, const void *, size_t))
             LIBC_TABLE[LIBC_FN_MEMCMP])(a, b, n);
+}
+const void *memchr(const void *p, int c, size_t n) {
+    return ((const void *(*)(const void *, int, size_t))
+            LIBC_TABLE[LIBC_FN_MEMCHR])(p, c, n);
 }
 
 /* stdlib. */
 int atoi(const char *s) {
     return ((int (*)(const char *))LIBC_TABLE[LIBC_FN_ATOI])(s);
+}
+long atol(const char *s) {
+    return ((long (*)(const char *))LIBC_TABLE[LIBC_FN_ATOL])(s);
+}
+long strtol(const char *s, char **end, int base) {
+    return ((long (*)(const char *, char **, int))
+            LIBC_TABLE[LIBC_FN_STRTOL])(s, end, base);
+}
+int abs(int x) {
+    return ((int (*)(int))LIBC_TABLE[LIBC_FN_ABS])(x);
 }
 
 /* Heap — trampoline through libc's malloc/free.  Each user process
@@ -1175,6 +1218,12 @@ void *malloc(size_t size) {
 }
 void free(void *p) {
     ((void (*)(void *))LIBC_TABLE[LIBC_FN_FREE])(p);
+}
+void *calloc(size_t nm, size_t sz) {
+    return ((void *(*)(size_t, size_t))LIBC_TABLE[LIBC_FN_CALLOC])(nm, sz);
+}
+void *realloc(void *p, size_t n) {
+    return ((void *(*)(void *, size_t))LIBC_TABLE[LIBC_FN_REALLOC])(p, n);
 }
 uint32_t malloc_brk(void) {
     return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_BRK])();
@@ -1189,6 +1238,16 @@ uint32_t malloc_free_bytes(void) {
     return ((uint32_t (*)(void))LIBC_TABLE[LIBC_FN_MALLOC_FREE_])();
 }
 
+/* ctype — all freestanding, no syscalls. Trivial dispatches. */
+int isalpha(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALPHA])(c); }
+int isdigit(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISDIGIT])(c); }
+int isspace(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISSPACE])(c); }
+int isalnum(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISALNUM])(c); }
+int isupper(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISUPPER])(c); }
+int islower(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_ISLOWER])(c); }
+int toupper(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOUPPER])(c); }
+int tolower(int c) { return ((int (*)(int))LIBC_TABLE[LIBC_FN_TOLOWER])(c); }
+
 /* Stdio. putchar/puts forward straight into libc's putchar_/puts_. */
 void putchar(char c) {
     ((void (*)(char))LIBC_TABLE[LIBC_FN_PUTCHAR])(c);
@@ -1197,12 +1256,42 @@ void puts(const char *s) {
     ((void (*)(const char *))LIBC_TABLE[LIBC_FN_PUTS])(s);
 }
 
-/* printf: shim wraps va_list and dispatches into libc's vprintf_. */
+/* printf-family: each shim wraps va_list and dispatches into libc's
+ * v*printf_ entry points. Same trick lets sprintf/snprintf reuse the
+ * shared formatter core without needing __builtin_va_arg_pack. */
 void printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     ((int (*)(const char *, va_list))LIBC_TABLE[LIBC_FN_VPRINTF])(fmt, args);
     va_end(args);
+}
+int sprintf(char *buf, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = ((int (*)(char *, const char *, va_list))
+             LIBC_TABLE[LIBC_FN_VSPRINTF])(buf, fmt, args);
+    va_end(args);
+    return n;
+}
+int snprintf(char *buf, size_t cap, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = ((int (*)(char *, size_t, const char *, va_list))
+             LIBC_TABLE[LIBC_FN_VSNPRINTF])(buf, cap, fmt, args);
+    va_end(args);
+    return n;
+}
+int vsprintf(char *buf, const char *fmt, va_list ap) {
+    return ((int (*)(char *, const char *, va_list))
+            LIBC_TABLE[LIBC_FN_VSPRINTF])(buf, fmt, ap);
+}
+int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
+    return ((int (*)(char *, size_t, const char *, va_list))
+            LIBC_TABLE[LIBC_FN_VSNPRINTF])(buf, cap, fmt, ap);
+}
+
+void libc_info(uint32_t out[3]) {
+    ((void (*)(uint32_t *))LIBC_TABLE[LIBC_FN_LIBC_INFO])(out);
 }
 
 /* Non-zero-initialized marker: forces user.ld's .data section to be
