@@ -24,9 +24,17 @@
 #include "lapic.h"
 #include "smp.h"
 #include "vbe.h"
+#include "fbcon.h"
 #include "ac97.h"
 #include "bkl.h"
 #include "blkdev.h"
+
+/* Session 107 — Path C. Tracks the task that currently owns the
+ * framebuffer (set by SYS_FB_MAP, cleared by SYS_FB_UNMAP or by
+ * task-exit cleanup). While non-NULL, fbcon mutes its text painting
+ * so the owner can paint pixels without being trampled. Only one
+ * task may hold the FB at a time. */
+struct task *g_fb_owner;
 
 /* Count currently-live fd slots — used both by the session-71 max_fds
  * cap check and (someday) by procfs renderers. Slots 0/1/2 are always
@@ -749,13 +757,77 @@ void syscall_dispatch(struct registers *r) {
             ret = 0;
             break;
         }
-        /* SYS_FB_TAKEOVER / SYS_MOUSE_INJECT were retired with the
-         * WM and mouse driver. The slots stay so syscall numbering is
-         * stable, but the dispatcher returns -1. */
-        case SYS_FB_TAKEOVER:
-        case SYS_MOUSE_INJECT:
-            ret = -1;
+        /* Session 107 — Path C resurrects the FB syscalls for
+         * userspace graphics. */
+        case SYS_FB_INFO: {
+            const struct vbe_state *v = vbe_state();
+            struct sys_fb_info *out = (struct sys_fb_info *)(uintptr_t)a;
+            if (!out) { ret = -1; break; }
+            if (!v || !v->enabled) {
+                out->enabled = 0;
+                out->width = out->height = out->pitch = 0;
+                out->bpp = out->fb_size = 0;
+                ret = -1;
+                break;
+            }
+            out->enabled = 1;
+            out->width   = v->width;
+            out->height  = v->height;
+            out->pitch   = v->pitch;
+            out->bpp     = v->bpp;
+            out->fb_size = v->fb_size;
+            ret = 0;
             break;
+        }
+        case SYS_FB_MAP: {
+            struct task *t = task_current();
+            const struct vbe_state *v = vbe_state();
+            if (!v || !v->enabled) { ret = -1; break; }
+            if (g_fb_owner && g_fb_owner != t) {
+                /* Another task already owns the FB. */
+                ret = -1;
+                break;
+            }
+            uintptr_t user_va = (uintptr_t)a & ~0xFFFu;   /* page-align down */
+            if (user_va == 0 || user_va >= 0xC0000000u) {
+                /* Reject NULL and the kernel-half. */
+                ret = -1;
+                break;
+            }
+            uintptr_t fb_phys = v->fb_phys & ~0xFFFu;
+            uint32_t  fb_end  = (v->fb_phys + v->fb_size + 0xFFFu) & ~0xFFFu;
+            uint32_t  n_pages = (fb_end - fb_phys) / PAGE_SIZE;
+            uint32_t *user_pd = (uint32_t *)(uintptr_t)t->cr3;
+            int map_ok = 1;
+            for (uint32_t i = 0; i < n_pages; i++) {
+                if (paging_map_in(user_pd,
+                                  user_va + (uintptr_t)i * PAGE_SIZE,
+                                  fb_phys + (uintptr_t)i * PAGE_SIZE,
+                                  PTE_USER | PTE_WRITABLE) != 0) {
+                    /* Roll back is fiddly; the calling task will
+                     * exit on failure and PD destruction frees the
+                     * partial mappings. */
+                    map_ok = 0;
+                    break;
+                }
+            }
+            if (!map_ok) { ret = -1; break; }
+            g_fb_owner = t;
+            fbcon_set_enabled(0);     /* mute text painting */
+            ret = 0;
+            break;
+        }
+        case SYS_FB_UNMAP: {
+            struct task *t = task_current();
+            if (g_fb_owner != t) { ret = -1; break; }
+            g_fb_owner = 0;
+            fbcon_set_enabled(1);
+            /* Don't unmap the pages — the task is typically exiting
+             * (or wants to keep them mapped for later). Pages are
+             * freed when the PD is destroyed at task exit. */
+            ret = 0;
+            break;
+        }
         case SYS_KBD_POLL: {
             /* Non-blocking keyboard read. Returns the next byte from
              * the input ring, or 0 if empty. Bypasses the cooked/raw

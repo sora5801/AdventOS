@@ -153,7 +153,8 @@ USER_PROGS=(hello sh echo httpd ed init
             cp mv rm mkdir rmdir chmod touch find
             man
             lua
-            cc)
+            cc
+            gfx)
 # Session 81 note: `count`, `pluck`, `where`, `sort` moved to
 # JSON_PROGS below because they're JSONL-aware producers/consumers
 # and need libjson linked.

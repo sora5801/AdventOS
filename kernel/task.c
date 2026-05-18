@@ -1046,6 +1046,16 @@ void task_exit_current(int exit_code) {
     struct task *t = cpu_current();
     t->exit_code = exit_code;
 
+    /* Session 107 — Path C. If this task holds the framebuffer,
+     * release it so fbcon can resume painting and a future task can
+     * take over. */
+    extern struct task   *g_fb_owner;
+    extern void           fbcon_set_enabled(int on);
+    if (g_fb_owner == t) {
+        g_fb_owner = 0;
+        fbcon_set_enabled(1);
+    }
+
     /* Close everything we still have open. Critical for pipes:
      * without this, a child that exits without explicitly close()'ing
      * its pipe-write end would leave write_refs > 0 forever and the

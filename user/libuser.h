@@ -100,12 +100,12 @@ typedef unsigned int   size_t;
 #define SYS_CHOWN         70
 #define SYS_OPENPTY       71
 
-/* Session 57 — debugger plumbing (mirror of kernel/syscall.h). The
- * SYS_FB_TAKEOVER and SYS_MOUSE_INJECT slots were retired with the
- * WM and mouse driver but stay allocated for ABI stability. */
-#define SYS_FB_TAKEOVER   72
+/* Session 107 — Path C reuses the retired session-57 WM slots
+ * (72, 74) for userspace framebuffer access. SYS_FB_UNMAP is a new
+ * slot at 88. See kernel/syscall.h for the full ABI. */
+#define SYS_FB_INFO       72
 #define SYS_KBD_POLL      73
-#define SYS_MOUSE_INJECT  74
+#define SYS_FB_MAP        74
 #define SYS_PTRACE        75
 #define SYS_NTP_SYNC      76
 #define SYS_NTP_TEST_RESPONDER 77
@@ -120,6 +120,7 @@ typedef unsigned int   size_t;
 #define SYS_FS_SIZE        85    /* session 81: file size in bytes */
 #define SYS_RMDIR          86    /* session 83: remove empty dir */
 #define SYS_TTY_GET_CURSOR 87    /* session 84: read cursor (row,col) */
+#define SYS_FB_UNMAP       88    /* session 107: release FB ownership */
 
 /* Session 70: syscall sandbox.
  *
@@ -407,6 +408,29 @@ int      sys_openpty(int fds[2]);
  *                       the op set + ptrace_args layout. */
 int      sys_kbd_poll    (void);
 int      sys_ptrace      (int op, int pid, void *args);
+
+/* Session 107 — Path C: userspace framebuffer access.
+ *
+ *   sys_fb_info(out)    : read framebuffer geometry into a struct.
+ *   sys_fb_map(va)      : map the framebuffer pages into the calling
+ *                         task's address space at `va` (page-aligned).
+ *                         Marks the task as FB owner; fbcon stops
+ *                         painting text while the FB is owned.
+ *                         Only one task may own the FB at a time.
+ *   sys_fb_unmap()      : release FB ownership (auto-called on exit).
+ *
+ * Pixel format depends on the negotiated VBE mode — see info->bpp. */
+struct sys_fb_info {
+    unsigned int enabled;
+    unsigned int width;
+    unsigned int height;
+    unsigned int pitch;     /* bytes per scanline */
+    unsigned int bpp;       /* 16 / 24 / 32 */
+    unsigned int fb_size;
+};
+int      sys_fb_info     (struct sys_fb_info *out);
+int      sys_fb_map      (unsigned int user_va);
+int      sys_fb_unmap    (void);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

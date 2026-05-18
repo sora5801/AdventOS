@@ -111,15 +111,13 @@
                                 start at 1 (one fd per end). Session 52. */
 
 /* ---- Session 57: GUI + window manager support ---- */
-
-/* SYS_FB_TAKEOVER (72) — retired with the WM. Stays as a no-op slot. */
-#define SYS_FB_TAKEOVER   72
+/* SYS_FB_TAKEOVER (72) and SYS_MOUSE_INJECT (74) were retired with
+ * the original WM/mouse code. Session 107 (Path C) reclaimed both
+ * slots — see the SYS_FB_INFO / SYS_FB_MAP defines further down. */
 #define SYS_KBD_POLL      73 /* (eax=73) -> next ASCII key from the kbd
                                 ring, or 0 if empty. Non-blocking — kept
                                 because a CLI program can still want
                                 edge-triggered keyboard polling. */
-/* SYS_MOUSE_INJECT (74) — retired with the mouse driver. */
-#define SYS_MOUSE_INJECT  74
 
 /* ---- Session 57: ptrace-based debugger support ---- */
 
@@ -270,6 +268,34 @@ struct sys_limits {
                                 * editor to anchor the prompt row before
                                 * doing in-place redraws for left/right
                                 * cursor movement and Ctrl-A/E/W/U/K. */
+
+/* ---- Session 107: Path C — userspace framebuffer access ---- */
+
+/* Replaces the retired GUI/WM slots 72 + 74. The owner-tracking and
+ * fbcon-mute behavior is implemented in syscall.c::sys_fb_* and
+ * fbcon.c::fbcon_is_muted. Only one task may hold the framebuffer at
+ * a time; ownership is released automatically on task exit. */
+#define SYS_FB_INFO       72   /* (eax=72, ebx=struct sys_fb_info *)
+                                * fills the struct with framebuffer
+                                * geometry. Returns 0 / -1 (FB disabled). */
+#define SYS_FB_MAP        74   /* (eax=74, ebx=user_va) -> 0 / -1.
+                                * Maps the FB into the calling task's
+                                * address space at `user_va` and marks
+                                * the task as FB owner. fbcon mutes
+                                * its text painting while owned. */
+#define SYS_FB_UNMAP      88   /* (eax=88) -> 0 / -1. Releases the
+                                * FB so another task can take it (or
+                                * so fbcon can resume painting).
+                                * Auto-called on task exit. */
+
+struct sys_fb_info {
+    uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
+    uint32_t  width;         /* pixels */
+    uint32_t  height;
+    uint32_t  pitch;         /* bytes per scanline */
+    uint32_t  bpp;           /* 16, 24, or 32 */
+    uint32_t  fb_size;       /* total bytes (pitch * height) */
+};
 
 
 /* User/kernel ABI for the SYS_BLOCK_* calls. */

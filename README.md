@@ -93,9 +93,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **106 — cc Phase 3 part 10: struct-by-value function args**. See [`docs/93-cc-struct-by-value.md`](docs/93-cc-struct-by-value.md) for the deep dive (per-func param_kinds pre-populated from AST, cumulative ebp offsets for struct params, caller-side `rep movsd` push of struct onto stack). `int f(struct point p)` taking a struct by value works.
+Current session: **107 — Path C phase 1: userspace framebuffer access**. See [`docs/94-pathC-fb.md`](docs/94-pathC-fb.md) for the deep dive (three new syscalls — `SYS_FB_INFO`/`SYS_FB_MAP`/`SYS_FB_UNMAP`; single-owner tracking via `g_fb_owner`; fbcon mutes while a task owns the FB; auto-release on task exit). `gfx.elf` paints a test card and a QMP screendump confirms pixel-perfect output.
 
 Recent session deep dives:
+- [Session 107 — Path C phase 1: userspace framebuffer](docs/94-pathC-fb.md)
 - [Session 106 — cc Phase 3 part 10: struct-by-value calls](docs/93-cc-struct-by-value.md)
 - [Session 105 — cc Phase 3 part 9: variadic functions](docs/92-cc-variadics.md)
 - [Session 104 — cc Phase 3 part 8: typedef](docs/91-cc-typedef.md)
@@ -141,9 +142,11 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 
 **Path B — Self-hosting Phase 2 is complete; Phase 3 in progress.** Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Session 97 (Phase 3 part 1) added structs with `.` and `->`, struct-pointer fields for linked-list-style data, and struct-pointer function params — see [`docs/84-cc-structs.md`](docs/84-cc-structs.md). Session 98 (Phase 3 part 2) added function pointers (no separate type syntax; just `int *fp`) with indirect calls and dispatch tables — see [`docs/85-cc-function-pointers.md`](docs/85-cc-function-pointers.md). Session 99 (Phase 3 part 3) added `sizeof(TYPE)` (compile-time fold) and scaled pointer arithmetic so `int*+1` advances 4 bytes — see [`docs/86-cc-sizeof-and-scaled-pointers.md`](docs/86-cc-sizeof-and-scaled-pointers.md). Session 100 (Phase 3 part 4) makes cc accept multiple input files in a single compile so projects can be split across `.c` files with shared `.h` headers — see [`docs/87-cc-multi-file.md`](docs/87-cc-multi-file.md). Session 101 (Phase 3 part 5) adds struct value assignment via `rep movsd` — see [`docs/88-cc-struct-value-assign.md`](docs/88-cc-struct-value-assign.md). Session 102 (Phase 3 part 6) adds array-of-struct (`struct point pts[N]`) and indexed member access (`pts[i].x`, `items[i].name = ...`) — see [`docs/89-cc-array-of-struct.md`](docs/89-cc-array-of-struct.md). Session 103 (Phase 3 part 7) adds `enum` for named integer constants — see [`docs/90-cc-enums.md`](docs/90-cc-enums.md). Session 104 (Phase 3 part 8) adds `typedef` for type aliases — see [`docs/91-cc-typedef.md`](docs/91-cc-typedef.md). Session 105 (Phase 3 part 9) adds real user-defined variadic functions with `va_start`/`va_arg`/`va_end` intrinsics — see [`docs/92-cc-variadics.md`](docs/92-cc-variadics.md). Session 106 (Phase 3 part 10) adds struct-by-value function arguments (true copy onto stack via `rep movsd`; cumulative ebp offsets in callee) — see [`docs/93-cc-struct-by-value.md`](docs/93-cc-struct-by-value.md).
 
+**Path C — Graphics is started** as of session 107. Userspace can now take ownership of the VBE framebuffer, get it mapped into its address space, and write pixels directly. `gfx.elf` paints a test card; fbcon mutes while a task owns the FB and resumes on release. Follow-ups: software drawing lib (108), mouse driver (109), double-buffer (110), window manager daemon (111).
+
 Remaining candidate paths:
-- **Path B Phase 2+** — char/pointers/strings/globals/preprocessor in `cc`, or eventually a real `tcc` port.
-- **Path C — Graphics.** A minimal window manager on the VBE framebuffer.
+- **Path B Phase 4+** — more cc polish (function-pointer typedef syntax, struct-by-value returns, `static`/`extern`, optimization) or a real `tcc` port.
+- **Path C 108+** — drawing library, mouse, window manager.
 - **Path E — Drivers.** virtio (modern QEMU's preferred device family), more USB device classes, sound consumer.
 
 ## License

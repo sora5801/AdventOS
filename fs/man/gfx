@@ -1,0 +1,33 @@
+NAME
+    gfx - userspace framebuffer test card (Path C demo)
+
+SYNOPSIS
+    gfx [SECONDS]
+
+DESCRIPTION
+    Maps the VBE framebuffer into the calling process's address space,
+    paints a test card (color bars, RGB gradient, centered rect, full-
+    width cross), holds for SECONDS (default 4), then releases the
+    framebuffer so fbcon can resume.
+
+    Only one task may own the framebuffer at a time. While owned,
+    fbcon mutes its text painting; on release, the next fbcon write
+    repaints the console.
+
+    The pixel format depends on the VBE mode the bootloader negotiated.
+    On the default QEMU setup that's 1024x768 at 24bpp (BBGGRR per
+    pixel triple). `sys_fb_info` returns the actual width/height/pitch/
+    bpp so portable code can pack pixels correctly.
+
+SYSCALLS USED (session 107)
+    SYS_FB_INFO   (72)   read framebuffer geometry
+    SYS_FB_MAP    (74)   map FB at chosen user VA + take ownership
+    SYS_FB_UNMAP  (88)   release ownership (auto on task exit)
+
+EXIT STATUS
+    0   FB was painted and released
+    1   FB unavailable (boot lacked VBE) or another task owns it
+
+NOTES
+    The framebuffer is mapped at user VA 0x50000000 by this demo.
+    For a 1024x768x24 mode that's 2.25 MiB (≈576 pages).

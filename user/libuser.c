@@ -395,6 +395,32 @@ int sys_ptrace(int op, int pid, void *args) {
     return ret;
 }
 
+/* Session 107 — Path C framebuffer syscalls. */
+int sys_fb_info(struct sys_fb_info *out) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FB_INFO), "b"(out)
+                      : "memory");
+    return ret;
+}
+int sys_fb_map(unsigned int user_va) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FB_MAP), "b"(user_va)
+                      : "memory");
+    return ret;
+}
+int sys_fb_unmap(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_FB_UNMAP)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"
