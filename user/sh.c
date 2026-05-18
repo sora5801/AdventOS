@@ -1042,15 +1042,129 @@ static void cmd_pwd(void) {
     else       { puts(buf); puts("\n"); }
 }
 
+/* Normalize `target` (relative to `base`) into `out`, resolving `.`
+ * and `..` segments. Empty segments are collapsed too (so `a//b`
+ * works). `base` must be absolute (start with `/`). The result is
+ * always absolute; on overflow returns -1.
+ *
+ * Examples:
+ *   base="/etc",     target="..", out="/"
+ *   base="/etc",     target="../mnt", out="/mnt"
+ *   base="/mnt",     target=".", out="/mnt"
+ *   base="/a/b/c",   target="../../x", out="/a/x"
+ *   base="anything", target="/abs", out="/abs"  (absolute target wins)
+ *
+ * Done in userspace so the kernel chdir handler (which only knows
+ * how to lookup a single named entry) doesn't need to grow a path
+ * resolver. */
+static int normalize_path(const char *base, const char *target,
+                          char *out, int cap) {
+    if (cap < 2) return -1;
+    /* Stack of segment offsets in `out`. Each entry is the start
+     * position of a segment AFTER its leading `/`. Pop on `..`. */
+    int stack[32];
+    int depth = 0;
+    int o = 1;
+    out[0] = '/';
+
+    /* Seed with `base` if target is not absolute. */
+    const char *src = target;
+    if (target[0] != '/') {
+        const char *b = base;
+        if (*b == '/') b++;
+        while (*b) {
+            const char *bs = b;
+            while (*b && *b != '/') b++;
+            int len = (int)(b - bs);
+            if (len > 0 && depth < 32) {
+                stack[depth++] = o;
+                for (int i = 0; i < len; i++) {
+                    if (o >= cap - 1) return -1;
+                    out[o++] = bs[i];
+                }
+                if (o >= cap - 1) return -1;
+                out[o++] = '/';
+            }
+            if (*b == '/') b++;
+        }
+        /* Drop trailing slash so segment math is consistent. */
+        if (o > 1 && out[o - 1] == '/') o--;
+    }
+
+    /* Now walk `src` (the target). */
+    const char *p = src;
+    if (*p == '/') p++;
+    while (*p) {
+        const char *s = p;
+        while (*p && *p != '/') p++;
+        int len = (int)(p - s);
+        if (*p == '/') p++;
+        if (len == 0) continue;
+        if (len == 1 && s[0] == '.') continue;
+        if (len == 2 && s[0] == '.' && s[1] == '.') {
+            if (depth > 0) {
+                depth--;
+                /* Truncate `out` back to one byte before the popped
+                 * segment's start (= the position of its leading `/`,
+                 * which we drop too). At depth 0 we're back at root. */
+                o = (depth > 0) ? stack[depth] - 1 : 1;
+            }
+            continue;
+        }
+        if (depth >= 32) return -1;
+        if (o > 1) {
+            if (o >= cap - 1) return -1;
+            out[o++] = '/';
+        }
+        stack[depth++] = o;
+        for (int i = 0; i < len; i++) {
+            if (o >= cap - 1) return -1;
+            out[o++] = s[i];
+        }
+    }
+    out[o] = 0;
+    /* Guarantee at least "/". */
+    if (o == 0) { out[0] = '/'; out[1] = 0; }
+    return 0;
+}
+
 /* `cd <path>` builtin. Path is relative to cwd unless it starts with /.
  * Returns 0 on success, 1 if sys_chdir rejected the path — execute_segment
- * threads this back into $? so `cd /nope || echo recover` works. */
+ * threads this back into $? so `cd /nope || echo recover` works.
+ *
+ * `.` and `..` segments are resolved in userspace via normalize_path
+ * (sys_chdir takes a single directory name and can't traverse `..`
+ * itself). `cd` alone or `cd /` heads to root. */
 static int cmd_cd(const char *arg) {
     if (!arg || !*arg) arg = "/";
-    if (sys_chdir(arg) < 0) {
-        puts("cd: ");
-        puts(arg);
-        puts(": no such directory\n");
+
+    /* Fast path: simple absolute or single-segment path with no `.`
+     * or `..` — let the kernel handle it. */
+    int needs_norm = 0;
+    for (int i = 0; arg[i]; i++) {
+        if (arg[i] == '.') { needs_norm = 1; break; }
+    }
+    if (arg[0] != '/' && !needs_norm) {
+        /* sys_chdir already supports cwd-relative simple names. */
+        if (sys_chdir(arg) < 0) {
+            puts("cd: "); puts(arg); puts(": no such directory\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Otherwise resolve against cwd ourselves. */
+    char cwd[128];
+    if (sys_getcwd(cwd, sizeof(cwd)) < 0) {
+        cwd[0] = '/'; cwd[1] = 0;
+    }
+    char resolved[160];
+    if (normalize_path(cwd, arg, resolved, sizeof(resolved)) < 0) {
+        puts("cd: path too long\n");
+        return 1;
+    }
+    if (sys_chdir(resolved) < 0) {
+        puts("cd: "); puts(arg); puts(": no such directory\n");
         return 1;
     }
     return 0;
