@@ -97,4 +97,14 @@ void gfx_glyph     (struct gfx_ctx *ctx, int x, int y, char c, unsigned int fg, 
 void gfx_text      (struct gfx_ctx *ctx, int x, int y, const char *s,
                     unsigned int fg, unsigned int bg);
 
+/* Session 120 — same as above but each pixel of the source 8x8
+ * glyph emits a `scale × scale` block.  scale=1 is identical to
+ * gfx_glyph / gfx_text; scale=2 doubles each dimension (16x16 cell,
+ * 16 px per character); scale=3 triples (24x24 cell, 24 px per
+ * character).  scale<=0 is a no-op. */
+void gfx_glyph_n   (struct gfx_ctx *ctx, int x, int y, char c,
+                    int scale, unsigned int fg, unsigned int bg);
+void gfx_text_n    (struct gfx_ctx *ctx, int x, int y, const char *s,
+                    int scale, unsigned int fg, unsigned int bg);
+
 #endif
