@@ -1,0 +1,19 @@
+NAME
+    wmclock - digital clock WM client (Path C phase 9)
+
+SYNOPSIS
+    wmclock [SECONDS]
+
+DESCRIPTION
+    Open a 260x100 WM window that displays the current time in
+    HH:MM:SS format using a 2x-scaled 8x8 font.  Polls sys_time()
+    every 250 ms and re-renders the surface.
+
+    Keyboard (only while focused — click the window first):
+      SPACE    toggle between 24-hour and 12-hour mode (AM/PM)
+
+    Exit after SECONDS (default 60) or when the WM closes the
+    window.
+
+SEE ALSO
+    wmd(1), wmtype(1), wmpaint(1)

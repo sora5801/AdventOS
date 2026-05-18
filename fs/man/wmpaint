@@ -1,0 +1,27 @@
+NAME
+    wmpaint - tiny paint program WM client (Path C phase 9)
+
+SYNOPSIS
+    wmpaint [SECONDS]
+
+DESCRIPTION
+    Open a 400x280 WM window with a top toolbar of 7 color
+    swatches and a canvas below.  Drag the left mouse button to
+    paint smooth strokes (Bresenham line between every two
+    MOUSE_MOVE events with a configurable brush radius).
+
+    Mouse:
+      L click in toolbar    select color 1..7
+      L drag in canvas      paint stroke at current color/radius
+      L release             lift the pen
+
+    Keyboard (focus the window first):
+      1..7    select color (white/red/yellow/green/cyan/blue/magenta)
+      + / -   bigger / smaller brush
+      c       clear canvas
+      q       quit
+
+    Exit after SECONDS (default 60) or 'q' or window close.
+
+SEE ALSO
+    wmd(1), wmtype(1), wmclock(1)

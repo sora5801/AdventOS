@@ -107,6 +107,9 @@ USER_PROGRAMS = [
     ('wmhello.elf', 'user/_obj/wmhello.bin', None),
     # Session 114: path-C phase 8 — text-input demo.
     ('wmtype.elf',  'user/_obj/wmtype.bin',  None),
+    # Session 115: path-C phase 9 — clock + paint apps.
+    ('wmclock.elf', 'user/_obj/wmclock.bin', None),
+    ('wmpaint.elf', 'user/_obj/wmpaint.bin', None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -250,6 +253,8 @@ DATA_FILES = [
     ('wmd',   'fs/man/wmd',   'man'),     # session 111
     ('wmhello', 'fs/man/wmhello', 'man'), # session 112
     ('wmtype',  'fs/man/wmtype',  'man'), # session 114
+    ('wmclock', 'fs/man/wmclock', 'man'), # session 115
+    ('wmpaint', 'fs/man/wmpaint', 'man'), # session 115
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
