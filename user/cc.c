@@ -3201,6 +3201,85 @@ static int expr_ptr_elem_size(struct node *n) {
     return 0;
 }
 
+/* ---- Session 122 — constant folding ------------------------------- *
+ *
+ * Pre-codegen pass that walks the AST and replaces N_UN / N_BIN /
+ * N_TERNARY nodes whose operands are N_NUM (integer literals) with
+ * a single N_NUM holding the folded result. Eliminates compile-time
+ * arithmetic and gives the dead-code-elimination pass (#4) something
+ * to chew on: `if (CONST)` becomes `if (0)` or `if (N)`, and DCE
+ * strips the dead branch entirely.
+ *
+ * Walk is post-order: children fold first so their parents can see
+ * the literal values. Division by zero is left as-is (codegen will
+ * emit the divide and the program will trap at runtime — same
+ * semantics as before). Comparison operators fold to 0/1. */
+static void fold_node(struct node *n) {
+    if (!n) return;
+    /* Recurse first so children become literals before we look. */
+    fold_node(n->a);
+    fold_node(n->b);
+    fold_node(n->c);
+    fold_node(n->body);
+    for (int i = 0; i < n->n_list; i++)   fold_node(n->list[i]);
+    for (int i = 0; i < n->n_params; i++) fold_node(n->params[i]);
+
+    if (n->kind == N_UN && n->a && n->a->kind == N_NUM) {
+        int v = n->a->num, r;
+        switch (n->op) {
+            case T_MINUS: r = -v;     break;
+            case T_BANG:  r = !v;     break;
+            case T_TILDE: r = ~v;     break;
+            default: return;
+        }
+        n->kind = N_NUM;
+        n->num  = r;
+        n->a    = 0;
+        return;
+    }
+
+    if (n->kind == N_BIN
+        && n->a && n->a->kind == N_NUM
+        && n->b && n->b->kind == N_NUM)
+    {
+        int a = n->a->num, b = n->b->num, r;
+        switch (n->op) {
+            case T_PLUS:      r = a + b;  break;
+            case T_MINUS:     r = a - b;  break;
+            case T_STAR:      r = a * b;  break;
+            case T_SLASH:     if (b == 0) return; r = a / b;  break;
+            case T_PERCENT:   if (b == 0) return; r = a % b;  break;
+            case T_AMP:       r = a & b;  break;
+            case T_PIPE:      r = a | b;  break;
+            case T_CARET:     r = a ^ b;  break;
+            case T_LSHIFT:    r = a << b; break;
+            case T_RSHIFT:    r = a >> b; break;
+            case T_EQ:        r = (a == b); break;
+            case T_NEQ:       r = (a != b); break;
+            case T_LT:        r = (a <  b); break;
+            case T_GT:        r = (a >  b); break;
+            case T_LE:        r = (a <= b); break;
+            case T_GE:        r = (a >= b); break;
+            case T_AMP_AMP:   r = (a && b); break;
+            case T_PIPE_PIPE: r = (a || b); break;
+            default: return;
+        }
+        n->kind = N_NUM;
+        n->num  = r;
+        n->a    = 0;
+        n->b    = 0;
+        return;
+    }
+
+    /* Ternary `c ? t : e` with constant c — splice the chosen branch
+     * in place of the ternary node. Children have already been folded
+     * post-order so the splice doesn't re-fold them. */
+    if (n->kind == N_TERNARY && n->a && n->a->kind == N_NUM) {
+        struct node *chosen = n->a->num ? n->b : n->c;
+        if (chosen) *n = *chosen;   /* shallow copy — children stay shared */
+    }
+}
+
 /* ---- Session 122 — register-allocator helpers --------------------- *
  *
  * The default codegen evaluates every binop with a push/pop round-trip
@@ -4941,6 +5020,11 @@ int main(int argc, char **argv) {
 
     lex_all(g_pp_buf, g_pp_len);
     struct node *prog = parse_program();
+
+    /* Session 122 — constant-folding pass over every function body.
+     * Runs before pre-population so any folded expressions are visible
+     * to subsequent passes (DCE in particular). */
+    for (int i = 0; i < prog->n_list; i++) fold_node(prog->list[i]);
 
     /* Session 106 — pre-populate function param info BEFORE any
      * codegen runs. This makes per-function param kinds available
