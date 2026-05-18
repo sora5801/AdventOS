@@ -54,6 +54,7 @@ EXPECTED = [
     "sizeof_x         = 4",
     "sizeof_view      = 4",
     "sizeof_u         = 4",
+    "goto_sum         = 6",
 ]
 
 

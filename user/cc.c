@@ -124,7 +124,7 @@ static void die_at(int line, const char *what, const char *detail) {
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
     T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
-    T_BREAK, T_CONTINUE,    /* session 125 */
+    T_BREAK, T_CONTINUE, T_GOTO,    /* session 125 */
     T_STRUCT,    /* session 97 */
     T_UNION,     /* session 125 */
     T_SIZEOF,    /* session 99 */
@@ -286,6 +286,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "do"))     return T_DO;       /* session 125 */
     if (my_streq(s, "break"))  return T_BREAK;    /* session 125 */
     if (my_streq(s, "continue"))return T_CONTINUE; /* session 125 */
+    if (my_streq(s, "goto"))   return T_GOTO;     /* session 125 */
     if (my_streq(s, "return")) return T_RETURN;
     if (my_streq(s, "for"))    return T_FOR;
     return T_NAME;
@@ -1052,6 +1053,8 @@ enum {
     N_BREAK,         /* break;     — jump to end of enclosing loop/switch */
     N_CONTINUE,      /* continue;  — jump to top/cond of enclosing loop */
     N_SIZEOF_NAME,   /* sizeof NAME — folded at codegen when locals are bound */
+    N_LABEL,         /* NAME: stmt — body in n->body */
+    N_GOTO,          /* goto NAME; */
 };
 
 struct node {
@@ -1614,6 +1617,33 @@ static struct node *parse_stmt(void) {
         g_tk++;
         expect(T_SEMI, "';'");
         return new_node(N_CONTINUE);
+    }
+    /* Session 125 — goto NAME; */
+    if (t == T_GOTO) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected label name after goto", 0);
+        struct node *n = new_node(N_GOTO);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return n;
+    }
+    /* Session 125 — labeled statement: `NAME: stmt`. The label is
+     * resolved per-function in the goto-fixup table. */
+    if (t == T_NAME && tk_peek(1)->kind == T_COLON) {
+        char nm[NAME_MAX];
+        int i = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
+        g_tk++;   /* consume NAME */
+        g_tk++;   /* consume : */
+        struct node *n = new_node(N_LABEL);
+        for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+        n->body = parse_stmt();
+        return n;
     }
     /* Session 125 — `do stmt while (cond);`. Body in n->a, cond in n->b. */
     if (t == T_DO) {
@@ -4056,6 +4086,43 @@ static void gen_expr(struct node *n) {
     die_at(n->line, "unsupported expr kind", 0);
 }
 
+/* Session 125 — goto / label table. Per-function: reset at the top of
+ * gen_func, resolved at the bottom. Forward and backward gotos both
+ * use the fixup list (we don't know which until end of function).
+ *
+ * Labels live in the same flat namespace as variable names — that's
+ * standard C: a label can shadow a function-scope name. cc doesn't
+ * try to be strict about this; if your label collides with a typedef
+ * or function name, the goto codegen will use the label and the rest
+ * of the program won't notice. */
+#define MAX_LABELS_PER_FUNC 32
+#define MAX_GOTOS_PER_FUNC  64
+struct label_info {
+    char name[NAME_MAX];
+    int  code_off;   /* -1 if declared but not yet defined */
+};
+struct goto_fixup {
+    char name[NAME_MAX];
+    int  jmp_disp_off;
+    int  line;
+};
+static struct label_info g_labels[MAX_LABELS_PER_FUNC];
+static int               g_n_labels;
+static struct goto_fixup g_gotos[MAX_GOTOS_PER_FUNC];
+static int               g_n_gotos;
+
+static int label_find_or_add(const char *name) {
+    for (int i = 0; i < g_n_labels; i++)
+        if (my_streq(g_labels[i].name, name)) return i;
+    if (g_n_labels >= MAX_LABELS_PER_FUNC) die("too many labels in function");
+    int idx = g_n_labels++;
+    int j = 0;
+    while (name[j] && j < NAME_MAX - 1) { g_labels[idx].name[j] = name[j]; j++; }
+    g_labels[idx].name[j] = 0;
+    g_labels[idx].code_off = -1;
+    return idx;
+}
+
 /* Session 125 — loop context stack for break/continue codegen.
  *
  * Each enclosing while/do-while/for/switch pushes a loop_ctx so
@@ -4643,6 +4710,30 @@ static void gen_stmt(struct node *n) {
             lc->break_jmps[lc->n_break_jmps++] = jb;
             return;
         }
+        case N_LABEL: {
+            /* Session 125 — record label position then emit body. */
+            int li = label_find_or_add(n->name);
+            if (g_labels[li].code_off >= 0)
+                die_at(n->line, "duplicate label", n->name);
+            g_labels[li].code_off = g_code_len;
+            gen_stmt(n->body);
+            return;
+        }
+        case N_GOTO: {
+            /* Session 125 — emit forward jmp placeholder, record fixup
+             * for resolution at end of gen_func. */
+            if (g_n_gotos >= MAX_GOTOS_PER_FUNC) die("too many gotos in function");
+            int j = e_jmp_rel32();
+            int idx = g_n_gotos++;
+            int i = 0;
+            while (n->name[i] && i < NAME_MAX - 1) {
+                g_gotos[idx].name[i] = n->name[i]; i++;
+            }
+            g_gotos[idx].name[i] = 0;
+            g_gotos[idx].jmp_disp_off = j;
+            g_gotos[idx].line = n->line;
+            return;
+        }
         case N_CONTINUE: {
             /* Find nearest enclosing real loop (skip switch frames). */
             struct loop_ctx *lc = loop_top_for_continue();
@@ -4704,6 +4795,10 @@ static void gen_func(struct node *fn) {
     e_push_ebp();
     e_mov_ebp_esp();
 
+    /* Session 125 — reset per-function goto + label tables. */
+    g_n_labels = 0;
+    g_n_gotos  = 0;
+
     /* Bind parameters as locals with positive offsets. Use a separate
      * loop to register them without bumping g_locals_bytes (which is
      * for the NEGATIVE-offset stack-allocated locals).
@@ -4759,6 +4854,20 @@ static void gen_func(struct node *fn) {
 
     /* Patch the prologue's sub esp size. */
     patch_d(sub_at + 2, (unsigned)g_locals_bytes);
+
+    /* Session 125 — resolve any goto fixups in this function against
+     * the label table. Both forward and backward gotos go through here
+     * (we don't try to do backward gotos eagerly during codegen). */
+    for (int i = 0; i < g_n_gotos; i++) {
+        struct goto_fixup *gf = &g_gotos[i];
+        int li = -1;
+        for (int j = 0; j < g_n_labels; j++)
+            if (my_streq(g_labels[j].name, gf->name)) { li = j; break; }
+        if (li < 0 || g_labels[li].code_off < 0)
+            die_at(gf->line, "undefined label", gf->name);
+        int disp = g_labels[li].code_off - (gf->jmp_disp_off + 4);
+        patch_d(gf->jmp_disp_off, (unsigned)disp);
+    }
 }
 
 /* The print_int helper. Top-of-stack on entry is the int to print

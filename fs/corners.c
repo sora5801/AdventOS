@@ -93,5 +93,19 @@ int main() {
     printf("sizeof_view      = %d\n", sizeof(union view));  /* 4 */
     printf("sizeof_u         = %d\n", sizeof(u));      /* 4 */
 
+    /* 7. goto / labels. Forward + backward gotos both work — they get
+     *    resolved at the end of each function. */
+    int gsum;
+    gsum = 0;
+    int gi;
+    gi = 0;
+again:
+    if (gi >= 4) goto done;
+    gsum += gi;
+    gi += 1;
+    goto again;
+done:
+    printf("goto_sum         = %d\n", gsum);           /* 0+1+2+3 = 6 */
+
     return 0;
 }
