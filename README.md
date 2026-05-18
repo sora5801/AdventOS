@@ -93,9 +93,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **125 — cc optimization passes**. See [`docs/112-pathB-optimizations.md`](docs/112-pathB-optimizations.md) for the deep dive. Four passes — smart register-allocator codegen, constant folding, rolling peephole, and dead-code elimination — shrink the output of `cc /capstone.c -o /cap.elf` from 2114 to 1955 bytes (−7.5%) with the smoke test green at every step.
+Current session: **128 — cc language corners (11 features in one branch)**. See [`docs/115-pathB-language-corners.md`](docs/115-pathB-language-corners.md) for the deep dive. Ships 11 small features in one commit each: comma operator, bitwise/shift compound assigns, `do-while`, `break`/`continue`, `union`, `sizeof NAME`, `goto`+labels, assignment-as-expression, `switch`/`case`/`default`, 2D arrays, and `static` locals. The smoke test ([`smoke_corners.py`](smoke_corners.py) + [`fs/corners.c`](fs/corners.c)) compiles a program exercising every feature and checks 22 output lines.
 
 Recent session deep dives:
+- [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
 - [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
 - [Session 121 — Path B Phase 4 capstone (SBV returns, static/extern, fp typedef)](docs/108-pathB-capstone.md)
 - [Session 107 — Path C phase 1: userspace framebuffer](docs/94-pathC-fb.md)

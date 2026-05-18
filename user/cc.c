@@ -123,8 +123,11 @@ static void die_at(int line, const char *what, const char *detail) {
 
 enum {
     T_END = 0, T_NUM, T_NAME, T_STR,
-    T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR,
+    T_INT, T_CHAR, T_IF, T_ELSE, T_WHILE, T_RETURN, T_FOR, T_DO,
+    T_BREAK, T_CONTINUE, T_GOTO,    /* session 125 */
+    T_SWITCH, T_CASE, T_DEFAULT,    /* session 125 */
     T_STRUCT,    /* session 97 */
+    T_UNION,     /* session 125 */
     T_SIZEOF,    /* session 99 */
     T_ENUM,      /* session 103 */
     T_TYPEDEF,   /* session 104 */
@@ -139,6 +142,8 @@ enum {
     T_AMP, T_PIPE, T_CARET, T_TILDE, T_LSHIFT, T_RSHIFT,
     /* Session 96 — compound operators. */
     T_PLUS_EQ, T_MINUS_EQ, T_STAR_EQ, T_SLASH_EQ, T_PERCENT_EQ,
+    /* Session 125 — bitwise / shift compound operators. */
+    T_AMP_EQ, T_PIPE_EQ, T_CARET_EQ, T_LSHIFT_EQ, T_RSHIFT_EQ,
     T_INC, T_DEC,
     T_QUESTION, T_COLON,
     /* Session 97 — struct member access. */
@@ -270,6 +275,7 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "int"))    return T_INT;
     if (my_streq(s, "char"))   return T_CHAR;     /* session 92 */
     if (my_streq(s, "struct")) return T_STRUCT;   /* session 97 */
+    if (my_streq(s, "union"))  return T_UNION;    /* session 125 */
     if (my_streq(s, "sizeof")) return T_SIZEOF;   /* session 99 */
     if (my_streq(s, "enum"))   return T_ENUM;     /* session 103 */
     if (my_streq(s, "typedef"))return T_TYPEDEF;  /* session 104 */
@@ -278,6 +284,13 @@ static int kw_lookup(const char *s) {
     if (my_streq(s, "if"))     return T_IF;
     if (my_streq(s, "else"))   return T_ELSE;
     if (my_streq(s, "while"))  return T_WHILE;
+    if (my_streq(s, "do"))     return T_DO;       /* session 125 */
+    if (my_streq(s, "break"))  return T_BREAK;    /* session 125 */
+    if (my_streq(s, "continue"))return T_CONTINUE; /* session 125 */
+    if (my_streq(s, "goto"))   return T_GOTO;     /* session 125 */
+    if (my_streq(s, "switch")) return T_SWITCH;   /* session 125 */
+    if (my_streq(s, "case"))   return T_CASE;     /* session 125 */
+    if (my_streq(s, "default"))return T_DEFAULT;  /* session 125 */
     if (my_streq(s, "return")) return T_RETURN;
     if (my_streq(s, "for"))    return T_FOR;
     return T_NAME;
@@ -738,7 +751,12 @@ static void lex_all(const char *src, int len) {
             case '?': push_tok(T_QUESTION, g_line); g_pos++; break;
             case ':': push_tok(T_COLON,    g_line); g_pos++; break;
             case '~': push_tok(T_TILDE,  g_line); g_pos++; break;
-            case '^': push_tok(T_CARET,  g_line); g_pos++; break;
+            case '^':
+                /* Session 125 — `^=` compound assign. */
+                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_CARET_EQ, g_line); g_pos += 2;
+                } else { push_tok(T_CARET, g_line); g_pos++; }
+                break;
             case '=':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_EQ, g_line); g_pos += 2;
@@ -750,27 +768,37 @@ static void lex_all(const char *src, int len) {
                 } else { push_tok(T_BANG, g_line); g_pos++; }
                 break;
             case '<':
-                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                /* Session 125 — `<<=` compound shift-assign. */
+                if (g_pos + 2 < g_src_len && g_src[g_pos + 1] == '<' && g_src[g_pos + 2] == '=') {
+                    push_tok(T_LSHIFT_EQ, g_line); g_pos += 3;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_LE, g_line); g_pos += 2;
                 } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '<') {
                     push_tok(T_LSHIFT, g_line); g_pos += 2;
                 } else { push_tok(T_LT, g_line); g_pos++; }
                 break;
             case '>':
-                if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                if (g_pos + 2 < g_src_len && g_src[g_pos + 1] == '>' && g_src[g_pos + 2] == '=') {
+                    push_tok(T_RSHIFT_EQ, g_line); g_pos += 3;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
                     push_tok(T_GE, g_line); g_pos += 2;
                 } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '>') {
                     push_tok(T_RSHIFT, g_line); g_pos += 2;
                 } else { push_tok(T_GT, g_line); g_pos++; }
                 break;
             case '&':
+                /* Session 125 — `&=` compound bitwise-and-assign. */
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '&') {
                     push_tok(T_AMP_AMP, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_AMP_EQ, g_line); g_pos += 2;
                 } else { push_tok(T_AMP, g_line); g_pos++; }
                 break;
             case '|':
                 if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '|') {
                     push_tok(T_PIPE_PIPE, g_line); g_pos += 2;
+                } else if (g_pos + 1 < g_src_len && g_src[g_pos + 1] == '=') {
+                    push_tok(T_PIPE_EQ, g_line); g_pos += 2;
                 } else { push_tok(T_PIPE, g_line); g_pos++; }
                 break;
             default:
@@ -825,6 +853,11 @@ static int  global_declare(const char *name, int size, int kind);
 static int  global_find(const char *name);
 /* Session 97 — struct helpers. */
 static int  global_declare_struct(const char *name, int size, int kind, int meta);
+/* Session 125 — local lookup forward decls (used by parse_primary's
+ * `sizeof NAME` codegen). */
+static int  local_find(const char *name);
+static int  local_kind(const char *name);
+static int  local_meta(const char *name);
 
 /* Session 97 — struct registry. Each struct type has a name, a list
  * of fields (with offsets and kinds), and a total size. Field kinds
@@ -852,6 +885,7 @@ struct struct_info {
     int  n_fields;
     int  size;        /* total bytes (== n_fields * 4 currently) */
     int  defined;     /* 0 = forward-declared only */
+    int  is_union;    /* session 125 — 1 = union (all fields at offset 0) */
 };
 static struct struct_info g_structs[MAX_STRUCTS];
 static int                g_n_structs;
@@ -959,13 +993,16 @@ static int try_consume_type(int *out_kind, int *out_meta) {
         *out_meta = 0;
         return 1;
     }
-    if (tk == T_STRUCT) {
+    if (tk == T_STRUCT || tk == T_UNION) {
+        /* Session 125 — unions share the LK_STRUCT/LK_STRUCT_PTR kinds.
+         * The is_union flag on the struct_info handles the field-offset
+         * difference; downstream codegen doesn't need to distinguish. */
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag", 0);
+            die_at(tk_cur()->line, "expected struct/union tag", 0);
         int sidx = struct_find(tk_cur()->name);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct", tk_cur()->name);
+            die_at(tk_cur()->line, "undefined struct/union", tk_cur()->name);
         g_tk++;
         *out_kind = accept(T_STAR) ? LK_STRUCT_PTR : LK_STRUCT;
         *out_meta = sidx;
@@ -1014,6 +1051,21 @@ enum {
     N_EXPR_STMT,
     N_FUNC_DECL,
     N_PROGRAM,
+    /* Session 125 — language-corners batch. */
+    N_COMMA,         /* a, b — evaluate a, return b */
+    N_DO_WHILE,      /* do stmt while (cond);  — body in a, cond in b */
+    N_BREAK,         /* break;     — jump to end of enclosing loop/switch */
+    N_CONTINUE,      /* continue;  — jump to top/cond of enclosing loop */
+    N_SIZEOF_NAME,   /* sizeof NAME — folded at codegen when locals are bound */
+    N_LABEL,         /* NAME: stmt — body in n->body */
+    N_GOTO,          /* goto NAME; */
+    N_SWITCH,        /* switch (n->a) n->b — body must be a block */
+    N_CASE,          /* case N: — n->num is the case value */
+    N_DEFAULT,       /* default: */
+    N_INDEX2,        /* NAME[i][j]      — 2D read */
+    N_INDEX2_ASSIGN, /* NAME[i][j] = expr — 2D write (val in n->c) */
+    N_NOP,           /* parse-time no-op (e.g. static locals, after the
+                      * global has been registered and the rename queued) */
 };
 
 struct node {
@@ -1069,8 +1121,34 @@ static void node_push(struct node ***arr, int *n, int *cap, struct node *e) {
 /* ---------- Parser (recursive descent) ---------------------------- */
 
 static struct node *parse_expr(void);
+static struct node *parse_comma_expr(void);
 static struct node *parse_block(void);
 static struct node *parse_stmt(void);
+
+/* Session 125 — `static` LOCAL variable support.
+ *
+ * Inside a function body, `static int x;` (or `static int x = N;`) gives
+ * x persistent storage across calls. Implementation:
+ *
+ *   1. At parse time, mangle x → _sl_<funcname>_<x> and global_declare
+ *      it (with the initializer baked into the data pool if present).
+ *   2. Record a rename entry `x → _sl_funcname_x` in a per-function
+ *      table.
+ *   3. After the body parse completes, walk the body AST and rewrite
+ *      any N_NAME / N_ASSIGN / etc. that references `x` to use the
+ *      mangled name. After the walk, the body looks like ordinary
+ *      global access.
+ *
+ * The rename table is reset at the start of each parse_func. */
+#define MAX_RENAMES_PER_FUNC 16
+struct rename_entry {
+    char from[NAME_MAX];
+    char to[NAME_MAX];        /* mangled name — must fit in NAME_MAX
+                               * since AST node->name is that size */
+};
+static struct rename_entry g_renames[MAX_RENAMES_PER_FUNC];
+static int                 g_n_renames;
+static char                g_cur_parse_fn_name[NAME_MAX];
 
 /* Precedence (higher = tighter). C semantics: */
 static int binop_prec(int t) {
@@ -1101,17 +1179,23 @@ static struct node *parse_primary(void) {
          *   sizeof(char *)         -> 4
          *   sizeof(struct TAG)     -> g_structs[idx].size
          *   sizeof(struct TAG *)   -> 4
-         * No `sizeof EXPR` form yet (would need expression type info). */
+         *
+         * Session 125 — also accept `sizeof NAME` and `sizeof(NAME)`
+         * for scalar / pointer / struct-value variables. Arrays are
+         * deliberately NOT supported (cc doesn't track array length
+         * past the parse-time decl; recovering it would require an
+         * extra field on local_slot/global_info). Use `N * sizeof(int)`
+         * for array byte counts, or a #define for the length. */
         g_tk++;
-        expect(T_LPAREN, "'('");
+        int has_paren = accept(T_LPAREN);
         int sz;
-        if (tk_cur()->kind == T_STRUCT) {
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
-                die_at(tk_cur()->line, "sizeof: expected struct tag", 0);
+                die_at(tk_cur()->line, "sizeof: expected struct/union tag", 0);
             int idx = struct_find(tk_cur()->name);
             if (idx < 0)
-                die_at(tk_cur()->line, "sizeof: unknown struct", tk_cur()->name);
+                die_at(tk_cur()->line, "sizeof: unknown struct/union", tk_cur()->name);
             g_tk++;
             if (accept(T_STAR)) sz = 4;
             else                sz = g_structs[idx].size;
@@ -1123,11 +1207,34 @@ static struct node *parse_primary(void) {
             g_tk++;
             if (accept(T_STAR)) sz = 4;
             else                sz = 1;
+        } else if (tk_cur()->kind == T_NAME) {
+            /* Session 125 — sizeof NAME. typedef-NAMEs resolve at parse
+             * time (the typedef registry is populated during parse);
+             * variable NAMEs defer to codegen via N_SIZEOF_NAME because
+             * the local/global symbol tables aren't populated yet. */
+            int ti = typedef_find(tk_cur()->name);
+            if (ti >= 0) {
+                int kk = g_typedefs[ti].kind;
+                int mm = g_typedefs[ti].meta;
+                g_tk++;
+                (void)accept(T_STAR);
+                if (kk == LK_STRUCT && mm >= 0 && mm < g_n_structs) sz = g_structs[mm].size;
+                else                                                sz = 4;
+            } else {
+                /* Defer to codegen. Build an N_SIZEOF_NAME node. */
+                struct node *n = new_node(N_SIZEOF_NAME);
+                int k = 0;
+                while (tk_cur()->name[k]) { n->name[k] = tk_cur()->name[k]; k++; }
+                n->name[k] = 0;
+                g_tk++;
+                if (has_paren) expect(T_RPAREN, "')'");
+                return n;
+            }
         } else {
-            die_at(tk_cur()->line, "sizeof: expected type", 0);
+            die_at(tk_cur()->line, "sizeof: expected type or NAME", 0);
             sz = 0;
         }
-        expect(T_RPAREN, "')'");
+        if (has_paren) expect(T_RPAREN, "')'");
         struct node *n = new_node(N_NUM);
         n->num = sz;
         return n;
@@ -1189,6 +1296,19 @@ static struct node *parse_primary(void) {
             g_tk++;
             struct node *idx = parse_expr();
             expect(T_RBRACKET, "']'");
+            /* Session 125 — second `[idx]` makes it a 2D access. */
+            if (tk_cur()->kind == T_LBRACKET) {
+                g_tk++;
+                struct node *idx2 = parse_expr();
+                expect(T_RBRACKET, "']'");
+                struct node *ix = new_node(N_INDEX2);
+                int k = 0;
+                while (n->name[k]) { ix->name[k] = n->name[k]; k++; }
+                ix->name[k] = 0;
+                ix->a = idx;
+                ix->b = idx2;
+                return ix;
+            }
             if (tk_cur()->kind == T_DOT) {
                 g_tk++;
                 if (tk_cur()->kind != T_NAME)
@@ -1242,7 +1362,14 @@ static struct node *parse_primary(void) {
         }
         return n;
     }
-    if (t->kind == T_LPAREN) { g_tk++; struct node *e = parse_expr(); expect(T_RPAREN, "')'"); return e; }
+    if (t->kind == T_LPAREN) {
+        /* Session 125 — accept the comma operator inside parens.
+         * `(a, b)` evaluates a then returns b. */
+        g_tk++;
+        struct node *e = parse_comma_expr();
+        expect(T_RPAREN, "')'");
+        return e;
+    }
     if (t->kind == T_MINUS) {
         g_tk++;
         struct node *n = new_node(N_UN);
@@ -1323,8 +1450,7 @@ static struct node *parse_binop_rhs(int min_prec, struct node *lhs) {
 static struct node *parse_expr(void) {
     struct node *lhs = parse_binop_rhs(1, parse_primary());
     /* Session 96 — ternary `c ? a : b` lives at the lowest precedence
-     * above assignment. We don't have assignment-as-expression, so
-     * this is effectively the lowest precedence in cc. */
+     * above assignment. */
     if (tk_cur()->kind == T_QUESTION) {
         g_tk++;
         struct node *t = parse_expr();
@@ -1336,7 +1462,45 @@ static struct node *parse_expr(void) {
         n->c = e;
         return n;
     }
+    /* Session 125 — assignment as expression. `NAME = rhs` returns the
+     * stored value, so `if ((x = f()))` and `a = b = c` both work.
+     * Right-associative via the recursive parse_expr on the RHS. LHS
+     * must be a plain NAME — `*p = ...`, `a[i] = ...`, and field
+     * stores stay statement-only. */
+    if (lhs && lhs->kind == N_NAME && tk_cur()->kind == T_ASSIGN) {
+        g_tk++;
+        struct node *rhs = parse_expr();
+        struct node *n = new_node(N_ASSIGN);
+        int i = 0;
+        while (lhs->name[i]) { n->name[i] = lhs->name[i]; i++; }
+        n->name[i] = 0;
+        n->a = rhs;
+        return n;
+    }
     return lhs;
+}
+
+/* Session 125 — top-level comma-chained expression.
+ *
+ * The C comma operator has the lowest precedence: `a, b, c` evaluates
+ * each in turn and returns the last. We can't fold comma into
+ * parse_expr because parse_expr is *also* called inside argument
+ * lists, where comma is the argument separator (not the operator).
+ *
+ * parse_comma_expr is used in statement-level contexts and inside
+ * parenthesized sub-expressions — anywhere the inner comma is
+ * unambiguously the operator. */
+static struct node *parse_comma_expr(void) {
+    struct node *e = parse_expr();
+    while (tk_cur()->kind == T_COMMA) {
+        g_tk++;
+        struct node *rhs = parse_expr();
+        struct node *n = new_node(N_COMMA);
+        n->a = e;
+        n->b = rhs;
+        e = n;
+    }
+    return e;
 }
 
 static struct node *parse_block(void) {
@@ -1391,10 +1555,10 @@ static struct node *parse_stmt(void) {
      *   struct TAG *NAME;       a pointer to a struct
      *   struct TAG NAME[N];     array of N struct values     (s102)
      *   No initializer support (would need brace-init parsing). */
-    if (t == T_STRUCT) {
+    if (t == T_STRUCT || t == T_UNION) {
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag", 0);
+            die_at(tk_cur()->line, "expected struct/union tag", 0);
         char tag[NAME_MAX];
         int ti = 0;
         while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
@@ -1402,7 +1566,7 @@ static struct node *parse_stmt(void) {
         g_tk++;
         int sidx = struct_find(tag);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct", tag);
+            die_at(tk_cur()->line, "undefined struct/union", tag);
         int is_ptr = accept(T_STAR);
         if (tk_cur()->kind != T_NAME)
             die_at(tk_cur()->line, "expected variable name", 0);
@@ -1457,7 +1621,9 @@ static struct node *parse_stmt(void) {
         nm[i] = 0;
         g_tk++;
         if (accept(T_LBRACKET)) {
-            /* Array declaration. */
+            /* Array declaration. Session 125 — also accept a second
+             * `[M]` for 2D arrays: `int a[N][M];`. The inner dim M is
+             * stored in n->n_list. 1D arrays leave it at 0. */
             if (is_ptr) die_at(tk_cur()->line, "ptr-to-array not supported", 0);
             if (tk_cur()->kind != T_NUM)
                 die_at(tk_cur()->line, "array size must be an integer literal", 0);
@@ -1465,11 +1631,24 @@ static struct node *parse_stmt(void) {
             if (sz <= 0) die_at(tk_cur()->line, "array size must be positive", 0);
             g_tk++;
             expect(T_RBRACKET, "']'");
+            int dim2 = 0;
+            if (accept(T_LBRACKET)) {
+                if (tk_cur()->kind != T_NUM)
+                    die_at(tk_cur()->line, "inner array size must be integer literal", 0);
+                dim2 = tk_cur()->num;
+                if (dim2 <= 0) die_at(tk_cur()->line, "inner array size must be positive", 0);
+                g_tk++;
+                expect(T_RBRACKET, "']'");
+            }
             expect(T_SEMI, "';'");
             struct node *n = new_node(N_ARR_DECL);
             for (int j = 0; j <= i; j++) n->name[j] = nm[j];
-            n->num = sz;
-            n->op  = is_char ? LK_CHAR_ARR : LK_INT_ARR;
+            n->num      = sz;
+            n->ret_meta = dim2;     /* session 125 — inner-dim count or 0 for 1D.
+                                     * Stored on ret_meta (rather than n_list)
+                                     * because list-iterating AST walkers would
+                                     * deref NULL n->list when n_list > 0. */
+            n->op       = is_char ? LK_CHAR_ARR : LK_INT_ARR;
             return n;
         }
         struct node *n = new_node(N_VAR_DECL);
@@ -1505,6 +1684,154 @@ static struct node *parse_stmt(void) {
         n->b = parse_stmt();
         return n;
     }
+    /* Session 125 — `static <type> x [= N];` LOCAL variable. Gets
+     * persistent storage as a mangled global; references to `x`
+     * within this function are rewritten to the mangled name at
+     * end-of-body. */
+    if (t == T_STATIC) {
+        g_tk++;
+        int is_char;
+        if (tk_cur()->kind == T_INT)       is_char = 0;
+        else if (tk_cur()->kind == T_CHAR) is_char = 1;
+        else die_at(tk_cur()->line, "static local: only int/char supported", 0);
+        g_tk++;
+        int is_ptr = accept(T_STAR);
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "static local: expected name", 0);
+        char varname[NAME_MAX];
+        int vi = 0;
+        while (tk_cur()->name[vi] && vi < NAME_MAX - 1) {
+            varname[vi] = tk_cur()->name[vi]; vi++;
+        }
+        varname[vi] = 0;
+        g_tk++;
+        /* Build mangled name. NAME_MAX is 24; concat may truncate
+         * for long names — we just clamp. */
+        char mangled[NAME_MAX];
+        int mi = 0;
+        const char *pfx = "_sl_";
+        for (int j = 0; pfx[j] && mi < NAME_MAX - 1; j++) mangled[mi++] = pfx[j];
+        for (int j = 0; g_cur_parse_fn_name[j] && mi < NAME_MAX - 1; j++)
+            mangled[mi++] = g_cur_parse_fn_name[j];
+        if (mi < NAME_MAX - 1) mangled[mi++] = '_';
+        for (int j = 0; varname[j] && mi < NAME_MAX - 1; j++)
+            mangled[mi++] = varname[j];
+        mangled[mi] = 0;
+        /* Declare the backing global. */
+        int kind = is_ptr ? (is_char ? LK_CHAR_PTR : LK_INT_PTR) : LK_INT;
+        int gi = global_declare(mangled, 4, kind);
+        /* Optional `= N` initializer. */
+        if (accept(T_ASSIGN)) {
+            int neg = 0;
+            if (accept(T_MINUS)) neg = 1;
+            if (tk_cur()->kind != T_NUM)
+                die_at(tk_cur()->line, "static init must be integer literal", 0);
+            int v = tk_cur()->num;
+            if (neg) v = -v;
+            g_tk++;
+            int off = g_globals[gi].offset;
+            g_data_pool[off + 0] = (unsigned char)(v & 0xff);
+            g_data_pool[off + 1] = (unsigned char)((v >>  8) & 0xff);
+            g_data_pool[off + 2] = (unsigned char)((v >> 16) & 0xff);
+            g_data_pool[off + 3] = (unsigned char)((v >> 24) & 0xff);
+        }
+        expect(T_SEMI, "';'");
+        /* Record the rename so end-of-body walk rewrites references. */
+        if (g_n_renames >= MAX_RENAMES_PER_FUNC)
+            die_at(tk_cur()->line, "too many static locals in function", 0);
+        int ri = g_n_renames++;
+        for (int j = 0; j <= vi; j++)  g_renames[ri].from[j] = varname[j];
+        for (int j = 0; j <= mi; j++)  g_renames[ri].to[j]   = mangled[j];
+        return new_node(N_NOP);
+    }
+    /* Session 125 — break/continue statements. The codegen enforces
+     * "must be inside a loop"; parser just builds the node. */
+    if (t == T_BREAK) {
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return new_node(N_BREAK);
+    }
+    if (t == T_CONTINUE) {
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return new_node(N_CONTINUE);
+    }
+    /* Session 125 — goto NAME; */
+    if (t == T_GOTO) {
+        g_tk++;
+        if (tk_cur()->kind != T_NAME)
+            die_at(tk_cur()->line, "expected label name after goto", 0);
+        struct node *n = new_node(N_GOTO);
+        int i = 0;
+        while (tk_cur()->name[i]) { n->name[i] = tk_cur()->name[i]; i++; }
+        n->name[i] = 0;
+        g_tk++;
+        expect(T_SEMI, "';'");
+        return n;
+    }
+    /* Session 125 — labeled statement: `NAME: stmt`. The label is
+     * resolved per-function in the goto-fixup table. */
+    if (t == T_NAME && tk_peek(1)->kind == T_COLON) {
+        char nm[NAME_MAX];
+        int i = 0;
+        while (tk_cur()->name[i]) { nm[i] = tk_cur()->name[i]; i++; }
+        nm[i] = 0;
+        g_tk++;   /* consume NAME */
+        g_tk++;   /* consume : */
+        struct node *n = new_node(N_LABEL);
+        for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+        n->body = parse_stmt();
+        return n;
+    }
+    /* Session 125 — switch (expr) stmt.  Body is typically a block of
+     * `case N:`, `default:`, and regular statements. */
+    if (t == T_SWITCH) {
+        g_tk++;
+        expect(T_LPAREN, "'('");
+        struct node *e = parse_comma_expr();
+        expect(T_RPAREN, "')'");
+        struct node *body = parse_stmt();
+        struct node *n = new_node(N_SWITCH);
+        n->a = e;
+        n->b = body;
+        return n;
+    }
+    /* Session 125 — case N: — only integer-literal values supported
+     * (cc has no parse-time constant folding for arithmetic in this
+     * branch). For `case -N:` accept a leading minus. */
+    if (t == T_CASE) {
+        g_tk++;
+        int neg = 0;
+        if (accept(T_MINUS)) neg = 1;
+        if (tk_cur()->kind != T_NUM)
+            die_at(tk_cur()->line, "case value must be integer literal", 0);
+        int v = tk_cur()->num;
+        if (neg) v = -v;
+        g_tk++;
+        expect(T_COLON, "':' after case value");
+        struct node *n = new_node(N_CASE);
+        n->num = v;
+        return n;
+    }
+    if (t == T_DEFAULT) {
+        g_tk++;
+        expect(T_COLON, "':' after default");
+        return new_node(N_DEFAULT);
+    }
+    /* Session 125 — `do stmt while (cond);`. Body in n->a, cond in n->b. */
+    if (t == T_DO) {
+        g_tk++;
+        struct node *n = new_node(N_DO_WHILE);
+        n->a = parse_stmt();
+        if (tk_cur()->kind != T_WHILE)
+            die_at(tk_cur()->line, "expected 'while' after do-body", 0);
+        g_tk++;
+        expect(T_LPAREN, "'('");
+        n->b = parse_expr();
+        expect(T_RPAREN, "')'");
+        expect(T_SEMI, "';'");
+        return n;
+    }
     if (t == T_LBRACE) return parse_block();
     /* Expression-stmt or assignment.
      * `NAME = expr;`  or  `expr;`
@@ -1518,6 +1845,13 @@ static struct node *parse_stmt(void) {
         else if (nx == T_STAR_EQ)    op = T_STAR;
         else if (nx == T_SLASH_EQ)   op = T_SLASH;
         else if (nx == T_PERCENT_EQ) op = T_PERCENT;
+        /* Session 125 — bitwise / shift compound assigns. Same
+         * rewrite trick as session 96. */
+        else if (nx == T_AMP_EQ)     op = T_AMP;
+        else if (nx == T_PIPE_EQ)    op = T_PIPE;
+        else if (nx == T_CARET_EQ)   op = T_CARET;
+        else if (nx == T_LSHIFT_EQ)  op = T_LSHIFT;
+        else if (nx == T_RSHIFT_EQ)  op = T_RSHIFT;
         if (op) {
             /* Session 96 — rewrite `x op= expr` as `x = x op expr` so
              * we don't need a separate codegen path. Safe because
@@ -1588,6 +1922,21 @@ static struct node *parse_stmt(void) {
         g_tk++;       /* skip '[' */
         struct node *idx = parse_expr();
         expect(T_RBRACKET, "']'");
+        /* Session 125 — `NAME[i][j] = expr;` 2D store. */
+        if (tk_cur()->kind == T_LBRACKET) {
+            g_tk++;
+            struct node *idx2 = parse_expr();
+            expect(T_RBRACKET, "']'");
+            expect(T_ASSIGN, "'='");
+            struct node *val = parse_expr();
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_INDEX2_ASSIGN);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->a = idx;
+            n->b = idx2;
+            n->c = val;
+            return n;
+        }
         if (tk_cur()->kind == T_DOT) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
@@ -1634,7 +1983,9 @@ static struct node *parse_stmt(void) {
         expect(T_SEMI, "';'");
         return n;
     }
-    struct node *e = parse_expr();
+    /* Session 125 — comma-expressions are allowed as statement
+     * expressions (e.g. `(a = 1, b = 2);` evaluates both). */
+    struct node *e = parse_comma_expr();
     expect(T_SEMI, "';'");
     struct node *es = new_node(N_EXPR_STMT);
     es->a = e;
@@ -1662,13 +2013,13 @@ static void parse_return_type(int *out_kind, int *out_meta) {
         }
         return;
     }
-    if (tk_cur()->kind == T_STRUCT) {
+    if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
         g_tk++;
         if (tk_cur()->kind != T_NAME)
-            die_at(tk_cur()->line, "expected struct tag in return type", 0);
+            die_at(tk_cur()->line, "expected struct/union tag in return type", 0);
         int sidx = struct_find(tk_cur()->name);
         if (sidx < 0)
-            die_at(tk_cur()->line, "undefined struct in return type", tk_cur()->name);
+            die_at(tk_cur()->line, "undefined struct/union in return type", tk_cur()->name);
         g_tk++;
         if (accept(T_STAR)) {
             *out_kind = LK_STRUCT_PTR;
@@ -1709,10 +2060,10 @@ static void parse_param_list(struct node *fn) {
         int kind, struct_idx = 0;
         /* Session 97/106 — `struct T *p` (pointer) or `struct T p`
          * (by-value) parameter. */
-        if (tk_cur()->kind == T_STRUCT) {
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
-                die_at(tk_cur()->line, "expected struct tag in param", 0);
+                die_at(tk_cur()->line, "expected struct/union tag in param", 0);
             char tag[NAME_MAX];
             int x = 0;
             while (tk_cur()->name[x]) { tag[x] = tk_cur()->name[x]; x++; }
@@ -1720,7 +2071,7 @@ static void parse_param_list(struct node *fn) {
             g_tk++;
             struct_idx = struct_find(tag);
             if (struct_idx < 0)
-                die_at(tk_cur()->line, "undefined struct in param", tag);
+                die_at(tk_cur()->line, "undefined struct/union in param", tag);
             int is_ptr = accept(T_STAR);
             kind = is_ptr ? LK_STRUCT_PTR : LK_STRUCT;
         } else if (tk_cur()->kind == T_INT || tk_cur()->kind == T_CHAR) {
@@ -1778,6 +2129,30 @@ static void parse_param_list(struct node *fn) {
     expect(T_RPAREN, "')'");
 }
 
+static void rewrite_names_in_ast(struct node *n) {
+    if (!n) return;
+    if (n->name[0]) {
+        for (int i = 0; i < g_n_renames; i++) {
+            if (my_streq(n->name, g_renames[i].from)) {
+                int j = 0;
+                while (g_renames[i].to[j] && j < NAME_MAX - 1) {
+                    n->name[j] = g_renames[i].to[j]; j++;
+                }
+                n->name[j] = 0;
+                break;
+            }
+        }
+    }
+    rewrite_names_in_ast(n->a);
+    rewrite_names_in_ast(n->b);
+    rewrite_names_in_ast(n->c);
+    rewrite_names_in_ast(n->body);
+    if (n->list) {
+        for (int i = 0; i < n->n_list; i++) rewrite_names_in_ast(n->list[i]);
+    }
+    for (int i = 0; i < n->n_params; i++) rewrite_names_in_ast(n->params[i]);
+}
+
 static struct node *parse_func(void) {
     /* Return type — int/char (with optional *), struct TAG (with optional
      * *), or a typedef name. Session 121 — `struct T NAME(...)` is a
@@ -1791,9 +2166,17 @@ static struct node *parse_func(void) {
     fn->name[i] = 0;
     fn->ret_kind = ret_kind;
     fn->ret_meta = ret_meta;
+    /* Session 125 — set up per-function static-rename context. */
+    int k = 0;
+    while (fn->name[k]) { g_cur_parse_fn_name[k] = fn->name[k]; k++; }
+    g_cur_parse_fn_name[k] = 0;
+    g_n_renames = 0;
     g_tk++;
     parse_param_list(fn);
     fn->body = parse_block();
+    /* Session 125 — apply any static-local renames so the body refers
+     * to the mangled globals. */
+    if (g_n_renames > 0) rewrite_names_in_ast(fn->body);
     return fn;
 }
 
@@ -1917,11 +2300,26 @@ static void parse_global_decl(void) {
 
 /* Session 97 — parse `struct TAG { int field; ... };` or `struct TAG NAME;`
  * at file scope. Disambiguates by peeking past `struct TAG` to look for
- * a brace. */
+ * a brace.
+ *
+ * Session 125 — also handles `union TAG { ... };` / `union TAG NAME;`.
+ * Internally a union is just a struct_info with `is_union=1`, all field
+ * offsets stamped at 0, and size = max(field sizes) — since every cc
+ * field is 4 bytes that's just 4. The existing field-access codegen
+ * works without modification: u.field becomes
+ * `mov eax, [ebp + off + 0]` and writes to the same memory slot for
+ * every field. */
 static void parse_struct_top(void) {
-    expect(T_STRUCT, "'struct'");
+    int is_union;
+    if (tk_cur()->kind == T_UNION) {
+        is_union = 1;
+        g_tk++;
+    } else {
+        expect(T_STRUCT, "'struct' or 'union'");
+        is_union = 0;
+    }
     if (tk_cur()->kind != T_NAME)
-        die_at(tk_cur()->line, "expected struct tag name", 0);
+        die_at(tk_cur()->line, "expected struct/union tag name", 0);
     char tag[NAME_MAX];
     int ti = 0;
     while (tk_cur()->name[ti]) { tag[ti] = tk_cur()->name[ti]; ti++; }
@@ -1941,9 +2339,11 @@ static void parse_struct_top(void) {
             g_structs[sidx].n_fields = 0;
             g_structs[sidx].size = 0;
             g_structs[sidx].defined = 0;
+            g_structs[sidx].is_union = is_union;
         }
         if (g_structs[sidx].defined)
-            die_at(tk_cur()->line, "struct redefined", tag);
+            die_at(tk_cur()->line, "struct/union redefined", tag);
+        g_structs[sidx].is_union = is_union;
 
         int field_off = 0;
         while (tk_cur()->kind != T_RBRACE) {
@@ -1951,10 +2351,10 @@ static void parse_struct_top(void) {
              * struct OTHER *NAME;   — last is for linked-list-style. */
             int field_kind;
             int field_meta = 0;
-            if (tk_cur()->kind == T_STRUCT) {
+            if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
                 g_tk++;
                 if (tk_cur()->kind != T_NAME)
-                    die_at(tk_cur()->line, "field: expected struct tag", 0);
+                    die_at(tk_cur()->line, "field: expected struct/union tag", 0);
                 char inner_tag[NAME_MAX];
                 int k = 0;
                 while (tk_cur()->name[k]) { inner_tag[k] = tk_cur()->name[k]; k++; }
@@ -1995,18 +2395,22 @@ static void parse_struct_top(void) {
                 g_structs[sidx].fields[fi].name[k] = tk_cur()->name[k]; k++;
             }
             g_structs[sidx].fields[fi].name[k] = 0;
-            g_structs[sidx].fields[fi].offset = field_off;
-            g_structs[sidx].fields[fi].size   = 4;  /* every field is 4-byte */
+            /* Session 125 — union: every field shares offset 0. struct:
+             * offsets march by 4 (field_off advances after each). */
+            g_structs[sidx].fields[fi].offset = is_union ? 0 : field_off;
+            g_structs[sidx].fields[fi].size   = 4;
             g_structs[sidx].fields[fi].kind   = field_kind;
             g_structs[sidx].fields[fi].meta   = field_meta;
             g_structs[sidx].n_fields++;
-            field_off += 4;
+            if (!is_union) field_off += 4;
             g_tk++;
             expect(T_SEMI, "';'");
         }
         expect(T_RBRACE, "'}'");
         expect(T_SEMI, "';'");
-        g_structs[sidx].size    = field_off;
+        /* Session 125 — for unions, size is max(field sizes). Since
+         * every cc field is 4 bytes that's just 4. */
+        g_structs[sidx].size    = is_union ? (g_structs[sidx].n_fields ? 4 : 0) : field_off;
         g_structs[sidx].defined = 1;
         return;
     }
@@ -2158,8 +2562,8 @@ static struct node *parse_program(void) {
          *
          * Distinguish by peeking past the optional `*` and the var/func
          * name. */
-        if (tk_cur()->kind == T_STRUCT) {
-            /* tk_peek(0)=struct, tk_peek(1)=TAG. */
+        if (tk_cur()->kind == T_STRUCT || tk_cur()->kind == T_UNION) {
+            /* tk_peek(0)=struct/union, tk_peek(1)=TAG. */
             if (tk_peek(2)->kind == T_LBRACE) {
                 /* Definition. */
                 parse_struct_top();
@@ -2168,7 +2572,7 @@ static struct node *parse_program(void) {
             int peek = 2;
             if (tk_peek(peek)->kind == T_STAR) peek++;
             if (tk_peek(peek)->kind != T_NAME)
-                die_at(tk_peek(peek)->line, "expected name after struct TAG", 0);
+                die_at(tk_peek(peek)->line, "expected name after struct/union TAG", 0);
             peek++;
             if (tk_peek(peek)->kind == T_LPAREN) {
                 /* Struct-returning function. parse_func handles the
@@ -2616,6 +3020,8 @@ struct local_slot {
     int  ebp_off;       /* negative offset from EBP */
     int  kind;          /* LK_* — session 92 */
     int  meta;          /* struct_idx for LK_STRUCT/LK_STRUCT_PTR (s97) */
+    int  dim2;          /* session 125 — inner dim for 2D arrays
+                         * (M in `int a[N][M]`); 0 for 1D / non-array */
 };
 static struct local_slot g_locals[MAX_LOCALS];
 static int               g_n_locals;
@@ -2774,6 +3180,7 @@ static int local_declare_sized(const char *name, int size, int kind) {
     g_locals[g_n_locals].ebp_off = off;
     g_locals[g_n_locals].kind    = kind;
     g_locals[g_n_locals].meta    = 0;
+    g_locals[g_n_locals].dim2    = 0;     /* session 125 — set later for 2D arrays */
     g_n_locals++;
     return off;
 }
@@ -3614,6 +4021,59 @@ static void gen_expr(struct node *n) {
             }
             return;
         }
+        case N_INDEX2: {
+            /* Session 125 — `NAME[i][j]` 2D array read.
+             *
+             *   addr = &NAME[0][0] + (i * M + j) * elem
+             *
+             * Where M is the inner dimension stored on the local_slot
+             * at decl time (or as g_globals[gi].meta for globals — not
+             * yet supported for globals).
+             *
+             *   eax := i
+             *   ebx := M (constant) → eax := i*M (imul)
+             *   push eax
+             *   eax := j
+             *   eax += stacked (i*M)
+             *   ebx := elem; eax := eax * elem
+             *   ebx := base addr; eax += ebx
+             *   eax := *eax */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "2D index requires a local array", n->name);
+            int kk = local_kind(n->name);
+            if (kk != LK_INT_ARR && kk != LK_CHAR_ARR)
+                die_at(n->line, "NAME[i][j] requires a 1D-decl[..][..] array", n->name);
+            /* Find dim2 directly from g_locals (local_meta is for struct meta). */
+            int M = 0;
+            for (int i = g_n_locals - 1; i >= 0; i--) {
+                if (my_streq(g_locals[i].name, n->name)) { M = g_locals[i].dim2; break; }
+            }
+            if (M <= 0) die_at(n->line, "NAME[i][j] requires `int NAME[N][M]` decl", n->name);
+            int elem = (kk == LK_CHAR_ARR) ? 1 : 4;
+            /* i*M */
+            gen_expr(n->a);
+            e_mov_ebx_imm(M);
+            e_imul_eax_ebx();
+            e_push_eax();
+            /* j */
+            gen_expr(n->b);
+            e_pop_ebx();             /* ebx = i*M */
+            e_add_eax_ebx();         /* eax = i*M + j */
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else if (elem != 1) {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            /* base addr */
+            e_push_eax();
+            e_lea_eax_ebp(off);      /* eax = base */
+            e_pop_ebx();             /* ebx = offset */
+            e_add_eax_ebx();         /* eax = base + offset */
+            if (elem == 1) e_loadb_eax_at_eax();
+            else           e_load_eax_at_eax();
+            return;
+        }
         case N_INDEX_MEMBER: {
             /* Session 102 — `NAME[idx].field` for struct arrays.
              *   address-of-element = base_va + idx * struct.size
@@ -3721,6 +4181,46 @@ static void gen_expr(struct node *n) {
             patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
             gen_expr(n->c);
             patch_d(jend, (unsigned)(g_code_len - (jend + 4)));
+            return;
+        }
+        case N_COMMA: {
+            /* Session 125 — `a, b` evaluates a (discarding the result)
+             * then evaluates b. The whole expression's value is b. */
+            gen_expr(n->a);   /* side-effects only; result in eax discarded */
+            gen_expr(n->b);   /* result stays in eax */
+            return;
+        }
+        case N_ASSIGN: {
+            /* Session 125 — assignment as an expression. Reuse the
+             * statement-level codegen; the scalar paths leave the
+             * stored value in eax (struct-assign paths don't, but
+             * struct-as-expression isn't supported anyway). */
+            gen_stmt(n);
+            return;
+        }
+        case N_SIZEOF_NAME: {
+            /* Session 125 — sizeof NAME, resolved at codegen because
+             * the locals/globals symbol tables aren't populated until
+             * gen_func runs. */
+            int sz;
+            int off = local_find(n->name);
+            int kk, mm;
+            if (off != 0) {
+                kk = local_kind(n->name);
+                mm = local_meta(n->name);
+            } else {
+                int gi = global_find(n->name);
+                if (gi < 0) die_at(n->line, "sizeof: unknown name", n->name);
+                kk = g_globals[gi].kind;
+                mm = g_globals[gi].meta;
+            }
+            if (kk == LK_STRUCT && mm >= 0 && mm < g_n_structs)
+                sz = g_structs[mm].size;
+            else if (kind_is_array(kk))
+                die_at(n->line, "sizeof of array variable not supported (use N * sizeof(elem))", 0);
+            else
+                sz = 4;
+            e_mov_eax_imm(sz);
             return;
         }
         case N_UN: {
@@ -3870,6 +4370,96 @@ static void gen_expr(struct node *n) {
     die_at(n->line, "unsupported expr kind", 0);
 }
 
+/* Session 125 — goto / label table. Per-function: reset at the top of
+ * gen_func, resolved at the bottom. Forward and backward gotos both
+ * use the fixup list (we don't know which until end of function).
+ *
+ * Labels live in the same flat namespace as variable names — that's
+ * standard C: a label can shadow a function-scope name. cc doesn't
+ * try to be strict about this; if your label collides with a typedef
+ * or function name, the goto codegen will use the label and the rest
+ * of the program won't notice. */
+#define MAX_LABELS_PER_FUNC 32
+#define MAX_GOTOS_PER_FUNC  64
+struct label_info {
+    char name[NAME_MAX];
+    int  code_off;   /* -1 if declared but not yet defined */
+};
+struct goto_fixup {
+    char name[NAME_MAX];
+    int  jmp_disp_off;
+    int  line;
+};
+static struct label_info g_labels[MAX_LABELS_PER_FUNC];
+static int               g_n_labels;
+static struct goto_fixup g_gotos[MAX_GOTOS_PER_FUNC];
+static int               g_n_gotos;
+
+static int label_find_or_add(const char *name) {
+    for (int i = 0; i < g_n_labels; i++)
+        if (my_streq(g_labels[i].name, name)) return i;
+    if (g_n_labels >= MAX_LABELS_PER_FUNC) die("too many labels in function");
+    int idx = g_n_labels++;
+    int j = 0;
+    while (name[j] && j < NAME_MAX - 1) { g_labels[idx].name[j] = name[j]; j++; }
+    g_labels[idx].name[j] = 0;
+    g_labels[idx].code_off = -1;
+    return idx;
+}
+
+/* Session 125 — loop context stack for break/continue codegen.
+ *
+ * Each enclosing while/do-while/for/switch pushes a loop_ctx so
+ * break/continue inside the body can record patch-later jump
+ * placeholders. Break is always a forward jump (to after the loop);
+ * continue is a backward jump for while (to top) or a forward jump
+ * for do-while (to the cond eval at the bottom).
+ *
+ * Switch (added in feature 9/11) uses break too — N_SWITCH pushes
+ * a loop ctx with cont_target_known = 0 so continue can't be used
+ * inside a bare switch (matches C semantics). */
+#define MAX_LOOP_CTX        16
+#define MAX_BREAKS_PER_LOOP 32
+struct loop_ctx {
+    int  break_jmps[MAX_BREAKS_PER_LOOP];
+    int  n_break_jmps;
+    int  cont_jmps[MAX_BREAKS_PER_LOOP];
+    int  n_cont_jmps;
+    int  cont_target;            /* absolute code_off; -1 if not yet known */
+    int  is_switch;              /* 1 = switch, 0 = real loop. switch only handles break. */
+};
+static struct loop_ctx g_loop_ctx[MAX_LOOP_CTX];
+static int             g_n_loop_ctx;
+
+static struct loop_ctx *loop_push(int cont_target, int is_switch) {
+    if (g_n_loop_ctx >= MAX_LOOP_CTX) die("loop nesting too deep");
+    struct loop_ctx *c = &g_loop_ctx[g_n_loop_ctx++];
+    c->n_break_jmps  = 0;
+    c->n_cont_jmps   = 0;
+    c->cont_target   = cont_target;
+    c->is_switch     = is_switch;
+    return c;
+}
+
+static void loop_pop(void) {
+    if (g_n_loop_ctx <= 0) die("loop_pop with empty stack");
+    g_n_loop_ctx--;
+}
+
+static struct loop_ctx *loop_top(void) {
+    return g_n_loop_ctx > 0 ? &g_loop_ctx[g_n_loop_ctx - 1] : 0;
+}
+
+/* Find the nearest enclosing loop_ctx that accepts continue. switch
+ * frames are skipped (continue inside `switch (...) { while (...) ...
+ * continue; ... }` belongs to the while, not the switch). */
+static struct loop_ctx *loop_top_for_continue(void) {
+    for (int i = g_n_loop_ctx - 1; i >= 0; i--) {
+        if (!g_loop_ctx[i].is_switch) return &g_loop_ctx[i];
+    }
+    return 0;
+}
+
 static void gen_stmt(struct node *n) {
     if (!n) return;
     switch (n->kind) {
@@ -3903,17 +4493,19 @@ static void gen_stmt(struct node *n) {
         case N_ARR_DECL: {
             /* Session 92 — `TYPE NAME[N];`. Reserve elem_size * N
              * bytes; the local's ebp_off points to the LOW byte of
-             * the array (lowest address = element 0). */
+             * the array (lowest address = element 0).
+             *
+             * Session 125 — also handles `TYPE NAME[N][M];` (2D). The
+             * inner dim M is in n->ret_meta; if non-zero, total bytes
+             * is N * M * elem_size, and dim2 is recorded on the
+             * local_slot so N_INDEX2 can compute (i * M + j) * elem. */
             int kind = n->op;     /* LK_INT_ARR or LK_CHAR_ARR */
             int elem = (kind == LK_CHAR_ARR) ? 1 : 4;
-            int bytes = elem * n->num;
+            int M    = n->ret_meta;
+            int n_elements = (M > 0) ? (n->num * M) : n->num;
+            int bytes = elem * n_elements;
             local_declare_sized(n->name, bytes, kind);
-            /* Adjust ebp_off so a[0] is at [ebp + base]. local_declare_sized
-             * gave us off = -padded_bytes. Array element 0 lives at
-             * [ebp + off] (lowest address of the padded block — that's
-             * the highest -ve offset). The padded block grows toward
-             * more-negative addresses, so element i is at
-             * [ebp + off + i * elem]. */
+            if (M > 0) g_locals[g_n_locals - 1].dim2 = M;
             return;
         }
         case N_STRUCT_DECL: {
@@ -4171,6 +4763,49 @@ static void gen_stmt(struct node *n) {
             e_store_eax_at_ebx();
             return;
         }
+        case N_INDEX2_ASSIGN: {
+            /* Session 125 — `NAME[i][j] = expr;` 2D store. Mirrors the
+             * N_INDEX2 read path: compute (i*M + j)*elem + base, then
+             * store EAX at that address. Value is in n->c. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "2D store requires a local array", n->name);
+            int kk = local_kind(n->name);
+            if (kk != LK_INT_ARR && kk != LK_CHAR_ARR)
+                die_at(n->line, "NAME[i][j]= requires a 2D array", n->name);
+            int M = 0;
+            for (int i = g_n_locals - 1; i >= 0; i--) {
+                if (my_streq(g_locals[i].name, n->name)) { M = g_locals[i].dim2; break; }
+            }
+            if (M <= 0) die_at(n->line, "NAME[i][j]= requires 2D decl", n->name);
+            int elem = (kk == LK_CHAR_ARR) ? 1 : 4;
+            /* val → eax → push */
+            gen_expr(n->c);
+            e_push_eax();
+            /* i*M */
+            gen_expr(n->a);
+            e_mov_ebx_imm(M);
+            e_imul_eax_ebx();
+            e_push_eax();
+            /* j */
+            gen_expr(n->b);
+            e_pop_ebx();
+            e_add_eax_ebx();            /* eax = i*M + j */
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else if (elem != 1) {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            e_push_eax();
+            e_lea_eax_ebp(off);         /* eax = base */
+            e_pop_ebx();                /* ebx = offset */
+            e_add_eax_ebx();            /* eax = addr */
+            e_mov_ebx_eax();            /* ebx = addr */
+            e_pop_eax();                /* eax = val */
+            if (elem == 1) e_storeb_al_at_ebx();
+            else           e_store_eax_at_ebx();
+            return;
+        }
         case N_INDEX_MEMBER_ASSIGN: {
             /* Session 102 — `NAME[i].field = expr;` for struct arrays. */
             int off = local_find(n->name);
@@ -4345,14 +4980,222 @@ static void gen_stmt(struct node *n) {
             gen_expr(n->a);
             e_test_eax_eax();
             int jz = e_jz_rel32();
+            /* Session 125 — push loop ctx so break/continue inside the
+             * body find the right targets. Continue jumps back to
+             * `top` (cond eval). Break jumps forward to the end. */
+            struct loop_ctx *lc = loop_push(top, 0);
             gen_stmt(n->b);
+            /* Patch any continue jumps to the top (cond eval). */
+            for (int i = 0; i < lc->n_cont_jmps; i++)
+                patch_d(lc->cont_jmps[i], (unsigned)(top - (lc->cont_jmps[i] + 4)));
             int jback = e_jmp_rel32();
             patch_d(jback, (unsigned)(top - (jback + 4)));
             patch_d(jz, (unsigned)(g_code_len - (jz + 4)));
+            /* Patch break jumps to the end of the loop. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i], (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
+            return;
+        }
+        case N_DO_WHILE: {
+            /* Session 125 — `do { body } while (cond);` runs the body
+             * at least once, then loops back if the condition is true.
+             * Body in n->a, cond in n->b.
+             *
+             *   top:
+             *     body
+             *     cond_eval:        <- continue lands here
+             *       cond → eax
+             *       test eax, eax
+             *       jnz top
+             *     end:              <- break lands here
+             *
+             * cont_target is initially -1; patched to cond_eval after
+             * body emit. */
+            int top = g_code_len;
+            struct loop_ctx *lc = loop_push(-1, 0);
+            gen_stmt(n->a);
+            int cond_pos = g_code_len;
+            /* Patch continue jumps to point at cond eval. */
+            for (int i = 0; i < lc->n_cont_jmps; i++)
+                patch_d(lc->cont_jmps[i], (unsigned)(cond_pos - (lc->cont_jmps[i] + 4)));
+            gen_expr(n->b);
+            e_test_eax_eax();
+            int jnz = e_jnz_rel32();
+            patch_d(jnz, (unsigned)(top - (jnz + 4)));
+            /* Patch break jumps to end. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i], (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
+            return;
+        }
+        case N_BREAK: {
+            /* Find nearest enclosing loop or switch. */
+            struct loop_ctx *lc = loop_top();
+            if (!lc) die_at(n->line, "break outside loop/switch", 0);
+            if (lc->n_break_jmps >= MAX_BREAKS_PER_LOOP)
+                die_at(n->line, "too many breaks in one loop", 0);
+            int jb = e_jmp_rel32();
+            lc->break_jmps[lc->n_break_jmps++] = jb;
+            return;
+        }
+        case N_LABEL: {
+            /* Session 125 — record label position then emit body. */
+            int li = label_find_or_add(n->name);
+            if (g_labels[li].code_off >= 0)
+                die_at(n->line, "duplicate label", n->name);
+            g_labels[li].code_off = g_code_len;
+            gen_stmt(n->body);
+            return;
+        }
+        case N_SWITCH: {
+            /* Session 125 — switch (expr) { case N: ... default: ... }.
+             *
+             * Codegen:
+             *   1. Evaluate the switch expression into EAX.
+             *   2. Emit a dispatch chain: cmp eax, N; je case_N_target
+             *      for each non-default case. The case_target offsets
+             *      are recorded as we walk the body.
+             *   3. After the dispatch chain, emit one unconditional jmp:
+             *      to `default:` if present, else to end of switch.
+             *   4. Walk the body — each N_CASE / N_DEFAULT records its
+             *      g_code_len position; everything else gen_stmts.
+             *   5. Patch the dispatch chain and break jumps.
+             *
+             * Restrictions: case/default labels must be top-level in
+             * the switch body (no nested cases inside if/while inside
+             * the switch). Case values must be integer literals (no
+             * compile-time folding of expressions in this branch).
+             *
+             * Fall-through between cases works because we don't insert
+             * any jumps between case targets — users add `break;` to
+             * end a case explicitly. */
+            if (!n->b || n->b->kind != N_BLOCK)
+                die_at(n->line, "switch body must be a block", 0);
+
+            gen_expr(n->a);                     /* eax = switch value */
+
+            #define MAX_CASES_PER_SWITCH 32
+            int    case_vals[MAX_CASES_PER_SWITCH];
+            int    case_is_default[MAX_CASES_PER_SWITCH];
+            int    case_targets[MAX_CASES_PER_SWITCH];
+            int    dispatch_jmps[MAX_CASES_PER_SWITCH];
+            int    n_cases = 0;
+            int    default_idx = -1;
+
+            /* Pre-scan top-level body stmts to find cases / default. */
+            for (int i = 0; i < n->b->n_list; i++) {
+                struct node *s = n->b->list[i];
+                if (!s) continue;
+                if (s->kind == N_CASE) {
+                    if (n_cases >= MAX_CASES_PER_SWITCH) die_at(s->line, "too many cases", 0);
+                    case_vals[n_cases]       = s->num;
+                    case_is_default[n_cases] = 0;
+                    n_cases++;
+                } else if (s->kind == N_DEFAULT) {
+                    if (n_cases >= MAX_CASES_PER_SWITCH) die_at(s->line, "too many cases", 0);
+                    case_is_default[n_cases] = 1;
+                    default_idx = n_cases;
+                    n_cases++;
+                }
+            }
+
+            /* Emit dispatch chain. */
+            for (int i = 0; i < n_cases; i++) {
+                if (case_is_default[i]) continue;
+                /* cmp eax, imm32  →  3d imm32 */
+                emit_b(0x3d); emit_d((unsigned)case_vals[i]);
+                /* je rel32  →  0f 84 imm32 (same as jz) */
+                dispatch_jmps[i] = e_jz_rel32();
+            }
+            /* Fall-through jmp: to default if present, else to end. */
+            int default_jmp = e_jmp_rel32();
+
+            /* Push loop ctx (is_switch=1) so break works, continue
+             * passes through to any enclosing loop. */
+            struct loop_ctx *lc = loop_push(-1, 1);
+
+            /* Walk the body — record case-label positions and emit
+             * everything else. */
+            int case_idx = 0;
+            for (int i = 0; i < n->b->n_list; i++) {
+                struct node *s = n->b->list[i];
+                if (!s) continue;
+                if (s->kind == N_CASE || s->kind == N_DEFAULT) {
+                    case_targets[case_idx++] = g_code_len;
+                    /* No body — case labels are just position markers.
+                     * Fall-through to the next non-label stmt. */
+                } else {
+                    gen_stmt(s);
+                }
+            }
+
+            /* Patch each non-default dispatch jmp. */
+            for (int i = 0; i < n_cases; i++) {
+                if (case_is_default[i]) continue;
+                patch_d(dispatch_jmps[i],
+                        (unsigned)(case_targets[i] - (dispatch_jmps[i] + 4)));
+            }
+            /* Patch the default / end jmp. */
+            if (default_idx >= 0) {
+                patch_d(default_jmp,
+                        (unsigned)(case_targets[default_idx] - (default_jmp + 4)));
+            } else {
+                patch_d(default_jmp,
+                        (unsigned)(g_code_len - (default_jmp + 4)));
+            }
+            /* Patch break jumps to end. */
+            for (int i = 0; i < lc->n_break_jmps; i++)
+                patch_d(lc->break_jmps[i],
+                        (unsigned)(g_code_len - (lc->break_jmps[i] + 4)));
+            loop_pop();
+            return;
+        }
+        case N_CASE:
+        case N_DEFAULT:
+            /* Only reachable as a top-level switch-body stmt; otherwise
+             * an error. The N_SWITCH codegen handles them inline. */
+            die_at(n->line, "case/default outside switch", 0);
+            return;
+        case N_GOTO: {
+            /* Session 125 — emit forward jmp placeholder, record fixup
+             * for resolution at end of gen_func. */
+            if (g_n_gotos >= MAX_GOTOS_PER_FUNC) die("too many gotos in function");
+            int j = e_jmp_rel32();
+            int idx = g_n_gotos++;
+            int i = 0;
+            while (n->name[i] && i < NAME_MAX - 1) {
+                g_gotos[idx].name[i] = n->name[i]; i++;
+            }
+            g_gotos[idx].name[i] = 0;
+            g_gotos[idx].jmp_disp_off = j;
+            g_gotos[idx].line = n->line;
+            return;
+        }
+        case N_CONTINUE: {
+            /* Find nearest enclosing real loop (skip switch frames). */
+            struct loop_ctx *lc = loop_top_for_continue();
+            if (!lc) die_at(n->line, "continue outside loop", 0);
+            if (lc->cont_target >= 0) {
+                /* Backward continue (while) — patch immediately. */
+                int jc = e_jmp_rel32();
+                patch_d(jc, (unsigned)(lc->cont_target - (jc + 4)));
+            } else {
+                /* Forward continue (do-while) — record for patch later. */
+                if (lc->n_cont_jmps >= MAX_BREAKS_PER_LOOP)
+                    die_at(n->line, "too many continues in one loop", 0);
+                int jc = e_jmp_rel32();
+                lc->cont_jmps[lc->n_cont_jmps++] = jc;
+            }
             return;
         }
         case N_EXPR_STMT:
             gen_expr(n->a);
+            return;
+        case N_NOP:
+            /* Session 125 — parse-time placeholder (e.g. for `static
+             * int x;` after the backing global was registered and
+             * the rename was queued). Emits nothing. */
             return;
     }
     die_at(n->line, "unsupported stmt kind", 0);
@@ -4394,6 +5237,10 @@ static void gen_func(struct node *fn) {
      * — N_RETURN-time codegen loads it directly via e_load_local(8). */
     e_push_ebp();
     e_mov_ebp_esp();
+
+    /* Session 125 — reset per-function goto + label tables. */
+    g_n_labels = 0;
+    g_n_gotos  = 0;
 
     /* Bind parameters as locals with positive offsets. Use a separate
      * loop to register them without bumping g_locals_bytes (which is
@@ -4450,6 +5297,20 @@ static void gen_func(struct node *fn) {
 
     /* Patch the prologue's sub esp size. */
     patch_d(sub_at + 2, (unsigned)g_locals_bytes);
+
+    /* Session 125 — resolve any goto fixups in this function against
+     * the label table. Both forward and backward gotos go through here
+     * (we don't try to do backward gotos eagerly during codegen). */
+    for (int i = 0; i < g_n_gotos; i++) {
+        struct goto_fixup *gf = &g_gotos[i];
+        int li = -1;
+        for (int j = 0; j < g_n_labels; j++)
+            if (my_streq(g_labels[j].name, gf->name)) { li = j; break; }
+        if (li < 0 || g_labels[li].code_off < 0)
+            die_at(gf->line, "undefined label", gf->name);
+        int disp = g_labels[li].code_off - (gf->jmp_disp_off + 4);
+        patch_d(gf->jmp_disp_off, (unsigned)disp);
+    }
 }
 
 /* The print_int helper. Top-of-stack on entry is the int to print

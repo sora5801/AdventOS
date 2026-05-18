@@ -1,0 +1,170 @@
+/*
+ * corners.c — session 125 smoke test for the cc language-corners
+ * batch (10 small features bundled in one branch).
+ *
+ * Each new feature gets a short demonstration block. Output lines are
+ * the canary the smoke script checks. Lines are deliberately short to
+ * minimize cap.elf size and keep noise out of the diff.
+ *
+ * Features exercised, in commit order:
+ *   1. Comma operator             `(a, b)` returns b
+ *   2. Bitwise compound assigns   &= |= ^= <<= >>=
+ *   3. do-while loop              do { ... } while (cond);
+ *   4. break / continue           break out of a loop, skip to top
+ *   5. union                      one storage, multiple field views
+ *   6. sizeof NAME                size of declared variables
+ *   7. goto / labels              forward & backward gotos
+ *   8. assignment-as-expression   `if ((x = f()))` etc.
+ *   9. switch / case / default    integer-value dispatch
+ *  10. multi-dim arrays           int a[N][M]
+ *  11. static LOCAL               module-private state in a function
+ */
+
+/* Session 125 — union: every field shares offset 0. Reading one field
+ * sees the bits written by the most recent write to any field.
+ * Common idiom: store an int, observe the bytes as a char*. */
+union view {
+    int  as_int;
+    char *as_str;
+};
+
+/* Session 125 — static LOCAL. Counter persists across calls; each
+ * invocation reads + increments + returns. */
+int bump_counter() {
+    static int counter = 100;
+    counter += 1;
+    return counter;
+}
+
+int main() {
+    /* 1. Comma operator. Inner expression evaluates a, then b, and
+     *    returns b. */
+    int v;
+    v = (10, 20, 30);
+    printf("comma            = %d\n", v);       /* 30 */
+
+    /* 2. Bitwise / shift compound assigns. Each is rewritten as
+     *    `x = x OP expr` by the parser. cc has no hex literals,
+     *    so the values are decimal. */
+    int b;
+    b = 15;                                      /* 0b1111 */
+    b &= 6;                                      /* 0b0110 */
+    printf("b_and_eq         = %d\n", b);        /* 6 */
+    b |= 16;
+    printf("b_or_eq          = %d\n", b);        /* 22 */
+    b ^= 18;                                     /* 22 ^ 18 = 4 */
+    printf("b_xor_eq         = %d\n", b);        /* 4 */
+    b <<= 2;
+    printf("b_shl_eq         = %d\n", b);        /* 16 */
+    b >>= 3;
+    printf("b_shr_eq         = %d\n", b);        /* 2 */
+
+    /* 3. do-while loop. Runs body at least once even when cond is
+     *    false on first eval. */
+    int sum;
+    sum = 0;
+    int i;
+    i = 1;
+    do {
+        sum += i;
+        i += 1;
+    } while (i <= 5);
+    printf("do_while_sum     = %d\n", sum);      /* 1+2+3+4+5 = 15 */
+
+    /* 4. break + continue. Sum 1..10 but skip multiples of 3 (continue)
+     *    and stop at 8 (break). 1+2+4+5+7 = 19. */
+    int bsum;
+    bsum = 0;
+    int j;
+    j = 0;
+    while (j < 10) {
+        j += 1;
+        if (j == 8) break;
+        if (j % 3 == 0) continue;
+        bsum += j;
+    }
+    printf("break_continue   = %d\n", bsum);     /* 1+2+4+5+7 = 19 */
+
+    /* 5. union — one storage shared by multiple field views. Writing
+     *    `as_int` and then reading `as_str` reads the same 4 bytes
+     *    back as a pointer. Here we go the other way for clarity. */
+    union view u;
+    u.as_int = 42;
+    printf("union_as_int     = %d\n", u.as_int); /* 42 */
+    u.as_str = "ok";                              /* same storage rewritten */
+    printf("union_as_str     = %s\n", u.as_str); /* ok */
+
+    /* 6. sizeof NAME (and sizeof(NAME)) — scalars + struct values.
+     *    Array NAMEs aren't supported; use a literal length. */
+    int x;
+    printf("sizeof_x         = %d\n", sizeof x);       /* 4 */
+    printf("sizeof_view      = %d\n", sizeof(union view));  /* 4 */
+    printf("sizeof_u         = %d\n", sizeof(u));      /* 4 */
+
+    /* 7. goto / labels. Forward + backward gotos both work — they get
+     *    resolved at the end of each function. */
+    int gsum;
+    gsum = 0;
+    int gi;
+    gi = 0;
+again:
+    if (gi >= 4) goto done;
+    gsum += gi;
+    gi += 1;
+    goto again;
+done:
+    printf("goto_sum         = %d\n", gsum);           /* 0+1+2+3 = 6 */
+
+    /* 8. assignment-as-expression. NAME = expr returns the stored
+     *    value. Right-associative (a = b = c -> a = (b = c)). */
+    int aa;
+    int bb;
+    int cc_;
+    cc_ = (aa = (bb = 7) + 3);
+    /* bb = 7 (returns 7); 7 + 3 = 10; aa = 10; cc_ = 10 */
+    printf("assign_expr_a    = %d\n", aa);             /* 10 */
+    printf("assign_expr_b    = %d\n", bb);             /* 7 */
+    printf("assign_expr_c    = %d\n", cc_);            /* 10 */
+
+    /* 9. switch / case / default + fall-through + break. */
+    int total;
+    total = 0;
+    int kk;
+    kk = 0;
+    while (kk < 5) {
+        switch (kk) {
+        case 0:
+        case 1:
+            total += 10;     /* falls into both 0 and 1 */
+            break;
+        case 3:
+            total += 100;
+            break;
+        default:
+            total += 1;
+        }
+        kk += 1;
+    }
+    /* k=0: 10. k=1: 10. k=2: 1 (default). k=3: 100. k=4: 1. Total 122. */
+    printf("switch_total     = %d\n", total);
+
+    /* 10. 2D arrays. `int g[2][3]` is a flat 6-int block addressed by
+     *     (i * 3 + j) * 4. Read and write both supported. */
+    int g[2][3];
+    g[0][0] = 1; g[0][1] = 2; g[0][2] = 3;
+    g[1][0] = 4; g[1][1] = 5; g[1][2] = 6;
+    int gsum2;
+    gsum2 = g[0][0] + g[0][1] + g[0][2] + g[1][0] + g[1][1] + g[1][2];
+    printf("array2d_sum      = %d\n", gsum2);          /* 21 */
+
+    /* 11. static LOCAL. bump_counter has a per-function persistent
+     *     counter initialized to 100. Three calls produce 101, 102, 103. */
+    int c1; c1 = bump_counter();
+    int c2; c2 = bump_counter();
+    int c3; c3 = bump_counter();
+    printf("static_local_1   = %d\n", c1);            /* 101 */
+    printf("static_local_2   = %d\n", c2);            /* 102 */
+    printf("static_local_3   = %d\n", c3);            /* 103 */
+
+    return 0;
+}
