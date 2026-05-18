@@ -122,6 +122,8 @@ USER_PROGRAMS = [
     ('wmterm.elf',   'user/_obj/wmterm.bin',    None),
     # Session 137: path-C phase 30 — text editor.
     ('wmedit.elf',   'user/_obj/wmedit.bin',    None),
+    # Session 139: path-C phase 32 — calculator.
+    ('wmcalc.elf',   'user/_obj/wmcalc.bin',    None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -273,6 +275,7 @@ DATA_FILES = [
     ('wmps',    'fs/man/wmps',    'man'),  # session 130
     ('wmterm',  'fs/man/wmterm',  'man'),  # session 134
     ('wmedit',  'fs/man/wmedit',  'man'),  # session 137
+    ('wmcalc',  'fs/man/wmcalc',  'man'),  # session 139
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
