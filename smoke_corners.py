@@ -59,6 +59,7 @@ EXPECTED = [
     "assign_expr_b    = 7",
     "assign_expr_c    = 10",
     "switch_total     = 122",
+    "array2d_sum      = 21",
 ]
 
 

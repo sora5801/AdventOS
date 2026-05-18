@@ -140,5 +140,14 @@ done:
     /* k=0: 10. k=1: 10. k=2: 1 (default). k=3: 100. k=4: 1. Total 122. */
     printf("switch_total     = %d\n", total);
 
+    /* 10. 2D arrays. `int g[2][3]` is a flat 6-int block addressed by
+     *     (i * 3 + j) * 4. Read and write both supported. */
+    int g[2][3];
+    g[0][0] = 1; g[0][1] = 2; g[0][2] = 3;
+    g[1][0] = 4; g[1][1] = 5; g[1][2] = 6;
+    int gsum2;
+    gsum2 = g[0][0] + g[0][1] + g[0][2] + g[1][0] + g[1][1] + g[1][2];
+    printf("array2d_sum      = %d\n", gsum2);          /* 21 */
+
     return 0;
 }

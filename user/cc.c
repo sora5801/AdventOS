@@ -1062,6 +1062,8 @@ enum {
     N_SWITCH,        /* switch (n->a) n->b — body must be a block */
     N_CASE,          /* case N: — n->num is the case value */
     N_DEFAULT,       /* default: */
+    N_INDEX2,        /* NAME[i][j]      — 2D read */
+    N_INDEX2_ASSIGN, /* NAME[i][j] = expr — 2D write (val in n->c) */
 };
 
 struct node {
@@ -1267,6 +1269,19 @@ static struct node *parse_primary(void) {
             g_tk++;
             struct node *idx = parse_expr();
             expect(T_RBRACKET, "']'");
+            /* Session 125 — second `[idx]` makes it a 2D access. */
+            if (tk_cur()->kind == T_LBRACKET) {
+                g_tk++;
+                struct node *idx2 = parse_expr();
+                expect(T_RBRACKET, "']'");
+                struct node *ix = new_node(N_INDEX2);
+                int k = 0;
+                while (n->name[k]) { ix->name[k] = n->name[k]; k++; }
+                ix->name[k] = 0;
+                ix->a = idx;
+                ix->b = idx2;
+                return ix;
+            }
             if (tk_cur()->kind == T_DOT) {
                 g_tk++;
                 if (tk_cur()->kind != T_NAME)
@@ -1579,7 +1594,9 @@ static struct node *parse_stmt(void) {
         nm[i] = 0;
         g_tk++;
         if (accept(T_LBRACKET)) {
-            /* Array declaration. */
+            /* Array declaration. Session 125 — also accept a second
+             * `[M]` for 2D arrays: `int a[N][M];`. The inner dim M is
+             * stored in n->n_list. 1D arrays leave it at 0. */
             if (is_ptr) die_at(tk_cur()->line, "ptr-to-array not supported", 0);
             if (tk_cur()->kind != T_NUM)
                 die_at(tk_cur()->line, "array size must be an integer literal", 0);
@@ -1587,11 +1604,21 @@ static struct node *parse_stmt(void) {
             if (sz <= 0) die_at(tk_cur()->line, "array size must be positive", 0);
             g_tk++;
             expect(T_RBRACKET, "']'");
+            int dim2 = 0;
+            if (accept(T_LBRACKET)) {
+                if (tk_cur()->kind != T_NUM)
+                    die_at(tk_cur()->line, "inner array size must be integer literal", 0);
+                dim2 = tk_cur()->num;
+                if (dim2 <= 0) die_at(tk_cur()->line, "inner array size must be positive", 0);
+                g_tk++;
+                expect(T_RBRACKET, "']'");
+            }
             expect(T_SEMI, "';'");
             struct node *n = new_node(N_ARR_DECL);
             for (int j = 0; j <= i; j++) n->name[j] = nm[j];
-            n->num = sz;
-            n->op  = is_char ? LK_CHAR_ARR : LK_INT_ARR;
+            n->num    = sz;
+            n->n_list = dim2;       /* inner-dim count or 0 for 1D */
+            n->op     = is_char ? LK_CHAR_ARR : LK_INT_ARR;
             return n;
         }
         struct node *n = new_node(N_VAR_DECL);
@@ -1805,6 +1832,21 @@ static struct node *parse_stmt(void) {
         g_tk++;       /* skip '[' */
         struct node *idx = parse_expr();
         expect(T_RBRACKET, "']'");
+        /* Session 125 — `NAME[i][j] = expr;` 2D store. */
+        if (tk_cur()->kind == T_LBRACKET) {
+            g_tk++;
+            struct node *idx2 = parse_expr();
+            expect(T_RBRACKET, "']'");
+            expect(T_ASSIGN, "'='");
+            struct node *val = parse_expr();
+            expect(T_SEMI, "';'");
+            struct node *n = new_node(N_INDEX2_ASSIGN);
+            for (int j = 0; j <= i; j++) n->name[j] = nm[j];
+            n->a = idx;
+            n->b = idx2;
+            n->c = val;
+            return n;
+        }
         if (tk_cur()->kind == T_DOT) {
             g_tk++;
             if (tk_cur()->kind != T_NAME)
@@ -2856,6 +2898,8 @@ struct local_slot {
     int  ebp_off;       /* negative offset from EBP */
     int  kind;          /* LK_* — session 92 */
     int  meta;          /* struct_idx for LK_STRUCT/LK_STRUCT_PTR (s97) */
+    int  dim2;          /* session 125 — inner dim for 2D arrays
+                         * (M in `int a[N][M]`); 0 for 1D / non-array */
 };
 static struct local_slot g_locals[MAX_LOCALS];
 static int               g_n_locals;
@@ -3014,6 +3058,7 @@ static int local_declare_sized(const char *name, int size, int kind) {
     g_locals[g_n_locals].ebp_off = off;
     g_locals[g_n_locals].kind    = kind;
     g_locals[g_n_locals].meta    = 0;
+    g_locals[g_n_locals].dim2    = 0;     /* session 125 — set later for 2D arrays */
     g_n_locals++;
     return off;
 }
@@ -3854,6 +3899,59 @@ static void gen_expr(struct node *n) {
             }
             return;
         }
+        case N_INDEX2: {
+            /* Session 125 — `NAME[i][j]` 2D array read.
+             *
+             *   addr = &NAME[0][0] + (i * M + j) * elem
+             *
+             * Where M is the inner dimension stored on the local_slot
+             * at decl time (or as g_globals[gi].meta for globals — not
+             * yet supported for globals).
+             *
+             *   eax := i
+             *   ebx := M (constant) → eax := i*M (imul)
+             *   push eax
+             *   eax := j
+             *   eax += stacked (i*M)
+             *   ebx := elem; eax := eax * elem
+             *   ebx := base addr; eax += ebx
+             *   eax := *eax */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "2D index requires a local array", n->name);
+            int kk = local_kind(n->name);
+            if (kk != LK_INT_ARR && kk != LK_CHAR_ARR)
+                die_at(n->line, "NAME[i][j] requires a 1D-decl[..][..] array", n->name);
+            /* Find dim2 directly from g_locals (local_meta is for struct meta). */
+            int M = 0;
+            for (int i = g_n_locals - 1; i >= 0; i--) {
+                if (my_streq(g_locals[i].name, n->name)) { M = g_locals[i].dim2; break; }
+            }
+            if (M <= 0) die_at(n->line, "NAME[i][j] requires `int NAME[N][M]` decl", n->name);
+            int elem = (kk == LK_CHAR_ARR) ? 1 : 4;
+            /* i*M */
+            gen_expr(n->a);
+            e_mov_ebx_imm(M);
+            e_imul_eax_ebx();
+            e_push_eax();
+            /* j */
+            gen_expr(n->b);
+            e_pop_ebx();             /* ebx = i*M */
+            e_add_eax_ebx();         /* eax = i*M + j */
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else if (elem != 1) {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            /* base addr */
+            e_push_eax();
+            e_lea_eax_ebp(off);      /* eax = base */
+            e_pop_ebx();             /* ebx = offset */
+            e_add_eax_ebx();         /* eax = base + offset */
+            if (elem == 1) e_loadb_eax_at_eax();
+            else           e_load_eax_at_eax();
+            return;
+        }
         case N_INDEX_MEMBER: {
             /* Session 102 — `NAME[idx].field` for struct arrays.
              *   address-of-element = base_va + idx * struct.size
@@ -4273,17 +4371,20 @@ static void gen_stmt(struct node *n) {
         case N_ARR_DECL: {
             /* Session 92 — `TYPE NAME[N];`. Reserve elem_size * N
              * bytes; the local's ebp_off points to the LOW byte of
-             * the array (lowest address = element 0). */
+             * the array (lowest address = element 0).
+             *
+             * Session 125 — also handles `TYPE NAME[N][M];` (2D). The
+             * inner dim M is in n->n_list; if non-zero, total bytes is
+             * N * M * elem_size, and dim2 is recorded on the local_slot
+             * so N_INDEX2 can compute (i * M + j) * elem. */
             int kind = n->op;     /* LK_INT_ARR or LK_CHAR_ARR */
             int elem = (kind == LK_CHAR_ARR) ? 1 : 4;
-            int bytes = elem * n->num;
+            int n_elements = (n->n_list > 0) ? (n->num * n->n_list) : n->num;
+            int bytes = elem * n_elements;
             local_declare_sized(n->name, bytes, kind);
-            /* Adjust ebp_off so a[0] is at [ebp + base]. local_declare_sized
-             * gave us off = -padded_bytes. Array element 0 lives at
-             * [ebp + off] (lowest address of the padded block — that's
-             * the highest -ve offset). The padded block grows toward
-             * more-negative addresses, so element i is at
-             * [ebp + off + i * elem]. */
+            if (n->n_list > 0) {
+                g_locals[g_n_locals - 1].dim2 = n->n_list;
+            }
             return;
         }
         case N_STRUCT_DECL: {
@@ -4539,6 +4640,49 @@ static void gen_stmt(struct node *n) {
             e_mov_ebx_eax();
             e_pop_eax();
             e_store_eax_at_ebx();
+            return;
+        }
+        case N_INDEX2_ASSIGN: {
+            /* Session 125 — `NAME[i][j] = expr;` 2D store. Mirrors the
+             * N_INDEX2 read path: compute (i*M + j)*elem + base, then
+             * store EAX at that address. Value is in n->c. */
+            int off = local_find(n->name);
+            if (off == 0) die_at(n->line, "2D store requires a local array", n->name);
+            int kk = local_kind(n->name);
+            if (kk != LK_INT_ARR && kk != LK_CHAR_ARR)
+                die_at(n->line, "NAME[i][j]= requires a 2D array", n->name);
+            int M = 0;
+            for (int i = g_n_locals - 1; i >= 0; i--) {
+                if (my_streq(g_locals[i].name, n->name)) { M = g_locals[i].dim2; break; }
+            }
+            if (M <= 0) die_at(n->line, "NAME[i][j]= requires 2D decl", n->name);
+            int elem = (kk == LK_CHAR_ARR) ? 1 : 4;
+            /* val → eax → push */
+            gen_expr(n->c);
+            e_push_eax();
+            /* i*M */
+            gen_expr(n->a);
+            e_mov_ebx_imm(M);
+            e_imul_eax_ebx();
+            e_push_eax();
+            /* j */
+            gen_expr(n->b);
+            e_pop_ebx();
+            e_add_eax_ebx();            /* eax = i*M + j */
+            if (elem == 4) {
+                e_shl_eax_imm8(2);
+            } else if (elem != 1) {
+                e_mov_ebx_imm(elem);
+                e_imul_eax_ebx();
+            }
+            e_push_eax();
+            e_lea_eax_ebp(off);         /* eax = base */
+            e_pop_ebx();                /* ebx = offset */
+            e_add_eax_ebx();            /* eax = addr */
+            e_mov_ebx_eax();            /* ebx = addr */
+            e_pop_eax();                /* eax = val */
+            if (elem == 1) e_storeb_al_at_ebx();
+            else           e_store_eax_at_ebx();
             return;
         }
         case N_INDEX_MEMBER_ASSIGN: {
