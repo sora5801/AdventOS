@@ -118,6 +118,23 @@ static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
 static int g_prev_right;       /* session 124 — right-button edge */
 
+/* Session 131 — window resize.  When the user drags the 12x12 grip
+ * in the bottom-right corner of a CLIENT window, we set
+ * g_resize_idx to that window's slot and update its outer (w, h)
+ * on every motion event until the mouse releases.  The client
+ * surface dimensions stay at the original surface_w / surface_h —
+ * paint_client clips to min(window w, surface w) so a smaller
+ * window just shows less of the surface, and a larger window pads
+ * with the content_color background fill paint_window already
+ * does.  This means resize stays a pure WM concern; no client
+ * cooperation needed. */
+#define RESIZE_GRIP 12
+#define WIN_MIN_W   80
+#define WIN_MIN_H   60
+static int g_resize_idx = -1;
+static int g_resize_anchor_w, g_resize_anchor_h;
+static int g_resize_anchor_mx, g_resize_anchor_my;
+
 static int my_atoi_str(const char *s) { return atoi(s); }
 
 /* Format an unsigned int into buf[]; return chars written. Used by
@@ -271,6 +288,26 @@ static void paint_window(struct gfx_ctx *ctx, struct window *w,
         case KIND_BARS:     paint_bars(ctx, w); break;
         case KIND_CLIENT:   paint_client(ctx, w); break;
         default: break;
+    }
+
+    /* Session 131 — bottom-right resize grip.  Painted LAST so it
+     * sits on top of the content fill and any client-surface blit;
+     * otherwise the content background fill (or paint_client) would
+     * overwrite the grip pixels.  Three diagonal pixel-stripes
+     * inside a 12×12 box.  CLIENT only. */
+    if (w->kind == KIND_CLIENT) {
+        int gx = w->x + w->w - RESIZE_GRIP;
+        int gy = w->y + w->h - RESIZE_GRIP;
+        gfx_fill_rect(ctx, gx, gy, RESIZE_GRIP, RESIZE_GRIP,
+                      w->frame_color);
+        for (int i = 2; i < RESIZE_GRIP - 1; i += 3) {
+            for (int k = 0; k <= i; k++) {
+                gfx_put_pixel(ctx,
+                              gx + RESIZE_GRIP - 1 - k,
+                              gy + RESIZE_GRIP - 1 - (i - k),
+                              GFX_WHITE);
+            }
+        }
     }
 }
 
@@ -512,6 +549,16 @@ static void paint_launcher(struct gfx_ctx *ctx) {
 static int in_titlebar(struct window *w, int px, int py) {
     return px >= w->x && px < w->x + w->w &&
            py >= w->y && py < w->y + TITLE_H;
+}
+
+/* Session 131 — is (px,py) inside the bottom-right resize grip?
+ * Only CLIENT windows get a grip; demo windows ignore resize. */
+static int in_resize_grip(struct window *w, int px, int py) {
+    if (w->kind != KIND_CLIENT) return 0;
+    int gx = w->x + w->w - RESIZE_GRIP;
+    int gy = w->y + w->h - RESIZE_GRIP;
+    return px >= gx && px < gx + RESIZE_GRIP &&
+           py >= gy && py < gy + RESIZE_GRIP;
 }
 
 static void init_demo_windows(unsigned int fb_w, unsigned int fb_h) {
@@ -791,9 +838,19 @@ int main(int argc, char **argv) {
                     g_z_counter++;
                     g_windows[hit].raised = g_z_counter;
                     focused = hit;
-                    /* Start drag if in title bar (but not in the
-                     * close box, already excluded above). */
-                    if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
+                    /* Session 131 — resize grip wins over title-bar
+                     * drag because the grip can lie behind/inside
+                     * a title bar's bbox on tiny windows.  We test
+                     * the grip first. */
+                    if (in_resize_grip(&g_windows[hit], ms.x, ms.y)) {
+                        g_resize_idx       = hit;
+                        g_resize_anchor_w  = g_windows[hit].w;
+                        g_resize_anchor_h  = g_windows[hit].h;
+                        g_resize_anchor_mx = ms.x;
+                        g_resize_anchor_my = ms.y;
+                    } else if (in_titlebar(&g_windows[hit], ms.x, ms.y)) {
+                        /* Start drag if in title bar (but not in
+                         * the close box, already excluded above). */
                         g_drag_idx   = hit;
                         g_drag_off_x = ms.x - g_windows[hit].x;
                         g_drag_off_y = ms.y - g_windows[hit].y;
@@ -826,7 +883,8 @@ int main(int argc, char **argv) {
             prev_focus_id = new_focus_id;
         }
         if (released) {
-            g_drag_idx = -1;
+            g_drag_idx   = -1;
+            g_resize_idx = -1;
         }
         if (g_drag_idx >= 0) {
             struct window *w = &g_windows[g_drag_idx];
@@ -839,6 +897,20 @@ int main(int argc, char **argv) {
             if (ny > (int)ctx.height - w->h) ny = (int)ctx.height - w->h;
             w->x = nx;
             w->y = ny;
+        }
+        /* Session 131 — resize-in-progress.  Outer (w, h) tracks
+         * the cursor delta from the anchor; clamp to a sane min
+         * and to the FB bounds. */
+        if (g_resize_idx >= 0) {
+            struct window *w = &g_windows[g_resize_idx];
+            int nw = g_resize_anchor_w + (ms.x - g_resize_anchor_mx);
+            int nh = g_resize_anchor_h + (ms.y - g_resize_anchor_my);
+            if (nw < WIN_MIN_W) nw = WIN_MIN_W;
+            if (nh < WIN_MIN_H) nh = WIN_MIN_H;
+            if (w->x + nw > (int)ctx.width  - 2)  nw = (int)ctx.width  - 2 - w->x;
+            if (w->y + nh > (int)ctx.height - 2)  nh = (int)ctx.height - 2 - w->y;
+            w->w = nw;
+            w->h = nh;
         }
         g_prev_left = left;
 

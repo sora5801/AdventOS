@@ -118,24 +118,14 @@ USER_CFLAGS=(
     -mno-stack-arg-probe          # don't emit __chkstk for big frames
     -nostdlib -nostartfiles
     -O2 -std=gnu11
-    # Session 125 considered enabling -ffunction-sections + --gc-sections
-    # for user programs (same trick as the kernel — session 112), but
-    # two latent issues kept it on the bench:
-    #   1. libuser.c uses indirection through LIBC_TABLE (a fixed-VA
-    #      function-pointer table populated by libc.bin at runtime).
-    #      --gc-sections can't see those references and drops
-    #      putchar / sys_write / etc., leaving them as undefined
-    #      symbols silently resolved to 0 by the PE/COFF linker.
-    #   2. When a process that holds the FB (wmd) fork+exec's a WM
-    #      client, the inherited FB mapping at 0x50000000 goes
-    #      through paging_destroy_user_pd on exec, which then
-    #      pmm_free_page's MMIO addresses.  The bug is latent in
-    #      larger binaries but triggers reliably once gc-sections
-    #      shrinks wmhello (smoke_wmlauncher then sees wmhello's
-    #      taskbar button appear but the surface stays blank).
-    # Both are fixable but out of scope here; tracked for a future
-    # session.  User programs link the full libuser / libgfx / libwm
-    # objects unchanged for now.
+    # Session 132 — function-level sectioning + --gc-sections drops
+    # unreferenced libuser / libgfx / libwm code per binary.  The
+    # libuser indirections through LIBC_TABLE (printf → vprintf,
+    # malloc → libc.bin malloc, etc.) hide their target symbols
+    # from the linker's reachability graph; those wrappers are
+    # tagged __attribute__((used)) in libuser.c so the compiler
+    # emits them and the linker keeps them.
+    -ffunction-sections
     -Wall -Wextra -Wno-unused-parameter
     -Iuser
     "${TARGET_CC_EXTRA[@]}"
@@ -269,7 +259,7 @@ WMCLIENT_PROGS=(wmhello wmtype wmclock wmpaint wmpair wmfiles wmsysinfo wmps)
 # libjson linked.
 for name in "${USER_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
         "user/_obj/${name}.elf" "user/_obj/${name}.bin"
@@ -292,7 +282,7 @@ done
 JSON_PROGS=(ls cat wc date ps agentd pluck where count sort grep uniq)
 for name in "${JSON_PROGS[@]}"; do
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "user/${name}.c"
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBJSON_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -316,7 +306,7 @@ for name in "${AGENT_PROGS[@]}"; do
     # JSONL output of its sub-shell calls. Link libjson alongside
     # libagent — harmless for the other agent selftests (linker
     # discards unreferenced symbols).
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" \
         user/_obj/libuser.o user/_obj/libagent.o \
         "${LIBJSON_OBJS[@]}"
@@ -333,7 +323,7 @@ for name in "${TLS_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBCRYPTO_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -348,7 +338,7 @@ for name in "${GFX_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBGFX_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
@@ -365,7 +355,7 @@ for name in "${WMCLIENT_PROGS[@]}"; do
     src="user/${name}.c"
     if [ ! -f "$src" ]; then continue; fi
     "$CC" "${USER_CFLAGS[@]}" -c -o "user/_obj/${name}.o" "$src"
-    "$LD" -m "$LD_EMUL" -T user/user.ld -o "user/_obj/${name}.elf" \
+    "$LD" -m "$LD_EMUL" -T user/user.ld --gc-sections -o "user/_obj/${name}.elf" \
         user/_obj/start.o "user/_obj/${name}.o" user/_obj/libuser.o \
         "${LIBGFX_OBJS[@]}" "${LIBWM_OBJS[@]}"
     "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
