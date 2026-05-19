@@ -1249,6 +1249,7 @@ static void cmd_help(void) {
     puts("  history           print recent commands (Up/Down recalls them)\n");
     puts("  source FILE / . FILE   run a .sh script in the current shell\n");
     puts("  exit [CODE]       exit the shell\n");
+    puts("  clear             clear the console (also Ctrl-L)\n");
     puts("  shift [N]         drop first N positional args (default 1)\n");
     puts("  read [-p P] VAR   read one line of stdin into VAR\n");
     puts("  [ EXPR ] / test   POSIX-ish test: -f/-d/-e/-r/-w/-x FILE,\n");
@@ -1289,6 +1290,7 @@ static void cmd_help(void) {
     puts("  Ctrl-U            delete from start of line to cursor\n");
     puts("  Ctrl-K            delete from cursor to end of line\n");
     puts("  Ctrl-C            discard the current line\n");
+    puts("  Ctrl-L            clear screen and redraw prompt+buffer\n");
     puts("  Ctrl-R            reverse-incremental history search\n");
     puts("\n");
     puts("Pipelines, redirection, chaining:\n");
@@ -1601,9 +1603,10 @@ static void position_cursor(int prompt_row, int want_col_in_buf) {
 /* List of shell builtins for tab completion of the first word. Kept
  * sorted alphabetically for predictable listing order. */
 static const char *g_builtin_names[] = {
-    "[", "break", "cd", "continue", "env", "exit", "export", "forktest",
-    "help", "history", "jobs", "keys", "ls", "pid", "pwd", "read",
-    "return", "shift", "sleep", "source", "test", "time", "unset", 0
+    "[", "break", "cd", "clear", "continue", "env", "exit", "export",
+    "forktest", "help", "history", "jobs", "keys", "ls", "pid", "pwd",
+    "read", "return", "shift", "sleep", "source", "test", "time",
+    "unset", 0
 };
 
 /* Tab completion. Three flavors picked by the cursor's word:
@@ -1945,6 +1948,22 @@ static int read_line_interactive(char *buf, int cap) {
             buf[0] = 0;
             puts(current_prompt());
             sys_tty_get_cursor(&prompt_row, &prompt_col);
+            continue;
+        }
+
+        /* Ctrl-L — clear the console (bash convention), then redraw
+         * the prompt + current buffer. After sys_tty_clear homes the
+         * cursor to (0, 0) and the redraw runs, the cursor lands at
+         * end-of-buffer naturally. We don't re-position for mid-line
+         * Ctrl-L (cur < len) — those edits resume from end-of-line,
+         * which is bash-compatible. */
+        if (c == 0x0C) {
+            sys_tty_clear();
+            prompt_row = 0;
+            prompt_col = 0;
+            puts(current_prompt());
+            for (int i = 0; i < len; i++) putchar(buf[i]);
+            cur = len;
             continue;
         }
 
@@ -2507,6 +2526,14 @@ static int cmd_test_bracket(char **toks, int ntok) {
 /* `break [N]` — set the break depth so enclosing loops pop. Default
  * N=1 (just the innermost loop). Returns 0 — the actual loop exit
  * happens when exec_for/exec_while see the depth > 0. */
+/* `clear` — clear the console and home the cursor. Same effect as
+ * Ctrl-L in the line editor; available as a command so scripts and
+ * piped use cases (`clear ; echo banner`) work too. */
+static int cmd_clear(void) {
+    sys_tty_clear();
+    return 0;
+}
+
 static int cmd_break(int ntok, char **toks) {
     int n = 1;
     if (ntok > 1) {
@@ -2864,6 +2891,7 @@ static int execute_segment(char **toks, int lo, int hi) {
     if (strcmp(seg[0], "unset")    == 0) { cmd_unset_b(seg, ntok); return 0; }
     if (strcmp(seg[0], "history")  == 0) { cmd_history(); return 0; }
     if (strcmp(seg[0], "shift")    == 0) { return cmd_shift(ntok, seg); }
+    if (strcmp(seg[0], "clear")    == 0) { return cmd_clear(); }
     if (strcmp(seg[0], "break")    == 0) { return cmd_break(ntok, seg); }
     if (strcmp(seg[0], "continue") == 0) { return cmd_continue(ntok, seg); }
     if (strcmp(seg[0], "return")   == 0) { return cmd_return(ntok, seg); }
