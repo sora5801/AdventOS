@@ -756,6 +756,41 @@ static void paint_toasts(struct gfx_ctx *ctx, unsigned int frame_no) {
  * / RES_SE for which edge/corner was hit.  Corner zones (12x12) take
  * priority over edge zones (6 px wide).  Top edge / NW / NE corners
  * deliberately don't resize — title-bar drag + buttons own that strip. */
+/* Session 155 — compute the snap-target rect for a cursor at
+ * (mx, my).  Returns 1 with rect filled if the cursor is within
+ * SNAP_PX of any snap edge; 0 otherwise.  Mirrors the logic used
+ * by the snap-on-release path in the main loop so both stay
+ * consistent. */
+#define SNAP_PX 8
+static int snap_target_for(int fb_w_i, int fb_h_i, int mx, int my,
+                           int *out_x, int *out_y,
+                           int *out_w, int *out_h) {
+    int usable_top = 18;
+    int usable_bot = fb_h_i - TASKBAR_H;
+    int usable_h   = usable_bot - usable_top;
+    if (my < usable_top + SNAP_PX) {
+        *out_x = 0; *out_y = usable_top;
+        *out_w = fb_w_i; *out_h = usable_h;
+        return 1;
+    }
+    if (mx < SNAP_PX) {
+        *out_x = 0; *out_y = usable_top;
+        *out_w = fb_w_i / 2; *out_h = usable_h;
+        return 1;
+    }
+    if (mx > fb_w_i - SNAP_PX) {
+        *out_x = fb_w_i / 2; *out_y = usable_top;
+        *out_w = fb_w_i / 2; *out_h = usable_h;
+        return 1;
+    }
+    if (my > fb_h_i - TASKBAR_H - SNAP_PX) {
+        *out_x = 0; *out_y = usable_top + usable_h / 2;
+        *out_w = fb_w_i; *out_h = usable_h / 2;
+        return 1;
+    }
+    return 0;
+}
+
 static int in_resize_zone(struct window *w, int px, int py) {
     if (w->kind != KIND_CLIENT) return RES_NONE;
     int rx = px - w->x;
@@ -1314,36 +1349,16 @@ int main(int argc, char **argv) {
              * Saves the pre-snap geometry into saved_* so the
              * maximize-button restore path still works. */
             if (g_drag_idx >= 0) {
-                #define SNAP_PX 8
                 struct window *w = &g_windows[g_drag_idx];
-                int fb_w_i = (int)ctx.width;
-                int fb_h_i = (int)ctx.height;
-                int usable_top = 18;              /* below top status bar */
-                int usable_bot = fb_h_i - TASKBAR_H;
-                int usable_h   = usable_bot - usable_top;
-                int do_snap    = 0;
                 int new_x, new_y, new_w, new_h;
-                if (ms.y < usable_top + SNAP_PX) {
-                    /* top → maximize */
-                    new_x = 0;            new_y = usable_top;
-                    new_w = fb_w_i;       new_h = usable_h;
-                    do_snap = 1;
-                } else if (ms.x < SNAP_PX) {
-                    /* left → fill-left-half */
-                    new_x = 0;            new_y = usable_top;
-                    new_w = fb_w_i / 2;   new_h = usable_h;
-                    do_snap = 1;
-                } else if (ms.x > fb_w_i - SNAP_PX) {
-                    /* right → fill-right-half */
-                    new_x = fb_w_i / 2;   new_y = usable_top;
-                    new_w = fb_w_i / 2;   new_h = usable_h;
-                    do_snap = 1;
-                } else if (ms.y > fb_h_i - TASKBAR_H - SNAP_PX) {
-                    /* bottom → fill-bottom-half */
-                    new_x = 0;            new_y = usable_top + usable_h / 2;
-                    new_w = fb_w_i;       new_h = usable_h / 2;
-                    do_snap = 1;
-                }
+                /* Session 155 — release-time snap shares the helper
+                 * with the per-frame preview, so the two stay
+                 * consistent. */
+                int do_snap = snap_target_for((int)ctx.width,
+                                              (int)ctx.height,
+                                              ms.x, ms.y,
+                                              &new_x, &new_y,
+                                              &new_w, &new_h);
                 if (do_snap && !w->maximized) {
                     w->saved_x  = w->x;
                     w->saved_y  = w->y;
@@ -1625,6 +1640,23 @@ int main(int argc, char **argv) {
          * stay readable even if a menu happens to pop near the
          * notification stack. */
         paint_toasts(&ctx, (unsigned int)tick);
+
+        /* Session 155 — snap-to-edge ghost preview.  While a title-
+         * bar drag is in progress AND the cursor is in a snap zone,
+         * draw a thick cyan outline at the snap target so the user
+         * sees exactly where the window will land.  A 3-pixel
+         * concentric frame substitutes for the alpha translucency
+         * we can't render without a blending compositor. */
+        if (g_drag_idx >= 0) {
+            int sx, sy, sw, sh;
+            if (snap_target_for((int)ctx.width, (int)ctx.height,
+                                ms.x, ms.y, &sx, &sy, &sw, &sh)) {
+                unsigned int outline = 0x60D0F0u;   /* cyan */
+                gfx_rect(&ctx, sx,     sy,     sw,     sh,     outline);
+                gfx_rect(&ctx, sx + 1, sy + 1, sw - 2, sh - 2, outline);
+                gfx_rect(&ctx, sx + 2, sy + 2, sw - 4, sh - 4, outline);
+            }
+        }
 
         /* Session 142 — cursor glyph removed; QEMU's host pointer
          * (synced to ms.x / ms.y via usb-tablet, session 141) is
