@@ -1035,6 +1035,10 @@ void syscall_dispatch(struct registers *r) {
         case SYS_WM_POLL_WORKSPACE:
             ret = wm_poll_workspace(task_current());
             break;
+        /* Session 151 — screenshot poll. */
+        case SYS_WM_POLL_SCREENSHOT:
+            ret = wm_poll_screenshot(task_current());
+            break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
             extern int virtio_rng_available(void);

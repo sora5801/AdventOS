@@ -889,6 +889,73 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
     return n;
 }
 
+/* Session 151 — serialise the whole framebuffer to a P6 PPM at
+ * /tmp/screen.ppm.  Reads ctx->fb directly; handles 24-bpp BGR
+ * (the AdventOS VBE default) and 32-bpp BGRA.  Streams one row at
+ * a time so we never need a 2 MB scratch buffer in wmd.bin. */
+static void itoa_app_wmd(char *buf, int *pos, int v) {
+    char t[12]; int n = 0;
+    if (v == 0) { t[n++] = '0'; }
+    else { while (v) { t[n++] = '0' + (v % 10); v /= 10; } }
+    while (n-- > 0) buf[(*pos)++] = t[n];
+}
+
+static void save_screenshot(struct gfx_ctx *ctx) {
+    int fd = sys_open_w("/tmp/screen.ppm");
+    if (fd < 0) {
+        const char *m = "screenshot: save failed";
+        int ml = 0; while (m[ml]) ml++;
+        sys_wm_notify(m, ml);
+        return;
+    }
+    int w = (int)ctx->width;
+    int h = (int)ctx->height;
+
+    /* Header. */
+    char hdr[40]; int hn = 0;
+    hdr[hn++] = 'P'; hdr[hn++] = '6'; hdr[hn++] = '\n';
+    itoa_app_wmd(hdr, &hn, w);
+    hdr[hn++] = ' ';
+    itoa_app_wmd(hdr, &hn, h);
+    hdr[hn++] = '\n';
+    hdr[hn++] = '2'; hdr[hn++] = '5'; hdr[hn++] = '5'; hdr[hn++] = '\n';
+    sys_write(fd, hdr, hn);
+
+    /* Per-row buffer.  1024 max width × 3 bytes = 3072.  Allocate
+     * generously on the stack so we cover up to 1280-wide modes. */
+    unsigned char row[1280 * 3];
+    int bytes_per_px = (int)ctx->bpp / 8;
+    int pitch = (int)ctx->pitch;
+    int total = hn;
+    for (int y = 0; y < h; y++) {
+        unsigned char *fb_row = (unsigned char *)ctx->fb_real + y * pitch;
+        for (int x = 0; x < w; x++) {
+            /* AdventOS FB is little-endian BGR in memory for both
+             * 24-bpp and 32-bpp paths (see libgfx/libgfx.c
+             * put_packed).  Byte 0 = B, byte 1 = G, byte 2 = R. */
+            unsigned char *p = fb_row + x * bytes_per_px;
+            row[x*3 + 0] = p[2];   /* R */
+            row[x*3 + 1] = p[1];   /* G */
+            row[x*3 + 2] = p[0];   /* B */
+        }
+        sys_write(fd, row, w * 3);
+        total += w * 3;
+    }
+    sys_close(fd);
+
+    /* Toast: "screenshot: /tmp/screen.ppm (NNN B)" */
+    char tn[64]; int tnn = 0;
+    const char *m = "screenshot: /tmp/screen.ppm (";
+    while (*m && tnn < (int)sizeof(tn) - 1) tn[tnn++] = *m++;
+    itoa_app_wmd(tn, &tnn, total);
+    if (tnn < (int)sizeof(tn) - 3) {
+        tn[tnn++] = ' '; tn[tnn++] = 'B'; tn[tnn++] = ')';
+    }
+    tn[tnn] = 0;
+    int tlen = 0; while (tn[tlen]) tlen++;
+    sys_wm_notify(tn, tlen);
+}
+
 int main(int argc, char **argv) {
     int seconds = 30;
     int show_demos = 1;
@@ -956,6 +1023,13 @@ int main(int argc, char **argv) {
                  * would otherwise be invisible-but-receiving-keys. */
                 focused = -1;
             }
+        }
+        /* Session 151 — drain pending Alt+P screenshot request.
+         * Save BEFORE the rest of this frame's paint so the saved
+         * image reflects last frame's content (not the in-flight
+         * frame which only has the wallpaper painted so far). */
+        if (sys_wm_poll_screenshot()) {
+            save_screenshot(&ctx);
         }
 
         struct sys_mouse_state ms;

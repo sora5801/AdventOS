@@ -87,6 +87,11 @@ int  wm_poll_alttab(struct task *caller);
 void wm_post_workspace(int n);
 int  wm_poll_workspace(struct task *caller);
 
+/* Session 151 — screenshot trigger.  Alt+P -> wm_post_screenshot;
+ * wmd polls per frame and dumps the FB to /tmp/screen.ppm when set. */
+void wm_post_screenshot(void);
+int  wm_poll_screenshot(struct task *caller);
+
 /* Session 143 — toast-notification ring.  Apps push short status
  * messages (<= 63 chars after truncation); wmd drains one per
  * call.  push returns 0 / -1; pop returns the byte length (0 if

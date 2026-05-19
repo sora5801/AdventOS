@@ -156,6 +156,7 @@ typedef unsigned int   size_t;
 #define SYS_WM_NOTIFY            105
 #define SYS_WM_POLL_NOTIFY       106
 #define SYS_WM_POLL_WORKSPACE    107
+#define SYS_WM_POLL_SCREENSHOT   108
 
 /* Session 70: syscall sandbox.
  *
@@ -604,6 +605,7 @@ int      sys_wm_event_poll (unsigned int window_id,
  * decrements; 0 otherwise. */
 int      sys_wm_poll_alttab(void);
 int      sys_wm_poll_workspace(void);
+int      sys_wm_poll_screenshot(void);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);

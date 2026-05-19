@@ -387,6 +387,10 @@ struct sys_limits {
  * Poll returns 0..3 (workspace index) or -1 if no request pending. */
 #define SYS_WM_POLL_WORKSPACE  107 /* (eax=107) -> 0..3 or -1 */
 
+/* Session 151 — screenshot trigger channel.  USB-HID intercepts
+ * Alt+P and posts here; wmd polls per frame.  Single-shot flag. */
+#define SYS_WM_POLL_SCREENSHOT 108 /* (eax=108) -> 1 if pending else 0 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

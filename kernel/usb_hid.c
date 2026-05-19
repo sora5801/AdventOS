@@ -163,6 +163,17 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
         return;
     }
 
+    /* Session 151 — Alt+P triggers a screenshot via wmd.  HID usage
+     * for 'p' is 0x13 (table position: 'a'=0x04, 'p'=0x13). */
+    if (alt && usage == 0x13) {
+        extern void wm_post_screenshot(void);
+        wm_post_screenshot();
+#ifdef USB_HID_TRACE
+        kprintf("[usb-hid] Alt+P -> screenshot\n");
+#endif
+        return;
+    }
+
     /* Arrow keys — emit the 3-byte ANSI CSI sequence (ESC '[' final),
      * same shape the PS/2 driver pushes via push_csi(). The shell
      * reads these in raw mode for history navigation; without this,

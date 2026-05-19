@@ -90,6 +90,11 @@ static volatile unsigned int g_alttab_pending;
  * poll.  No queue — only the most-recent request matters. */
 static volatile int g_workspace_pending = -1;
 
+/* Session 151 — screenshot request.  Alt+P intercepted by usb_hid
+ * sets this flag; wmd polls each frame, and when set dumps its
+ * current ctx framebuffer to /tmp/screen.ppm as a binary P6 PPM. */
+static volatile int g_screenshot_pending = 0;
+
 /* Session 143 — toast-notification ring.  Apps post short status
  * text (e.g. "saved /tmp/foo (123 B)") via SYS_WM_NOTIFY; wmd
  * drains via SYS_WM_POLL_NOTIFY each frame and pops up a toast.
@@ -394,6 +399,19 @@ int wm_poll_workspace(struct task *caller) {
     int n = g_workspace_pending;
     g_workspace_pending = -1;
     return n;
+}
+
+/* Session 151 — screenshot channel.  Single-shot flag; wmd polls
+ * each frame and triggers a /tmp/screen.ppm dump on edge. */
+void wm_post_screenshot(void) {
+    g_screenshot_pending = 1;
+}
+
+int wm_poll_screenshot(struct task *caller) {
+    if (g_wm_owner != caller) return 0;
+    if (!g_screenshot_pending) return 0;
+    g_screenshot_pending = 0;
+    return 1;
 }
 
 /* Session 143 — notification ring entry points. */
