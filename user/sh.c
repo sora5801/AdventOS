@@ -70,6 +70,18 @@ static int  g_hist_count;
  * a fresh interactive shell with no commands run yet. */
 static int  g_last_status = 0;
 
+/* Loop control: set by `break` / `continue` builtins, cleared by the
+ * enclosing exec_for / exec_while as each consumes one level. Bash's
+ * `break N` / `continue N` syntax pops N enclosing loops at once.
+ * Function calls save/restore these so `break` inside a function
+ * body can't escape the function. */
+static int  g_break_depth    = 0;
+static int  g_continue_depth = 0;
+
+/* `return` from a function: set by the `return` builtin; checked by
+ * the function-call dispatcher. Doesn't escape the function. */
+static int  g_return_pending = 0;
+
 /* Positional args: $0 = name (script path or function name), $1..$N
  * = args. g_pos_count counts the args (does not include $0). Stored
  * by-pointer since the strings live elsewhere (main argv for scripts,
@@ -242,6 +254,35 @@ static int tokenize(char *line, char **tokens, int cap) {
                 if (q == '\'' && n - 1 < ARG_MAX) g_tok_raw[n - 1] = 1;
                 while (*p && *p != q) *out++ = *p++;
                 if (*p == q) p++;       /* skip closing quote */
+            } else if (*p == '(' && *(p + 1) == '(') {
+                /* Arithmetic group `((...))` — consume until the
+                 * matching `))`, ignoring whitespace and operator
+                 * separators inside. Tracks paren depth so nested
+                 * parentheses don't terminate prematurely. Lets
+                 * `$(( i + 1 ))` and `(( x = 5 ))` tokenize as
+                 * single words. */
+                int depth = 0;
+                *out++ = *p++;   /* ( */
+                *out++ = *p++;   /* ( */
+                depth = 2;
+                while (*p && depth > 0) {
+                    if (*p == '(') depth++;
+                    else if (*p == ')') depth--;
+                    *out++ = *p++;
+                }
+            } else if (*p == '$' && *(p + 1) == '{') {
+                /* `${...}` parameter expansion — consume until the
+                 * matching `}`. `{` and `}` are normally one-char
+                 * separators (function bodies); inside `${...}`
+                 * they belong to the word. */
+                *out++ = *p++;   /* $ */
+                *out++ = *p++;   /* { */
+                int depth = 1;
+                while (*p && depth > 0) {
+                    if (*p == '{') depth++;
+                    else if (*p == '}') { depth--; if (depth == 0) { *out++ = *p++; break; } }
+                    *out++ = *p++;
+                }
             } else {
                 *out++ = *p++;
             }
@@ -987,9 +1028,24 @@ static void cmd_help(void) {
     puts("  if CMD ; then ...; [elif CMD ; then ...] [else ...] fi\n");
     puts("  for VAR in WORDS ; do ... ; done\n");
     puts("  while CMD ; do ... ; done\n");
+    puts("  break [N] / continue [N]   exit / skip enclosing loop(s)\n");
     puts("  NAME() { ... }    define a shell function (called like a cmd)\n");
+    puts("  return [N]        exit current function with status N\n");
     puts("  $1..$9, $@, $*, $#, $0   positional args inside scripts / fns\n");
     puts("  'literal $x'      single quotes prevent variable expansion\n");
+    puts("\n");
+    puts("Arithmetic + parameter expansion:\n");
+    puts("  $((expr))         arithmetic substitution (+, -, *, /, %, ==, <, etc.)\n");
+    puts("  (( expr ))        arithmetic command; exit 0 iff result != 0\n");
+    puts("  ${var}            basic substitution\n");
+    puts("  ${var:-default}   default value if unset/empty\n");
+    puts("  ${var:=default}   default + assign\n");
+    puts("  ${#var}           length of value\n");
+    puts("  ${var#prefix}     strip prefix (matches literal, not glob)\n");
+    puts("  ${var%suffix}     strip suffix\n");
+    puts("  ${var/old/new}    replace first / `//` replaces all\n");
+    puts("  NAME=value        set env var (single-token only — no command\n");
+    puts("                    prefix overrides)\n");
     puts("\n");
     puts("Line editing (raw-mode, sessions 49 + 84):\n");
     puts("  Backspace         erase char before cursor\n");
@@ -1774,6 +1830,227 @@ static void cmd_history(void) {
 /* Integer parse for `[` test: accepts optional '-' / '+' and decimal
  * digits. Returns 1 on success and writes to *out; 0 on parse failure.
  * Doesn't check overflow — fine for test's typical use of small ints. */
+/* ---- Arithmetic expression evaluator ($((...)) / ((...))) ---- */
+/*
+ * Recursive-descent eval for a bash-subset arithmetic grammar:
+ *
+ *   expr      = assign
+ *   assign    = ID '=' assign  |  ID '+=' assign  |  ...  |  logic_or
+ *   logic_or  = logic_and ('||' logic_and)*
+ *   logic_and = compare  ('&&' compare)*
+ *   compare   = additive (('<'|'<='|'>'|'>='|'=='|'!=') additive)*
+ *   additive  = mult     (('+'|'-') mult)*
+ *   mult      = unary    (('*'|'/'|'%') unary)*
+ *   unary     = ('-'|'+'|'!') unary  |  primary
+ *   primary   = INT  |  ID  |  '$' ID  |  '(' expr ')'
+ *
+ * Bare identifiers look up env_get and parse as int (unset / non-numeric
+ * = 0, matching bash). `name = expr` stores back via env_set. Division
+ * by zero quietly yields 0 — bash errors loudly; we keep it simple. */
+struct ar { const char *s; int p; int err; };
+
+static int ar_expr(struct ar *c);
+static int parse_int(const char *s, int *out);
+
+static void ar_ws(struct ar *c) {
+    while (c->s[c->p] == ' ' || c->s[c->p] == '\t') c->p++;
+}
+
+static int ar_match(struct ar *c, const char *tok) {
+    ar_ws(c);
+    int i = 0;
+    while (tok[i]) {
+        if (c->s[c->p + i] != tok[i]) return 0;
+        i++;
+    }
+    /* For two-char ops, refuse if a third char would make it a different
+     * operator (e.g. `<` should NOT match against `<=`). */
+    c->p += i;
+    return 1;
+}
+
+static int ar_is_id_start(char ch) {
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+}
+static int ar_is_id_cont(char ch) {
+    return ar_is_id_start(ch) || (ch >= '0' && ch <= '9');
+}
+
+static int ar_read_name(struct ar *c, char *out, int cap) {
+    int o = 0;
+    while (c->s[c->p] && ar_is_id_cont(c->s[c->p])) {
+        if (o < cap - 1) out[o++] = c->s[c->p];
+        c->p++;
+    }
+    out[o] = 0;
+    return o;
+}
+
+static int ar_lookup(const char *name) {
+    const char *v = env_get(name);
+    if (!v) return 0;
+    int n;
+    return parse_int(v, &n) ? n : 0;
+}
+
+static void ar_store(const char *name, int v) {
+    char tmp[12]; int ti = 0;
+    int t = v, neg = 0;
+    if (t < 0) { neg = 1; t = -t; }
+    if (t == 0) tmp[ti++] = '0';
+    while (t) { tmp[ti++] = '0' + t % 10; t /= 10; }
+    char val[16]; int vi = 0;
+    if (neg) val[vi++] = '-';
+    while (ti--) val[vi++] = tmp[ti];
+    val[vi] = 0;
+    env_set(name, val);
+}
+
+static int ar_primary(struct ar *c) {
+    ar_ws(c);
+    char ch = c->s[c->p];
+    if (ch == 0) { c->err = 1; return 0; }
+    if (ch >= '0' && ch <= '9') {
+        int v = 0;
+        while (c->s[c->p] >= '0' && c->s[c->p] <= '9') {
+            v = v * 10 + (c->s[c->p] - '0'); c->p++;
+        }
+        return v;
+    }
+    if (ch == '(') {
+        c->p++;
+        int v = ar_expr(c);
+        ar_ws(c);
+        if (c->s[c->p] == ')') c->p++;
+        else c->err = 1;
+        return v;
+    }
+    if (ch == '$') {
+        c->p++;
+        /* $0..$9, $?, $#, or $NAME inside arithmetic. */
+        char d = c->s[c->p];
+        if (d == '?') { c->p++; return g_last_status; }
+        if (d == '#') { c->p++; return g_pos_count; }
+        if (d >= '0' && d <= '9') {
+            int idx = d - '0'; c->p++;
+            const char *v = (idx <= g_pos_count) ? g_pos[idx] : 0;
+            if (!v) return 0;
+            int n; return parse_int(v, &n) ? n : 0;
+        }
+    }
+    if (ar_is_id_start(ch) || (ch == '$' && ar_is_id_start(c->s[c->p + 1]))) {
+        char name[32];
+        if (c->s[c->p] == '$') c->p++;
+        ar_read_name(c, name, sizeof(name));
+        return ar_lookup(name);
+    }
+    c->err = 1;
+    return 0;
+}
+
+static int ar_unary(struct ar *c) {
+    ar_ws(c);
+    if (c->s[c->p] == '-') { c->p++; return -ar_unary(c); }
+    if (c->s[c->p] == '+') { c->p++; return  ar_unary(c); }
+    if (c->s[c->p] == '!') { c->p++; return !ar_unary(c); }
+    return ar_primary(c);
+}
+
+static int ar_mul(struct ar *c) {
+    int v = ar_unary(c);
+    for (;;) {
+        ar_ws(c);
+        char ch = c->s[c->p];
+        if (ch == '*') { c->p++; v = v * ar_unary(c); }
+        else if (ch == '/') {
+            c->p++; int r = ar_unary(c); v = r ? v / r : 0;
+        }
+        else if (ch == '%') {
+            c->p++; int r = ar_unary(c); v = r ? v % r : 0;
+        }
+        else break;
+    }
+    return v;
+}
+
+static int ar_add(struct ar *c) {
+    int v = ar_mul(c);
+    for (;;) {
+        ar_ws(c);
+        char ch = c->s[c->p];
+        if (ch == '+') { c->p++; v = v + ar_mul(c); }
+        else if (ch == '-') { c->p++; v = v - ar_mul(c); }
+        else break;
+    }
+    return v;
+}
+
+static int ar_cmp(struct ar *c) {
+    int v = ar_add(c);
+    for (;;) {
+        ar_ws(c);
+        /* Two-char ops first so `<` doesn't shadow `<=`. */
+        if (c->s[c->p] == '<' && c->s[c->p+1] == '=') { c->p+=2; v = (v <= ar_add(c)); }
+        else if (c->s[c->p] == '>' && c->s[c->p+1] == '=') { c->p+=2; v = (v >= ar_add(c)); }
+        else if (c->s[c->p] == '=' && c->s[c->p+1] == '=') { c->p+=2; v = (v == ar_add(c)); }
+        else if (c->s[c->p] == '!' && c->s[c->p+1] == '=') { c->p+=2; v = (v != ar_add(c)); }
+        else if (c->s[c->p] == '<') { c->p++; v = (v <  ar_add(c)); }
+        else if (c->s[c->p] == '>') { c->p++; v = (v >  ar_add(c)); }
+        else break;
+    }
+    return v;
+}
+
+static int ar_and(struct ar *c) {
+    int v = ar_cmp(c);
+    while (ar_match(c, "&&")) {
+        int r = ar_cmp(c);
+        v = (v && r) ? 1 : 0;
+    }
+    return v;
+}
+
+static int ar_or(struct ar *c) {
+    int v = ar_and(c);
+    while (ar_match(c, "||")) {
+        int r = ar_and(c);
+        v = (v || r) ? 1 : 0;
+    }
+    return v;
+}
+
+static int ar_expr(struct ar *c) {
+    /* Try assignment first: ID '=' expr. Need lookahead so `==` doesn't
+     * trigger here. Rewind on miss. */
+    ar_ws(c);
+    int saved = c->p;
+    if (ar_is_id_start(c->s[c->p])) {
+        char name[32];
+        ar_read_name(c, name, sizeof(name));
+        ar_ws(c);
+        if (c->s[c->p] == '=' && c->s[c->p + 1] != '=') {
+            c->p++;
+            int v = ar_expr(c);
+            ar_store(name, v);
+            return v;
+        }
+        c->p = saved;
+    }
+    return ar_or(c);
+}
+
+/* Public entry. Returns 0 on success (value in *out) or -1 on parse
+ * error. Trailing whitespace OK; anything else is an error. */
+static int arith_eval(const char *s, int *out) {
+    struct ar c; c.s = s; c.p = 0; c.err = 0;
+    int v = ar_expr(&c);
+    ar_ws(&c);
+    if (c.s[c.p] != 0) c.err = 1;
+    if (c.err) return -1;
+    *out = v;
+    return 0;
+}
+
 static int parse_int(const char *s, int *out) {
     if (!s || !*s) return 0;
     int sign = 1, v = 0; const char *p = s;
@@ -1923,6 +2200,44 @@ static int cmd_test_bracket(char **toks, int ntok) {
 
 /* `shift [N]` — drop the first N positional args (default 1). Returns
  * 0 on success, 1 if N exceeds $# (bash behavior). */
+/* `break [N]` — set the break depth so enclosing loops pop. Default
+ * N=1 (just the innermost loop). Returns 0 — the actual loop exit
+ * happens when exec_for/exec_while see the depth > 0. */
+static int cmd_break(int ntok, char **toks) {
+    int n = 1;
+    if (ntok > 1) {
+        int v; if (parse_int(toks[1], &v) && v > 0) n = v;
+    }
+    g_break_depth = n;
+    return 0;
+}
+
+/* `continue [N]` — like break but for next-iteration. Skips the
+ * remainder of the current loop body; exec_for/exec_while consume
+ * one level and either continue or propagate up. */
+static int cmd_continue(int ntok, char **toks) {
+    int n = 1;
+    if (ntok > 1) {
+        int v; if (parse_int(toks[1], &v) && v > 0) n = v;
+    }
+    g_continue_depth = n;
+    return 0;
+}
+
+/* `return [N]` — exit current shell function with status N (default
+ * is the current $?). Sets g_return_pending which the function-call
+ * dispatcher checks after the body returns. Outside a function this
+ * silently sets $? but doesn't terminate the shell (bash behavior is
+ * to error; we keep it cheap). */
+static int cmd_return(int ntok, char **toks) {
+    int rc = g_last_status;
+    if (ntok > 1) {
+        int v; if (parse_int(toks[1], &v)) rc = v;
+    }
+    g_return_pending = 1;
+    return rc;
+}
+
 static int cmd_shift(int ntok, char **toks) {
     int n = 1;
     if (ntok > 1) {
@@ -2142,6 +2457,17 @@ static int execute_segment(char **toks, int lo, int hi) {
             int          saved_count = g_pos_count;
             for (int i = 0; i < POS_MAX; i++) saved_pos[i] = g_pos[i];
 
+            /* Save loop-control + return state. Within the function
+             * body these start fresh; on the way out, the caller's
+             * state is restored so `break` / `continue` / `return`
+             * can't leak across function boundaries. */
+            int saved_break    = g_break_depth;
+            int saved_continue = g_continue_depth;
+            int saved_return   = g_return_pending;
+            g_break_depth    = 0;
+            g_continue_depth = 0;
+            g_return_pending = 0;
+
             set_positional(seg[0], &seg[1], ntok - 1);
 
             char buf[LINE_MAX];
@@ -2150,9 +2476,13 @@ static int execute_segment(char **toks, int lo, int hi) {
             buf[j] = 0;
             execute_line(buf);
 
+            int rc = g_last_status;
             g_pos_count = saved_count;
             for (int i = 0; i < POS_MAX; i++) g_pos[i] = saved_pos[i];
-            return g_last_status;
+            g_break_depth    = saved_break;
+            g_continue_depth = saved_continue;
+            g_return_pending = saved_return;
+            return rc;
         }
     }
 
@@ -2168,6 +2498,56 @@ static int execute_segment(char **toks, int lo, int hi) {
         }
     }
 
+    /* Bare assignment `NAME=value` — set env var when it's the only
+     * word in the segment. Bash also supports `FOO=bar cmd` as a
+     * one-shot env override; we don't (yet). The LHS must be a valid
+     * identifier so we don't catch arguments like `--foo=bar`. */
+    if (ntok == 1) {
+        char *t = seg[0];
+        int eq = -1;
+        for (int i = 0; t[i]; i++) {
+            if (t[i] == '=') { eq = i; break; }
+            int ok = (i == 0)
+                ? ((t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= 'a' && t[i] <= 'z') || t[i] == '_')
+                : ((t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= 'a' && t[i] <= 'z') ||
+                   (t[i] >= '0' && t[i] <= '9') || t[i] == '_');
+            if (!ok) { eq = -2; break; }
+        }
+        if (eq > 0) {
+            char name[32];
+            int nlen = eq < 31 ? eq : 31;
+            for (int i = 0; i < nlen; i++) name[i] = t[i];
+            name[nlen] = 0;
+            if (env_set(name, t + eq + 1) < 0) {
+                puts("sh: env full or value too long\n");
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    /* `((expr))` arithmetic command: side-effects allowed (`((i=5))`),
+     * exit status is 0 iff the result is non-zero — same as bash. The
+     * tokenizer keeps the whole `((...))` form together as one word, so
+     * we just trim the wrapper and feed the inside to arith_eval. */
+    {
+        char *t0 = seg[0];
+        int   tl = 0; while (t0[tl]) tl++;
+        if (tl >= 5 && t0[0] == '(' && t0[1] == '(' &&
+            t0[tl - 2] == ')' && t0[tl - 1] == ')') {
+            char buf[128]; int b = 0;
+            for (int q = 2; q < tl - 2 && b < (int)sizeof(buf) - 1; q++)
+                buf[b++] = t0[q];
+            buf[b] = 0;
+            int v = 0;
+            if (arith_eval(buf, &v) < 0) {
+                puts("sh: arithmetic syntax error\n");
+                return 2;
+            }
+            return v != 0 ? 0 : 1;
+        }
+    }
+
     /* Hard builtins — always inline (state mutation / special exit). */
     if (strcmp(seg[0], "help")     == 0) { cmd_help();    return 0; }
     if (strcmp(seg[0], "pid")      == 0) { cmd_pid();     return 0; }
@@ -2180,6 +2560,9 @@ static int execute_segment(char **toks, int lo, int hi) {
     if (strcmp(seg[0], "unset")    == 0) { cmd_unset_b(seg, ntok); return 0; }
     if (strcmp(seg[0], "history")  == 0) { cmd_history(); return 0; }
     if (strcmp(seg[0], "shift")    == 0) { return cmd_shift(ntok, seg); }
+    if (strcmp(seg[0], "break")    == 0) { return cmd_break(ntok, seg); }
+    if (strcmp(seg[0], "continue") == 0) { return cmd_continue(ntok, seg); }
+    if (strcmp(seg[0], "return")   == 0) { return cmd_return(ntok, seg); }
     if (strcmp(seg[0], "[")        == 0) { return cmd_test_bracket(seg, ntok); }
     if (strcmp(seg[0], "test")     == 0) { return cmd_test_bracket(seg, ntok); }
     if (strcmp(seg[0], "read")     == 0) { return cmd_read(ntok, seg); }
@@ -2331,6 +2714,21 @@ static int exec_for(char **toks, int lo, int hi) {
         g_dollar_q_off = pool_save;
 
         last = exec_token_seq(toks, body_lo, done_at);
+
+        /* Loop-control consumption. `break` exits this loop and
+         * propagates the remaining depth (if any) to an outer loop.
+         * `continue` skips to the next iteration (or propagates). A
+         * pending `return` aborts immediately. */
+        if (g_return_pending) break;
+        if (g_break_depth) {
+            g_break_depth--;
+            break;
+        }
+        if (g_continue_depth) {
+            g_continue_depth--;
+            if (g_continue_depth > 0) break;
+            /* depth was 1 — this loop handles it, no propagation. */
+        }
     }
     return last;
 }
@@ -2379,6 +2777,16 @@ static int exec_while(char **toks, int lo, int hi) {
         g_dollar_q_off = pool_save;
 
         last = exec_token_seq(toks, body_lo, done_at);
+
+        if (g_return_pending) break;
+        if (g_break_depth) {
+            g_break_depth--;
+            break;
+        }
+        if (g_continue_depth) {
+            g_continue_depth--;
+            if (g_continue_depth > 0) break;
+        }
     }
     if (safety <= 0) puts("sh: while: iteration cap hit\n");
     return last;
@@ -2426,6 +2834,13 @@ static int exec_token_seq(char **toks, int lo, int hi) {
         if (!at_end) toks[j] = 0;       /* terminate the segment's argv */
 
         if (seg_start < j) {
+            /* Short-circuit out of the rest of the chain if a loop
+             * control or return is pending. The enclosing exec_for /
+             * exec_while / function-call frame will pick it up and
+             * either consume or propagate. */
+            if (g_break_depth || g_continue_depth || g_return_pending) {
+                break;
+            }
             int run = 1;
             if (next_chain ==  1 && g_last_status != 0) run = 0;
             if (next_chain == -1 && g_last_status == 0) run = 0;
@@ -2524,6 +2939,197 @@ static void expand_vars_segment(char **toks, int lo, int hi) {
                 continue;
             }
             char n = t[k + 1];
+            /* `${...}` parameter expansion. The closing `}` was made a
+             * tokenizer separator earlier (for function bodies), so
+             * `${var}` lives entirely in one word only when the body
+             * has no spaces. For our subset that's always true. */
+            if (n == '{') {
+                int p2  = k + 2;
+                int end = p2;
+                int depth = 1;
+                while (t[end] && depth > 0) {
+                    if (t[end] == '{') depth++;
+                    else if (t[end] == '}') { depth--; if (depth == 0) break; }
+                    end++;
+                }
+                if (depth == 0 && t[end] == '}') {
+                    /* Body is t[p2..end). Parse it. */
+                    /* Form 1: ${#name} — length of value */
+                    if (t[p2] == '#') {
+                        char name[32]; int ni = 0;
+                        for (int q = p2 + 1; q < end && ni < (int)sizeof(name) - 1; q++)
+                            name[ni++] = t[q];
+                        name[ni] = 0;
+                        const char *v = env_get(name);
+                        int len = 0;
+                        if (v) while (v[len]) len++;
+                        emit_int(out, &o, cap, len);
+                        k = end + 1;
+                        continue;
+                    }
+                    /* Otherwise: read the var name (up to the first op
+                     * char that introduces a modifier). */
+                    char name[32]; int ni = 0;
+                    int q = p2;
+                    while (q < end && (
+                            (t[q] >= 'A' && t[q] <= 'Z') ||
+                            (t[q] >= 'a' && t[q] <= 'z') ||
+                            (t[q] >= '0' && t[q] <= '9') ||
+                            t[q] == '_')) {
+                        if (ni < (int)sizeof(name) - 1) name[ni++] = t[q];
+                        q++;
+                    }
+                    name[ni] = 0;
+                    const char *v = env_get(name);
+
+                    /* Plain `${name}` */
+                    if (q == end) {
+                        if (v) emit_str(out, &o, cap, v);
+                        k = end + 1;
+                        continue;
+                    }
+
+                    /* `${name:-default}` — default if unset/empty */
+                    /* `${name:=default}` — same, but also assign */
+                    if (q + 1 < end && t[q] == ':' &&
+                        (t[q + 1] == '-' || t[q + 1] == '=')) {
+                        int assign = (t[q + 1] == '=');
+                        if (v && v[0]) {
+                            emit_str(out, &o, cap, v);
+                        } else {
+                            char def[96]; int di = 0;
+                            for (int r = q + 2; r < end && di < (int)sizeof(def) - 1; r++)
+                                def[di++] = t[r];
+                            def[di] = 0;
+                            emit_str(out, &o, cap, def);
+                            if (assign) env_set(name, def);
+                        }
+                        k = end + 1;
+                        continue;
+                    }
+
+                    /* `${name#pre}` / `${name##pre}` — strip prefix */
+                    if (t[q] == '#') {
+                        int greedy = (q + 1 < end && t[q + 1] == '#');
+                        int prefix_start = q + (greedy ? 2 : 1);
+                        if (v) {
+                            int vlen = 0; while (v[vlen]) vlen++;
+                            int plen = end - prefix_start;
+                            int strip = 0;
+                            /* Plain string match (no globs). For greedy
+                             * we'd take the longest match, but with a
+                             * fixed prefix string greedy == short here.
+                             * Bash glob patterns in ${var#pat} are not
+                             * supported yet. */
+                            if (plen <= vlen) {
+                                int ok = 1;
+                                for (int r = 0; r < plen; r++) {
+                                    if (v[r] != t[prefix_start + r]) { ok = 0; break; }
+                                }
+                                if (ok) strip = plen;
+                            }
+                            emit_str(out, &o, cap, v + strip);
+                            (void)greedy;
+                        }
+                        k = end + 1;
+                        continue;
+                    }
+
+                    /* `${name%suf}` / `${name%%suf}` — strip suffix */
+                    if (t[q] == '%') {
+                        int greedy = (q + 1 < end && t[q + 1] == '%');
+                        int suffix_start = q + (greedy ? 2 : 1);
+                        if (v) {
+                            int vlen = 0; while (v[vlen]) vlen++;
+                            int slen = end - suffix_start;
+                            int keep = vlen;
+                            if (slen <= vlen) {
+                                int ok = 1;
+                                for (int r = 0; r < slen; r++) {
+                                    if (v[vlen - slen + r] != t[suffix_start + r]) {
+                                        ok = 0; break;
+                                    }
+                                }
+                                if (ok) keep = vlen - slen;
+                            }
+                            for (int r = 0; r < keep && o < cap; r++) out[o++] = v[r];
+                            (void)greedy;
+                        }
+                        k = end + 1;
+                        continue;
+                    }
+
+                    /* `${name/old/new}` / `${name//old/new}` — replace */
+                    if (t[q] == '/') {
+                        int all = (q + 1 < end && t[q + 1] == '/');
+                        int old_start = q + (all ? 2 : 1);
+                        int old_end   = old_start;
+                        while (old_end < end && t[old_end] != '/') old_end++;
+                        int new_start = (old_end < end) ? old_end + 1 : old_end;
+                        int olen = old_end - old_start;
+                        int nlen = end - new_start;
+                        if (v && olen > 0) {
+                            int vlen = 0; while (v[vlen]) vlen++;
+                            int r = 0;
+                            while (r < vlen && o < cap) {
+                                int match = (r + olen <= vlen);
+                                if (match) {
+                                    for (int x = 0; x < olen; x++) {
+                                        if (v[r + x] != t[old_start + x]) {
+                                            match = 0; break;
+                                        }
+                                    }
+                                }
+                                if (match) {
+                                    for (int x = 0; x < nlen && o < cap; x++)
+                                        out[o++] = t[new_start + x];
+                                    r += olen;
+                                    if (!all) {
+                                        /* Single-replace: copy rest verbatim. */
+                                        while (r < vlen && o < cap) out[o++] = v[r++];
+                                        break;
+                                    }
+                                } else {
+                                    out[o++] = v[r++];
+                                }
+                            }
+                        } else if (v) {
+                            emit_str(out, &o, cap, v);
+                        }
+                        k = end + 1;
+                        continue;
+                    }
+
+                    /* Unrecognised modifier — fall through to literal. */
+                    if (v) emit_str(out, &o, cap, v);
+                    k = end + 1;
+                    continue;
+                }
+            }
+            /* `$((expr))` arithmetic expansion. Find the matching `))`
+             * within this token (tokenizer guaranteed the whole group
+             * is single-token), eval, splice the decimal result. */
+            if (n == '(' && t[k + 2] == '(') {
+                int p2  = k + 3;
+                int depth = 2;
+                int end = p2;
+                while (t[end] && depth > 0) {
+                    if (t[end] == '(') depth++;
+                    else if (t[end] == ')') depth--;
+                    if (depth > 0) end++;
+                }
+                if (depth == 0 && t[end] == ')' && t[end - 1] == ')') {
+                    char buf[128]; int b = 0;
+                    for (int q = p2; q < end - 1 && b < (int)sizeof(buf) - 1; q++)
+                        buf[b++] = t[q];
+                    buf[b] = 0;
+                    int v = 0;
+                    arith_eval(buf, &v);
+                    emit_int(out, &o, cap, v);
+                    k = end + 1;          /* past the trailing ) */
+                    continue;
+                }
+            }
             if (n == '?') {
                 emit_int(out, &o, cap, g_last_status);
                 k += 2;
