@@ -105,8 +105,8 @@ int main(int argc, char **argv) {
         /* Status strip. */
         wm_fill_rect(&win, 0, 0, WIN_W, 18,
                      has_focus ? 0x4080E0u : 0x303030u);
-        const char *label = mode_12h ? "Clock PST (12h - space toggles)"
-                                     : "Clock PST (24h - space toggles)";
+        const char *label = mode_12h ? "Clock PDT (12h - space toggles)"
+                                     : "Clock PDT (24h - space toggles)";
         gfx_text(&sctx, 6, 5, label, GFX_WHITE, GFX_TRANSPARENT);
 
         /* Big time display, centered-ish.
@@ -118,7 +118,10 @@ int main(int argc, char **argv) {
          * year-round UTC-8; in summer (Pacific Daylight) this will
          * read one hour behind local clocks.  Adjust the literal
          * below to taste — eventually we'll plumb a TZ env var. */
-        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        /* Session 142/155 — Pacific time offset.  7h covers PDT
+         * (UTC-7, in effect March-November); switch to 8h for
+         * true PST in winter. */
+        const unsigned int PST_OFFSET_SEC = 7u * 3600u;
         unsigned int raw = sys_time();
         unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         char tbuf[16];

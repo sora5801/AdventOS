@@ -561,7 +561,9 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
         /* Session 145 — display Pacific Standard Time (UTC-8) so
          * the taskbar clock matches wmclock's PST output instead
          * of staying on raw UTC.  Same fixed offset, no DST. */
-        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        /* Session 145 — Pacific time offset.  7h covers PDT (UTC-7,
+         * March-November); flip to 8h for true PST in winter. */
+        const unsigned int PST_OFFSET_SEC = 7u * 3600u;
         unsigned int raw = sys_time();
         unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         unsigned int min = (ts / 60u) % 60u;
