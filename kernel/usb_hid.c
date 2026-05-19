@@ -194,6 +194,22 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
         return;
     }
 
+    /* Session 159 — PageUp / PageDown emit the 4-byte ANSI sequence
+     * (ESC '[' digit '~'), same convention every Unix terminal uses.
+     * wmterm intercepts these for scrollback; the kernel-console
+     * shell parses them as "unknown CSI" and drops the whole sequence
+     * (see sh.c read_line_interactive after this session). */
+    if (usage == 0x4B) {                /* PageUp */
+        char esc[4] = { 27, '[', '5', '~' };
+        keyboard_inject(esc, 4);
+        return;
+    }
+    if (usage == 0x4E) {                /* PageDown */
+        char esc[4] = { 27, '[', '6', '~' };
+        keyboard_inject(esc, 4);
+        return;
+    }
+
     char c = shift ? hid_to_ascii_shifted[usage] : hid_to_ascii_unshifted[usage];
     if (!c) return;
 

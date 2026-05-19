@@ -66,20 +66,68 @@ static int   g_cur_row;
 /* VT state: 0=normal, 1=saw ESC, 2=saw ESC [ */
 static int   g_vt_state;
 
+/* Session 159 — scrollback ring.  Every row that grid_scroll pushes
+ * off the top of g_grid lands here so the user can PgUp/PgDn through
+ * earlier output.  500 rows × 60 cols = 30 KB BSS, comfortably below
+ * the user-binary BSS cap.  g_view_offset is the live-tail offset:
+ * 0 means rendering shows g_grid (current); positive means scroll
+ * back that many rows into history. */
+#define SB_ROWS    500
+#define PAGE_STEP  12               /* half a screen per PgUp/PgDn */
+static char g_sb[SB_ROWS][COLS];
+static int  g_sb_count;             /* rows pushed so far (0..SB_ROWS) */
+static int  g_sb_head;              /* index of oldest row in g_sb */
+static int  g_view_offset;          /* rows scrolled back from live tail */
+
 static void grid_clear(void) {
     for (int r = 0; r < ROWS; r++)
         for (int c = 0; c < COLS; c++)
             g_grid[r][c] = 0;
     g_cur_col = 0;
     g_cur_row = 0;
+    g_sb_count = 0;
+    g_sb_head  = 0;
+    g_view_offset = 0;
 }
 
-/* Shift every row up by one; bottom row becomes blank. */
+/* Shift every row up by one; the top row goes into the scrollback
+ * ring, the bottom row becomes blank. */
 static void grid_scroll(void) {
+    int slot = (g_sb_head + g_sb_count) % SB_ROWS;
+    for (int c = 0; c < COLS; c++) g_sb[slot][c] = g_grid[0][c];
+    if (g_sb_count < SB_ROWS) g_sb_count++;
+    else g_sb_head = (g_sb_head + 1) % SB_ROWS;
+
     for (int r = 0; r < ROWS - 1; r++)
         for (int c = 0; c < COLS; c++)
             g_grid[r][c] = g_grid[r+1][c];
     for (int c = 0; c < COLS; c++) g_grid[ROWS-1][c] = 0;
+}
+
+/* Return a pointer to the COLS-wide row that should appear at
+ * visible-row `r` (0 = top of window, ROWS-1 = bottom), respecting
+ * g_view_offset.  Rows above g_sb_count + ROWS - g_view_offset live
+ * in g_sb; rows from there to the bottom live in g_grid. */
+static const char *visible_row(int r) {
+    int abs_row = (g_sb_count - g_view_offset) + r;
+    if (abs_row < 0) return 0;                    /* above oldest */
+    if (abs_row < g_sb_count) {
+        int slot = (g_sb_head + abs_row) % SB_ROWS;
+        return g_sb[slot];
+    }
+    int gr = abs_row - g_sb_count;
+    if (gr < ROWS) return g_grid[gr];
+    return 0;
+}
+
+static void scroll_up(void) {
+    g_view_offset += PAGE_STEP;
+    if (g_view_offset > g_sb_count) g_view_offset = g_sb_count;
+}
+
+static void scroll_down(void) {
+    g_view_offset -= PAGE_STEP;
+    if (g_view_offset < 0) g_view_offset = 0;
 }
 
 /* Place a printable character at cursor; advance.  Wrap/scroll
@@ -141,6 +189,63 @@ static void vt_feed(unsigned char b) {
  * leaving it always-on would spam the launching console with one
  * line per keystroke, so the default is quiet. */
 static int g_verbose = 0;
+
+/* Session 159 — input-side CSI parser.  Single PgUp/PgDn presses
+ * arrive from wmd as four separate WM_EV_KEY events (ESC, '[', '5'
+ * or '6', '~').  We buffer until the sequence is complete; if it
+ * matches a wmterm-special, we consume it locally; otherwise we
+ * flush the buffered bytes to the PTY in order, so e.g. arrow keys
+ * still reach sh.elf for history navigation. */
+static unsigned char g_kbd_esc[8];
+static int           g_kbd_esc_len;
+
+static void key_byte(int master, unsigned char b) {
+    if (g_kbd_esc_len == 0) {
+        if (b == 27) { g_kbd_esc[0] = 27; g_kbd_esc_len = 1; return; }
+        sys_write(master, &b, 1);
+        return;
+    }
+    /* Mid-ESC.  Buffer first, then dispatch on the new state. */
+    if (g_kbd_esc_len < (int)sizeof(g_kbd_esc))
+        g_kbd_esc[g_kbd_esc_len++] = b;
+
+    /* Second byte: must be '[' for CSI.  '[' means "keep going";
+     * anything else means this was a bare ESC + literal so flush both
+     * to the PTY and go back to idle. */
+    if (g_kbd_esc_len == 2) {
+        if (b == '[') return;                  /* CSI start, keep collecting */
+        sys_write(master, g_kbd_esc, g_kbd_esc_len);
+        g_kbd_esc_len = 0;
+        return;
+    }
+    /* Parameter / intermediate bytes (0x20..0x3F): keep collecting,
+     * with an overrun safety valve. */
+    if (b >= 0x20 && b <= 0x3F) {
+        if (g_kbd_esc_len >= (int)sizeof(g_kbd_esc)) {
+            sys_write(master, g_kbd_esc, g_kbd_esc_len);
+            g_kbd_esc_len = 0;
+        }
+        return;
+    }
+    /* Final byte (0x40..0x7E): sequence complete.  Match wmterm
+     * specials (PgUp/PgDn = '5~' / '6~'); flush everything else
+     * through to the PTY so arrows and friends still work. */
+    if (b >= 0x40 && b <= 0x7E) {
+        if (g_kbd_esc_len == 4 && g_kbd_esc[2] == '5' && b == '~') {
+            scroll_up();
+        } else if (g_kbd_esc_len == 4 && g_kbd_esc[2] == '6' && b == '~') {
+            scroll_down();
+        } else {
+            sys_write(master, g_kbd_esc, g_kbd_esc_len);
+        }
+        g_kbd_esc_len = 0;
+        return;
+    }
+    /* Anything else mid-sequence (e.g. another ESC, control char):
+     * flush what we have and return to idle without losing bytes. */
+    sys_write(master, g_kbd_esc, g_kbd_esc_len);
+    g_kbd_esc_len = 0;
+}
 
 int main(int argc, char **argv) {
     int seconds = 120;
@@ -215,11 +320,11 @@ int main(int argc, char **argv) {
                     break;
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
-                    char c = (char)ev.keycode;
-                    int wr = sys_write(master, &c, 1);
+                    unsigned char c = (unsigned char)ev.keycode;
+                    key_byte(master, c);
                     if (g_verbose)
-                        printf("wmterm: KEY 0x%x wr=%d\n",
-                               (unsigned)(unsigned char)c, wr);
+                        printf("wmterm: KEY 0x%x view=%d\n",
+                               (unsigned)c, g_view_offset);
                     break;
                 }
                 default: break;
@@ -234,6 +339,11 @@ int main(int argc, char **argv) {
             if (g_verbose)
                 printf("wmterm: rd n=%d first=0x%x\n",
                        n, (unsigned)(unsigned char)buf[0]);
+            /* Session 159 — snap back to live tail whenever new shell
+             * output arrives.  Without this, the user could be looking
+             * at history and the cursor would move "below" the viewport,
+             * which is confusing.  Matches every modern terminal. */
+            if (g_view_offset != 0) g_view_offset = 0;
             for (int i = 0; i < n; i++) vt_feed((unsigned char)buf[i]);
         }
 
@@ -241,14 +351,36 @@ int main(int argc, char **argv) {
         wm_clear(&win, 0x080808u);
         wm_fill_rect(&win, 0, 0, WIN_W, HDR_H,
                      has_focus ? 0x4080E0u : 0x404040u);
-        gfx_text(&sctx, 6, 6,
-                 has_focus ? "wmterm - sh.elf"
-                           : "wmterm - sh.elf (click to focus)",
-                 GFX_WHITE, GFX_TRANSPARENT);
+        /* Session 159 — when scrolled back, swap the header label so
+         * the user knows the cursor they see isn't live.  The title
+         * still includes the focus hint when unfocused. */
+        const char *label;
+        if (g_view_offset > 0) {
+            static char sb_label[48];
+            int i = 0;
+            const char *prefix = "wmterm - history -";
+            for (int k = 0; prefix[k]; k++) sb_label[i++] = prefix[k];
+            sb_label[i++] = ' ';
+            /* Render the offset as decimal digits. */
+            char dbuf[8]; int dn = 0; int v = g_view_offset;
+            if (v == 0) dbuf[dn++] = '0';
+            while (v) { dbuf[dn++] = (char)('0' + v % 10); v /= 10; }
+            while (dn--) sb_label[i++] = dbuf[dn];
+            const char *suffix = " rows (PgDn to live)";
+            for (int k = 0; suffix[k]; k++) sb_label[i++] = suffix[k];
+            sb_label[i] = 0;
+            label = sb_label;
+        } else {
+            label = has_focus ? "wmterm - sh.elf"
+                              : "wmterm - sh.elf (click to focus)";
+        }
+        gfx_text(&sctx, 6, 6, label, GFX_WHITE, GFX_TRANSPARENT);
 
         for (int r = 0; r < ROWS; r++) {
+            const char *row = visible_row(r);
+            if (!row) continue;
             for (int c = 0; c < COLS; c++) {
-                char ch = g_grid[r][c];
+                char ch = row[c];
                 if (!ch) continue;
                 gfx_glyph(&sctx, GRID_X + c * CELL_W,
                           GRID_Y + r * LINE_H, ch,
@@ -256,8 +388,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Blinking caret. */
-        if (has_focus && ((caret_phase / 12) & 1) == 0) {
+        /* Blinking caret — only when viewing the live tail.  In
+         * scrollback mode the cursor isn't where the user is looking,
+         * so showing it would be misleading. */
+        if (has_focus && g_view_offset == 0
+            && ((caret_phase / 12) & 1) == 0) {
             int cx = GRID_X + g_cur_col * CELL_W;
             int cy = GRID_Y + g_cur_row * LINE_H;
             wm_fill_rect(&win, cx, cy, CELL_W, LINE_H - 1, 0xFFFFFFu);

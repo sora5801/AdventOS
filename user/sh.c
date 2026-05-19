@@ -1883,12 +1883,26 @@ static int read_line_interactive(char *buf, int cap) {
             continue;
         }
 
-        /* ESC sequence — arrow keys arrive as ESC '[' final. */
+        /* ESC sequence — arrow keys arrive as ESC '[' final.  Session
+         * 159: PageUp/PageDown emit ESC '[' '5' '~' / '[' '6' '~'.
+         * The CSI parser now reads optional parameter / intermediate
+         * bytes (0x20..0x3F) between '[' and the final byte (0x40..0x7E);
+         * unknown sequences are still dropped but their tail bytes
+         * (the '~' after a '5') no longer leak into the input line. */
         if (c == 27) {
             char a, b;
             if (sys_read(0, &a, 1) <= 0) continue;
             if (a != '[') continue;
             if (sys_read(0, &b, 1) <= 0) continue;
+
+            /* Parameter / intermediate bytes — consume up to a final.
+             * We don't actually use the parameter value for any binding,
+             * just keep reading until the final byte (0x40..0x7E). */
+            while ((unsigned char)b >= 0x20 && (unsigned char)b <= 0x3F) {
+                char nxt;
+                if (sys_read(0, &nxt, 1) <= 0) break;
+                b = nxt;
+            }
 
             if (b == 'A') {                              /* up — history back */
                 if (g_hist_count == 0) continue;

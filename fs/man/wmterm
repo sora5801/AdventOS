@@ -30,6 +30,9 @@ DESCRIPTION
       Enter           sends '\r' / '\n' (depending on TTY mode)
       Backspace       sends 0x7F (DEL)
       Arrow keys      come through as ESC '[' 'A'/'B'/'C'/'D'
+      PageUp          intercepted: scroll view 12 rows into history
+      PageDown        intercepted: scroll view 12 rows toward live
+                      (snaps fully to live tail on any shell output)
 
     Mouse interactions happen at the WM level (drag title bar,
     resize from corner, close X) and don't reach the shell.
@@ -45,6 +48,14 @@ HISTORY
     appeared to "hang" — typing and the close X never reached it
     because wm_poll_event ran at most once per tick, and the read
     after it blocked forever.
+
+    Session 158 wired SIGHUP delivery on PTY-master close so the
+    inner sh.elf exits when wmterm's window is closed, instead of
+    spinning in a zero-byte-read loop forever.
+
+    Session 159 added a 500-row scrollback ring + PgUp/PgDn keys.
+    The header switches to a "history" indicator when scrolled
+    back; any new shell output snaps the view back to live tail.
 
 SEE ALSO
     sh(1), wmd(1), wmtype(1)
