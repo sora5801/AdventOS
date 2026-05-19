@@ -84,6 +84,12 @@ static struct wm_state *g_state;
  * a small max so a stuck-keyboard never overflows. */
 static volatile unsigned int g_alttab_pending;
 
+/* Session 147 — workspace switch request.  usb_hid intercepts
+ * Alt+1..4 and posts the workspace index here; wmd polls once
+ * per frame.  -1 = no pending switch; set by post, cleared by
+ * poll.  No queue — only the most-recent request matters. */
+static volatile int g_workspace_pending = -1;
+
 /* Session 143 — toast-notification ring.  Apps post short status
  * text (e.g. "saved /tmp/foo (123 B)") via SYS_WM_NOTIFY; wmd
  * drains via SYS_WM_POLL_NOTIFY each frame and pops up a toast.
@@ -375,6 +381,19 @@ int wm_poll_alttab(struct task *caller) {
     if (g_alttab_pending == 0) return 0;
     g_alttab_pending--;
     return 1;
+}
+
+/* Session 147 — workspace switch channel.  Same one-slot pattern
+ * as alttab but carries a value 0..NUM_WORKSPACES-1 (= 0..3). */
+void wm_post_workspace(int n) {
+    if (n >= 0 && n < 4) g_workspace_pending = n;
+}
+
+int wm_poll_workspace(struct task *caller) {
+    if (g_wm_owner != caller) return -1;
+    int n = g_workspace_pending;
+    g_workspace_pending = -1;
+    return n;
 }
 
 /* Session 143 — notification ring entry points. */

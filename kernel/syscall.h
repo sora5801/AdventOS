@@ -382,6 +382,11 @@ struct sys_limits {
 #define SYS_WM_NOTIFY       105 /* (eax=105, ebx=text, ecx=len)  -> 0 / -1 */
 #define SYS_WM_POLL_NOTIFY  106 /* (eax=106, ebx=buf, ecx=cap)   -> bytes or 0 */
 
+/* Session 147 — workspace / virtual-desktop switch channel.  USB-HID
+ * intercepts Alt+1..4 and posts here; wmd polls once per frame.
+ * Poll returns 0..3 (workspace index) or -1 if no request pending. */
+#define SYS_WM_POLL_WORKSPACE  107 /* (eax=107) -> 0..3 or -1 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

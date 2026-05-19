@@ -150,6 +150,19 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
         return;
     }
 
+    /* Session 147 — Alt+1..4 routes to wmd's workspace channel.
+     * HID usages for digits 1..4 are 0x1E..0x21.  Like Alt+Tab, we
+     * bypass the keyboard ring so the shell never sees the press. */
+    if (alt && usage >= 0x1E && usage <= 0x21) {
+        extern void wm_post_workspace(int n);
+        int ws = (int)usage - 0x1E;     /* 0..3 */
+        wm_post_workspace(ws);
+#ifdef USB_HID_TRACE
+        kprintf("[usb-hid] Alt+%d -> workspace %d\n", ws + 1, ws);
+#endif
+        return;
+    }
+
     /* Arrow keys — emit the 3-byte ANSI CSI sequence (ESC '[' final),
      * same shape the PS/2 driver pushes via push_csi(). The shell
      * reads these in raw mode for history navigation; without this,

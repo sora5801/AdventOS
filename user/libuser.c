@@ -537,6 +537,15 @@ int sys_wm_poll_alttab(void) {
                       : "memory");
     return ret;
 }
+/* Session 147 — workspace switch poll. */
+int sys_wm_poll_workspace(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_WORKSPACE)
+                      : "memory");
+    return ret;
+}
 
 /* Session 136 — clipboard. */
 int sys_clipboard_set(const void *buf, int len) {

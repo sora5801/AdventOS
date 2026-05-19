@@ -80,6 +80,13 @@ void wm_on_task_exit(struct task *t);
 void wm_post_alttab(void);
 int  wm_poll_alttab(struct task *caller);
 
+/* Session 147 — workspace switch routing.  USB-HID calls
+ * wm_post_workspace(N) when the user presses Alt+1..4; wmd polls
+ * once per frame.  Poll returns the workspace index (0..3) or
+ * -1 if no request pending. */
+void wm_post_workspace(int n);
+int  wm_poll_workspace(struct task *caller);
+
 /* Session 143 — toast-notification ring.  Apps push short status
  * messages (<= 63 chars after truncation); wmd drains one per
  * call.  push returns 0 / -1; pop returns the byte length (0 if

@@ -78,11 +78,18 @@ struct window {
     int  minimized;
     int  maximized;
     int  saved_x, saved_y, saved_w, saved_h;
+
+    /* Session 147 — virtual desktop / workspace assignment.  Each
+     * window lives on exactly one of NUM_WORKSPACES (4) desktops.
+     * Paint + hit-test skip windows whose workspace != current. */
+    int  workspace;
 };
 
+#define NUM_WORKSPACES 4
 static struct window g_windows[MAX_WINDOWS];
 static int g_window_count;
 static int g_z_counter = 1;
+static int g_current_workspace = 0;
 
 /* Drag state. window_idx == -1 means no drag. */
 /* Session 119 — app launcher catalog.  Keep paths in lockstep with
@@ -416,6 +423,9 @@ static int hit_test(int px, int py) {
         struct window *w = &g_windows[order[i]];
         /* Session 133 — minimized windows don't accept input. */
         if (w->minimized) continue;
+        /* Session 147 — windows on other workspaces are invisible
+         * AND don't receive clicks. */
+        if (w->workspace != g_current_workspace) continue;
         if (px >= w->x && px < w->x + w->w &&
             py >= w->y && py < w->y + w->h) {
             return order[i];
@@ -844,6 +854,10 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
             w->client_pixels = (unsigned int *)(uintptr_t)m.wmd_va;
             w->surface_w     = m.w;
             w->surface_h     = m.h;
+            /* Session 147 — new clients open on the current
+             * workspace.  No way for the client to specify yet;
+             * future: argv flag or window-hint syscall. */
+            w->workspace     = g_current_workspace;
         } else if (m.op == 2) {
             /* Destroy. Compact the array. */
             struct window *w = find_window_by_client_id(m.id);
@@ -913,6 +927,18 @@ int main(int argc, char **argv) {
         drain_wm_messages(ctx.width, ctx.height);
         /* Session 143 — drain pending toast notifications. */
         drain_toasts((unsigned int)tick);
+        /* Session 147 — drain pending workspace switch request. */
+        {
+            int ws = sys_wm_poll_workspace();
+            if (ws >= 0 && ws < NUM_WORKSPACES &&
+                ws != g_current_workspace) {
+                g_current_workspace = ws;
+                /* Drop focus when switching; the focused window is
+                 * almost certainly on the previous workspace and
+                 * would otherwise be invisible-but-receiving-keys. */
+                focused = -1;
+            }
+        }
 
         struct sys_mouse_state ms;
         if (sys_mouse_poll(&ms) < 0) break;
@@ -951,6 +977,23 @@ int main(int argc, char **argv) {
         }
 
         if (pressed) {
+            /* Session 147 — top-bar workspace switcher.  Buttons live
+             * at y=2..15, x=44..139 (four 22-wide buttons at +24).
+             * Clicking switches workspace without dropping focus
+             * tracking through the rest of the click handlers. */
+            if (ms.y >= 2 && ms.y < 16 &&
+                ms.x >= 44 && ms.x < 44 + NUM_WORKSPACES * 24) {
+                int ws = (ms.x - 44) / 24;
+                /* Reject clicks in the gap between buttons (22 wide +
+                 * 2 gap = 24 cell). */
+                if ((ms.x - 44) % 24 < 22 && ws < NUM_WORKSPACES) {
+                    if (ws != g_current_workspace) {
+                        g_current_workspace = ws;
+                        focused = -1;
+                    }
+                    goto after_press_hit;
+                }
+            }
             /* Session 124 — context-menu item click intercept. */
             if (g_ctx_menu.open) {
                 int item = ctx_menu_hit(ms.x, ms.y);
@@ -1408,8 +1451,24 @@ int main(int argc, char **argv) {
 
         /* Top status bar across the screen. */
         gfx_fill_rect(&ctx, 0, 0, (int)ctx.width, 18, GFX_DARK_GREY);
-        gfx_text(&ctx, 8, 5, "wmd - AdventOS Path C session 111",
+        gfx_text(&ctx, 8, 5, "wmd",
                  GFX_WHITE, GFX_TRANSPARENT);
+
+        /* Session 147 — workspace indicator + clickable switcher.
+         * Four 22x14 buttons starting at x=44, y=2 ("1" "2" "3" "4").
+         * Current workspace is filled in cyan; others in slate. */
+        for (int ws = 0; ws < NUM_WORKSPACES; ws++) {
+            int bx = 44 + ws * 24;
+            int by = 2;
+            unsigned int fill = (ws == g_current_workspace)
+                                ? GFX_CYAN : 0x303848u;
+            gfx_fill_rect(&ctx, bx, by, 22, 14, fill);
+            gfx_rect    (&ctx, bx, by, 22, 14, GFX_WHITE);
+            char dig[2] = { (char)('1' + ws), 0 };
+            gfx_text(&ctx, bx + 8, by + 3, dig,
+                     (ws == g_current_workspace) ? GFX_BLACK : GFX_WHITE,
+                     GFX_TRANSPARENT);
+        }
         /* Session 124 — show the focused window's title on the
          * right side of the top bar (when there is one).  Aligned
          * to roughly column = fb_w/2 so it doesn't overlap the
@@ -1434,6 +1493,10 @@ int main(int argc, char **argv) {
             /* Session 133 — minimized windows aren't drawn (taskbar
              * button is still drawn; click it to restore). */
             if (g_windows[idx].minimized) continue;
+            /* Session 147 — windows on other workspaces are
+             * invisible.  They keep their geometry + state, just
+             * skip painting. */
+            if (g_windows[idx].workspace != g_current_workspace) continue;
             paint_window(&ctx, &g_windows[idx],
                          idx == focused, t_sec, (unsigned int)tick);
         }

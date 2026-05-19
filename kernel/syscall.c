@@ -1031,6 +1031,10 @@ void syscall_dispatch(struct registers *r) {
             ret = wm_notify_pop(buf, cap);
             break;
         }
+        /* Session 147 — workspace switch poll. */
+        case SYS_WM_POLL_WORKSPACE:
+            ret = wm_poll_workspace(task_current());
+            break;
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
             extern int virtio_rng_available(void);
