@@ -24,6 +24,7 @@
 #include "usb.h"
 #include "usb_core.h"
 #include "uhci.h"
+#include "usb_hc.h"
 #include "net.h"
 #include "kprintf.h"
 #include "string.h"
@@ -62,8 +63,8 @@ static int usb_set_interface(struct usb_device *d, int iface, int alt) {
         .wIndex        = (uint16_t)iface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, 0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, 0);
 }
 
 /* Parse 12 hex digits at `in` (UTF-16LE, so 24 bytes) into a 6-byte
@@ -184,8 +185,8 @@ int usb_cdc_ecm_send(const void *frame, uint32_t len) {
     memcpy(kbuf, frame, len);
 
     spin_lock(&e->tx_lock);
-    int rc = uhci_bulk_out(e->dev->addr, e->ep_max, e->ep_out,
-                           kbuf, (int)len, &e->out_toggle);
+    int rc = e->dev->hc->bulk_out(e->dev->addr, e->ep_max, e->ep_out,
+                                  kbuf, (int)len, &e->out_toggle);
     spin_unlock(&e->tx_lock);
 
     kfree(kbuf);
@@ -199,8 +200,8 @@ static uint8_t g_rx_buf[ECM_MAX_FRAME];
 static void ecm_poll_one(struct ecm_device *e) {
     /* One bulk-IN per frame. CDC-ECM §3.3.1 mandates one Ethernet
      * frame per transfer; short packet (or ZLP) terminates. */
-    int rc = uhci_bulk_in(e->dev->addr, e->ep_max, e->ep_in,
-                          g_rx_buf, ECM_MAX_FRAME, &e->in_toggle);
+    int rc = e->dev->hc->bulk_in(e->dev->addr, e->ep_max, e->ep_in,
+                                 g_rx_buf, ECM_MAX_FRAME, &e->in_toggle);
     if (rc == USB_ERR_NAK || rc == USB_ERR_TIMEOUT) return;
     if (rc <= 0)  return;
     if (rc < 14) return;        /* shorter than Eth header — drop */

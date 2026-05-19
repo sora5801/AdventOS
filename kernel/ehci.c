@@ -92,19 +92,62 @@ static const struct ehci_devid g_known[] = {
 /* Extended capability IDs. */
 #define EECP_USBLEGSUP   0x01
 
-/* QH (Queue Head) — 48 bytes total but we keep ours empty/HALTED.
+/* QH (Queue Head). The overlay area (cur_qtd..bufp[4]) is where the
+ * HC copies the current qTD's state as it executes; it's also where
+ * we initially seed next_qtd to point at the first qTD in our chain.
  * Layout per EHCI spec §3.6. */
 struct ehci_qh {
     uint32_t hlp;                     /* horizontal link pointer */
     uint32_t ep_chars;                /* endpoint characteristics */
     uint32_t ep_caps;                 /* endpoint capabilities */
     uint32_t cur_qtd;
+    /* ---- Overlay (HC writes through these as it executes) ---- */
     uint32_t next_qtd;
     uint32_t alt_qtd;
-    uint32_t token;                   /* status byte etc. */
+    uint32_t token;
     uint32_t bufp[5];
-    uint32_t pad;                     /* round to 64 B for alignment ease */
+    uint32_t pad[3];                  /* round to 64 B for alignment ease */
 } __attribute__((aligned(32)));
+
+/* qTD (Queue Transfer Descriptor). Each qTD describes one transfer
+ * (or a chunk of one). The HC walks next_qtd to step through a chain. */
+struct ehci_qtd {
+    uint32_t next_qtd;                /* phys ptr | T(bit 0) */
+    uint32_t alt_qtd;                 /* alt pointer on short packet */
+    uint32_t token;                   /* status + length + PID + toggle */
+    uint32_t bufp[5];                 /* page pointers; bufp[0] has offset */
+    /* No padding required; 32 bytes is already 32-aligned. */
+} __attribute__((aligned(32)));
+
+/* qTD token bit layout. */
+#define QTD_TOK_PINGE     (1u << 0)
+#define QTD_TOK_SPLITX    (1u << 1)
+#define QTD_TOK_MISSED    (1u << 2)
+#define QTD_TOK_XACTERR   (1u << 3)
+#define QTD_TOK_BABBLE    (1u << 4)
+#define QTD_TOK_BUFERR    (1u << 5)
+#define QTD_TOK_HALTED    (1u << 6)
+#define QTD_TOK_ACTIVE    (1u << 7)
+#define QTD_TOK_PID_OUT   (0u << 8)
+#define QTD_TOK_PID_IN    (1u << 8)
+#define QTD_TOK_PID_SETUP (2u << 8)
+#define QTD_TOK_CERR_3    (3u << 10)
+#define QTD_TOK_LEN_SHIFT 16
+#define QTD_TOK_DT        (1u << 31)
+/* Errors that mean we have to give up. */
+#define QTD_TOK_ERRORS    (QTD_TOK_XACTERR | QTD_TOK_BABBLE | \
+                           QTD_TOK_BUFERR  | QTD_TOK_HALTED)
+
+#define QH_HLP_TYP_QH     (1u << 1)
+#define QTD_T             (1u << 0)
+/* Endpoint Characteristics field bits. */
+#define EPC_ADDR(a)       ((a) & 0x7Fu)
+#define EPC_EP(e)         (((e) & 0xFu) << 8)
+#define EPC_EPS_HS        (2u << 12)
+#define EPC_DTC           (1u << 14)        /* toggle from qTD */
+#define EPC_H             (1u << 15)        /* head of reclamation */
+#define EPC_MAX(m)        (((m) & 0x7FFu) << 16)
+#define EPC_C             (1u << 27)        /* control endpoint flag — full/low only */
 
 /* Per-controller state. */
 struct ehci {
@@ -369,8 +412,242 @@ int ehci_init(void) {
     g_ehci.in_use = 1;
     kprintf("ehci: controller running (async list @ 0x%x, %u ports)\n",
             qh_phys, g_ehci.n_ports);
-    kprintf("ehci: NOTE — class-driver transfer integration is a follow-up;\n"
-            "      USB devices on the EHCI ports will surface through the\n"
-            "      companion UHCI controller (if present) for now.\n");
     return 0;
 }
+
+void ehci_probe_ports(int *connected, int *n_ports) {
+    int max = *n_ports;
+    int n   = (int)g_ehci.n_ports;
+    if (n > max) n = max;
+    if (!g_ehci.in_use) { *n_ports = 0; return; }
+    for (int i = 0; i < n; i++) {
+        uint32_t pscs = op_r32(OP_PORTSC(i));
+        /* Owned by us + connected + enabled = a high-speed device. */
+        int owned = !(pscs & PORTSC_OWNER);
+        connected[i] = (owned && (pscs & PORTSC_CCS) && (pscs & PORTSC_PE)) ? 1 : 0;
+    }
+    *n_ports = n;
+}
+
+/* ===================================================================
+ * Transfer path — session 126: class drivers dispatch through
+ * g_ehci_hc_ops when a device lives on the EHCI controller.
+ * =================================================================== */
+
+#include "usb_hc.h"
+#include "kmalloc.h"
+#include "spinlock.h"
+
+static spinlock_t g_ehci_xfer_lock;
+
+/* Allocate a 32-byte-aligned qTD, zero-initialized. Same kmalloc
+ * over-allocate trick we use elsewhere. */
+static struct ehci_qtd *alloc_qtd(void) {
+    uint8_t *raw = (uint8_t *)kmalloc(sizeof(struct ehci_qtd) + 32);
+    if (!raw) return 0;
+    uintptr_t a = ((uintptr_t)raw + 31u) & ~31u;
+    struct ehci_qtd *q = (struct ehci_qtd *)a;
+    memset(q, 0, sizeof(*q));
+    return q;
+}
+
+/* Same but for QH (32-byte alignment is enough for QHs too). */
+static struct ehci_qh *alloc_qh_xfer(void) {
+    uint8_t *raw = (uint8_t *)kmalloc(sizeof(struct ehci_qh) + 32);
+    if (!raw) return 0;
+    uintptr_t a = ((uintptr_t)raw + 31u) & ~31u;
+    struct ehci_qh *q = (struct ehci_qh *)a;
+    memset(q, 0, sizeof(*q));
+    return q;
+}
+
+/* Fill in buffer pointers for a transfer. The first page pointer
+ * has the in-page offset baked into bits [11:0]; subsequent ones are
+ * page-aligned. Returns the next byte offset reached (= original len,
+ * since we cap at 4 KiB per qTD and never split). */
+static void qtd_set_buffer(struct ehci_qtd *q, void *buf, uint32_t len) {
+    uintptr_t p = (uintptr_t)buf;
+    q->bufp[0] = (uint32_t)p;
+    /* For len ≤ 4 KiB we never cross a page boundary off bufp[0].
+     * For up to 5 pages = 20 KiB we'd fill bufp[1..4]; the chunk
+     * size in our callers is bounded so the simple form covers it. */
+    for (int i = 1; i < 5; i++) {
+        uintptr_t next = (p & ~0xFFFu) + (uint32_t)i * 4096u;
+        q->bufp[i] = (uint32_t)next;
+    }
+    (void)len;
+}
+
+/* Build a single qTD. `toggle_bit` is the DT bit (already shifted to
+ * its position) or 0. `pid` is one of QTD_TOK_PID_*. `next_phys` is
+ * the next qTD's phys ptr or 1 (T) to terminate. */
+static void build_qtd(struct ehci_qtd *q, uint32_t pid, uint32_t len,
+                      uint32_t toggle_bit, void *buf, uint32_t next_phys)
+{
+    q->next_qtd = next_phys;
+    q->alt_qtd  = QTD_T;
+    q->token    = QTD_TOK_ACTIVE | QTD_TOK_CERR_3 | pid |
+                  (len << QTD_TOK_LEN_SHIFT) | toggle_bit;
+    if (buf && len) {
+        qtd_set_buffer(q, buf, len);
+    } else {
+        for (int i = 0; i < 5; i++) q->bufp[i] = 0;
+    }
+}
+
+/* Build a QH for an endpoint + run the qTD chain through the async
+ * list. Returns 0 on success, -1 on timeout or error. */
+static int run_async(uint8_t addr, int ep, int max_packet,
+                     int is_control, struct ehci_qtd *first,
+                     struct ehci_qtd *last)
+{
+    struct ehci_qh *qh = alloc_qh_xfer();
+    if (!qh) return -1;
+
+    qh->ep_chars = EPC_ADDR(addr) | EPC_EP(ep) | EPC_EPS_HS |
+                   EPC_DTC | EPC_MAX(max_packet);
+    if (is_control) qh->ep_chars |= EPC_C;
+    qh->ep_caps  = (1u << 30);                 /* Mult = 1 */
+    qh->cur_qtd  = 0;
+    qh->next_qtd = (uint32_t)(uintptr_t)first;  /* point at SETUP/first */
+    qh->alt_qtd  = QTD_T;
+    qh->token    = 0;                            /* not halted, not active */
+
+    /* Link QH into the async list right after async_head. */
+    spin_lock(&g_ehci_xfer_lock);
+    uint32_t qh_phys = (uint32_t)(uintptr_t)qh;
+    qh->hlp = g_ehci.async_head->hlp;
+    g_ehci.async_head->hlp = qh_phys | QH_HLP_TYP_QH;
+
+    /* Wait for the last qTD's Active bit to clear or an error bit
+     * to set. Deadline: 5 s. */
+    uint32_t start = pit_ticks();
+    int rc = 0;
+    for (;;) {
+        uint32_t tok = ((volatile uint32_t *)last)[2];   /* token */
+        if (tok & QTD_TOK_ERRORS) { rc = -1; break; }
+        if (!(tok & QTD_TOK_ACTIVE)) break;
+        if (pit_ticks() - start > 500) { rc = -1; break; }
+    }
+
+    /* Unlink the QH from the async list. Bypass it: write our hlp
+     * into async_head. Then do the IAAD doorbell handshake so we
+     * know the HC has finished with the QH's memory before we free
+     * (or reuse) it. */
+    g_ehci.async_head->hlp = qh->hlp;
+    op_w32(OP_USBCMD, op_r32(OP_USBCMD) | USBCMD_IAAD);
+    uint32_t start2 = pit_ticks();
+    while (!(op_r32(OP_USBSTS) & (1u << 5))) {   /* USBSTS.IAA bit 5 */
+        if (pit_ticks() - start2 > 50) break;     /* QEMU is generous; bail anyway */
+    }
+    op_w32(OP_USBSTS, 1u << 5);                  /* clear IAA */
+    spin_unlock(&g_ehci_xfer_lock);
+    return rc;
+}
+
+/* ---- control transfer ---------------------------------------------- */
+
+static int ehci_control_transfer(uint8_t addr, int low_speed, int ep0_max,
+                                 const struct usb_setup_packet *setup,
+                                 void *data, int data_len, int data_in)
+{
+    (void)low_speed;     /* EHCI handles high-speed only */
+    if (ep0_max <= 0) ep0_max = 64;
+    if (!g_ehci.in_use) return USB_ERR_OTHER;
+
+    /* Stage 1: SETUP qTD. Always 8 bytes, PID=SETUP, toggle=0. */
+    struct ehci_qtd *q_setup  = alloc_qtd();
+    struct ehci_qtd *q_data   = (data_len > 0) ? alloc_qtd() : 0;
+    struct ehci_qtd *q_status = alloc_qtd();
+    if (!q_setup || !q_status || (data_len > 0 && !q_data))
+        return USB_ERR_OTHER;
+
+    /* Copy the setup packet into a kmalloc'd buffer; the caller's may
+     * be on a transient stack page. */
+    struct usb_setup_packet *sbuf =
+        (struct usb_setup_packet *)kmalloc(sizeof(*sbuf));
+    if (!sbuf) return USB_ERR_OTHER;
+    *sbuf = *setup;
+
+    struct ehci_qtd *first = q_setup;
+    struct ehci_qtd *last  = q_status;
+
+    /* Status qTD: opposite-direction zero-length, toggle=1 (DATA1). */
+    uint32_t status_pid = data_in ? QTD_TOK_PID_OUT : QTD_TOK_PID_IN;
+    build_qtd(q_status, status_pid, 0, QTD_TOK_DT, 0, QTD_T);
+
+    if (q_data) {
+        uint32_t data_pid = data_in ? QTD_TOK_PID_IN : QTD_TOK_PID_OUT;
+        build_qtd(q_data, data_pid, (uint32_t)data_len, QTD_TOK_DT,
+                  data, (uint32_t)(uintptr_t)q_status);
+        build_qtd(q_setup, QTD_TOK_PID_SETUP, 8, 0,
+                  sbuf, (uint32_t)(uintptr_t)q_data);
+    } else {
+        build_qtd(q_setup, QTD_TOK_PID_SETUP, 8, 0,
+                  sbuf, (uint32_t)(uintptr_t)q_status);
+    }
+
+    int rc = run_async(addr, 0, ep0_max, /*is_control=*/1, first, last);
+    return rc == 0 ? USB_OK : USB_ERR_OTHER;
+}
+
+/* ---- bulk + int (single chunk in flight) --------------------------- */
+
+static int ehci_bulk_xfer(uint32_t pid, uint8_t addr, int ep_max, int ep,
+                          void *buf, int len, int *toggle)
+{
+    if (!g_ehci.in_use) return USB_ERR_OTHER;
+    if (len <= 0 || len > 16384) return USB_ERR_OTHER;
+
+    /* One qTD covers up to 5 pages — far more than our callers ever
+     * pass. Single qTD with EOT in next_qtd. */
+    struct ehci_qtd *q = alloc_qtd();
+    if (!q) return USB_ERR_OTHER;
+    uint32_t dt = (*toggle & 1) ? QTD_TOK_DT : 0;
+    build_qtd(q, pid, (uint32_t)len, dt, buf, QTD_T);
+
+    int rc = run_async(addr, ep, ep_max, /*is_control=*/0, q, q);
+    if (rc != 0) return USB_ERR_OTHER;
+
+    /* qTD token's bytes-to-transfer field shows residual bytes
+     * remaining (0 if all done; non-zero on a short packet). Flip the
+     * toggle for the caller based on the number of max-packet-sized
+     * chunks consumed. Simpler: count chunks ceil(len / ep_max) and
+     * flip toggle if odd. */
+    int chunks = (len + ep_max - 1) / ep_max;
+    if (chunks & 1) *toggle = (*toggle ^ 1);
+
+    uint32_t remaining = (q->token >> QTD_TOK_LEN_SHIFT) & 0x7FFFu;
+    return (int)((uint32_t)len - remaining);
+}
+
+static int ehci_bulk_in(uint8_t addr, int ep_max, int ep,
+                        void *buf, int len, int *toggle) {
+    return ehci_bulk_xfer(QTD_TOK_PID_IN, addr, ep_max, ep,
+                          buf, len, toggle);
+}
+static int ehci_bulk_out(uint8_t addr, int ep_max, int ep,
+                         const void *buf, int len, int *toggle) {
+    return ehci_bulk_xfer(QTD_TOK_PID_OUT, addr, ep_max, ep,
+                          (void *)buf, len, toggle);
+}
+
+/* int_in: HID polling. Same code path as bulk_in for our purposes —
+ * the class driver does the timing. The (low_speed, ...) signature
+ * matches uhci's for vtable compatibility; low-speed devices are on
+ * the companion controller so we shouldn't see them here. */
+static int ehci_int_in(uint8_t addr, int low_speed, int ep_max,
+                       int ep, void *buf, int max_len, int *toggle)
+{
+    (void)low_speed;
+    return ehci_bulk_xfer(QTD_TOK_PID_IN, addr, ep_max, ep,
+                          buf, max_len, toggle);
+}
+
+/* Exposed vtable. */
+const struct usb_hc_ops g_ehci_hc_ops = {
+    .control_transfer = ehci_control_transfer,
+    .int_in           = ehci_int_in,
+    .bulk_in          = ehci_bulk_in,
+    .bulk_out         = ehci_bulk_out,
+};

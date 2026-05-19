@@ -169,9 +169,11 @@ struct usb_endpoint_descriptor {
 #define USB_ERR_NAK        -5
 #define USB_ERR_OTHER      -6
 
-/* Per-device record. The host controller driver populates `addr`
- * and `low_speed` after enumeration; class drivers fill in the
- * endpoint fields they care about. */
+struct usb_hc_ops;          /* defined in usb_hc.h */
+
+/* Per-device record. The host controller driver populates `addr`,
+ * `low_speed`, and `hc` after enumeration; class drivers fill in
+ * the endpoint fields they care about. */
 struct usb_device {
     uint8_t  addr;                  /* assigned address (1..127) */
     uint8_t  low_speed;             /* 1 if attached as 1.5 Mbps */
@@ -179,6 +181,10 @@ struct usb_device {
     uint16_t vendor_id;
     uint16_t product_id;
     uint8_t  in_use;
+    const struct usb_hc_ops *hc;    /* which host controller drives this
+                                     * device (uhci / ehci). Set during
+                                     * enumeration; used by every
+                                     * transfer call. */
 };
 
 #endif

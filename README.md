@@ -23,7 +23,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Sandbox masks + per-task resource limits (RSS/CPU/wall/FDs) | ✅ |
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
-| ATA driver, USB UHCI controller, USB EHCI 2.0 (controller bring-up), USB HID keyboard, USB Mass Storage, USB CDC-ACM serial, USB CDC-ECM Ethernet | ✅ |
+| ATA driver, USB UHCI + EHCI 2.0 (480 Mbps full transfer path), USB HID keyboard, USB Mass Storage, USB CDC-ACM serial, USB CDC-ECM Ethernet | ✅ |
 | AHCI SATA controller — IRQ-driven, NCQ (32 in-flight slots) | ✅ |
 | NVMe — modern PCIe-attached SSD interface (admin + I/O queue pairs, IDENTIFY, READ / WRITE) | ✅ |
 | virtio-blk + virtio-scsi + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
@@ -98,9 +98,10 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **125 — Path E phase 8: NVMe + EHCI + AHCI IRQ/NCQ + CDC-ECM**. See [`docs/126-pathE-nvme-ehci-ahci-ecm.md`](docs/126-pathE-nvme-ehci-ahci-ecm.md). Closes out the Path E backlog: a complete **NVMe** driver (admin + I/O queue pairs, IDENTIFY controller / namespace, READ + WRITE with PRP-based DMA, IRQ-driven completion via the chain dispatcher); **AHCI** rewired to IRQ-driven completion + Native Command Queuing (READ/WRITE FPDMA QUEUED, 32 command slots, separate SACT register); **USB CDC-ECM** for USB-Ethernet dongles plumbed into the net stack; and **USB EHCI** controller bring-up (PCI probe, BIOS handoff via EECP USBLEGSUP, async list, port survey — class-driver transfer integration is the natural next session).
+Current session: **126 — Path E phase 9: EHCI transfer integration**. See [`docs/127-pathE-ehci-transfers.md`](docs/127-pathE-ehci-transfers.md). Closes the EHCI integration gap from session 125. New `kernel/usb_hc.h` abstraction layer with a `struct usb_hc_ops` vtable; every USB transfer in the class drivers (HID, MSC, CDC-ACM, CDC-ECM, hub) routes through `d->hc->*` instead of calling `uhci_*` directly. EHCI implements `control_transfer`, `int_in`, `bulk_in`, `bulk_out` on top of QH + qTD chains with the IAAD doorbell handshake for safe async-list mutation. Result: USB 2.0 storage at 480 Mbps end-to-end (`max=512` byte bulk packets vs UHCI's `max=64`), with UHCI + EHCI running concurrently — keyboard on UHCI, storage on EHCI, both fully integrated.
 
 Recent session deep dives:
+- [Session 126 — Path E phase 9: EHCI transfer integration](docs/127-pathE-ehci-transfers.md)
 - [Session 125 — Path E phase 8: NVMe + EHCI + AHCI IRQ/NCQ + CDC-ECM](docs/126-pathE-nvme-ehci-ahci-ecm.md)
 - [Session 124 — Path E phase 7: virtio-scsi + CDC-ACM TTY](docs/122-pathE-vscsi-cdc-tty.md)
 - [Session 123 — Path E phase 6: AHCI SATA controller](docs/110-pathE-ahci.md)

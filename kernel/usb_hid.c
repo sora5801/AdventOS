@@ -26,6 +26,7 @@
 #include "usb.h"
 #include "usb_core.h"
 #include "uhci.h"
+#include "usb_hc.h"
 #include "keyboard.h"
 #include "kprintf.h"
 #include "string.h"
@@ -191,8 +192,8 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
 
 static void poll_one(struct hid_kbd *k) {
     uint8_t report[8] = {0};
-    int rc = uhci_int_in(k->dev->addr, k->dev->low_speed, k->ep_max,
-                         k->ep, report, 8, &k->toggle);
+    int rc = k->dev->hc->int_in(k->dev->addr, k->dev->low_speed, k->ep_max,
+                                k->ep, report, 8, &k->toggle);
     if (rc <= 0) return;     /* NAK / timeout / error: just retry next tick */
 
     /* For each key in the NEW report not in the previous report,
@@ -236,8 +237,8 @@ static void poll_one_tablet(struct hid_tablet *t) {
     /* Request 8 bytes but the QEMU usb-tablet only sends 6 (buttons +
      * X + Y + wheel).  uhci_int_in returns the actual byte count;
      * we only touch report[0..4] so a short read is fine. */
-    int rc = uhci_int_in(t->dev->addr, t->dev->low_speed, t->ep_max,
-                         t->ep, report, 8, &t->toggle);
+    int rc = t->dev->hc->int_in(t->dev->addr, t->dev->low_speed, t->ep_max,
+                                t->ep, report, 8, &t->toggle);
     if (rc <= 0) return;     /* NAK / timeout = no new state */
 
     int buttons = report[0] & 0x07;

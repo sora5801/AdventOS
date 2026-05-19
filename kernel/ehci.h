@@ -49,4 +49,10 @@ int ehci_init(void);
 /* True if ehci_init() found and brought up a controller. */
 int ehci_present(void);
 
+/* Survey the root-hub ports. For each enabled high-speed port,
+ * `connected[i] = 1`. `n_ports` is set to the total port count
+ * (capped at the caller's array size). Ports that were released to
+ * a companion controller during bring-up report connected=0 here. */
+void ehci_probe_ports(int *connected, int *n_ports);
+
 #endif

@@ -546,3 +546,13 @@ int uhci_bulk_out(uint8_t addr, int ep_max, int ep,
     return bulk_xfer(UHCI_PID_OUT, addr, ep_max, ep,
                      (uint8_t *)(uintptr_t)buf, len, toggle);
 }
+
+/* HC abstraction vtable — see usb_hc.h. UHCI's transfer signatures
+ * match the struct exactly, so this is just a static initializer. */
+#include "usb_hc.h"
+const struct usb_hc_ops g_uhci_hc_ops = {
+    .control_transfer = uhci_control_transfer,
+    .int_in           = uhci_int_in,
+    .bulk_in          = uhci_bulk_in,
+    .bulk_out         = uhci_bulk_out,
+};

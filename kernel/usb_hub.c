@@ -59,6 +59,7 @@
 #include "usb.h"
 #include "usb_core.h"
 #include "uhci.h"
+#include "usb_hc.h"
 #include "kprintf.h"
 #include "string.h"
 #include "pit.h"
@@ -106,7 +107,7 @@ static int hub_get_descriptor(struct usb_device *d, struct hub_desc *out) {
         .wIndex        = 0,
         .wLength       = sizeof(*out),
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
                                  &s, out, sizeof(*out), /*data_in=*/1);
 }
 
@@ -118,7 +119,7 @@ static int hub_set_port_feature(struct usb_device *d, int port, int feature) {
         .wIndex        = (uint16_t)port,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
                                  &s, 0, 0, /*data_in=*/0);
 }
 
@@ -130,7 +131,7 @@ static int hub_clear_port_feature(struct usb_device *d, int port, int feature) {
         .wIndex        = (uint16_t)port,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
                                  &s, 0, 0, /*data_in=*/0);
 }
 
@@ -144,7 +145,7 @@ static int hub_get_port_status(struct usb_device *d, int port,
         .wIndex        = (uint16_t)port,
         .wLength       = 4,
     };
-    int rc = uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+    int rc = d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
                                    &s, buf, 4, /*data_in=*/1);
     if (rc != USB_OK) return rc;
     *out_status = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
@@ -234,7 +235,9 @@ static void enumerate_port(struct usb_device *hub, int port,
     if (port >= 10) tag[o++] = (char)('0' + port / 10);
     tag[o++] = (char)('0' + port % 10);
     tag[o] = 0;
-    usb_enumerate_default(low_speed, tag);
+    /* Inherit the hub's host controller — devices behind a hub
+     * always live on the same HC as the hub itself. */
+    usb_enumerate_default(low_speed, tag, hub->hc);
 }
 
 void usb_hub_attach(struct usb_device *d) {

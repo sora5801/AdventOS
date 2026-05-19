@@ -24,7 +24,9 @@
  */
 #include "usb_core.h"
 #include "uhci.h"
+#include "ehci.h"
 #include "usb.h"
+#include "usb_hc.h"
 #include "kprintf.h"
 #include "string.h"
 #include "kmalloc.h"
@@ -66,8 +68,8 @@ int usb_get_descriptor(struct usb_device *d,
         .wIndex        = lang,
         .wLength       = (uint16_t)max_len,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, out, max_len, /*data_in=*/1);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, out, max_len, /*data_in=*/1);
 }
 
 static int usb_set_address(struct usb_device *d, uint8_t new_addr) {
@@ -78,8 +80,8 @@ static int usb_set_address(struct usb_device *d, uint8_t new_addr) {
         .wIndex        = 0,
         .wLength       = 0,
     };
-    int rc = uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                   &s, 0, 0, /*data_in=*/0);
+    int rc = d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                     &s, 0, 0, /*data_in=*/0);
     if (rc == USB_OK) d->addr = new_addr;
     /* USB 1.1 §9.2.6.3: device has 2 ms to start using new address. */
     pit_sleep(2);
@@ -94,8 +96,8 @@ int usb_set_configuration(struct usb_device *d, uint8_t value) {
         .wIndex        = 0,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 int usb_hid_set_protocol(struct usb_device *d, int interface, int protocol) {
@@ -106,8 +108,8 @@ int usb_hid_set_protocol(struct usb_device *d, int interface, int protocol) {
         .wIndex        = (uint16_t)interface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 int usb_hid_set_idle(struct usb_device *d, int interface, int duration_4ms) {
@@ -120,8 +122,8 @@ int usb_hid_set_idle(struct usb_device *d, int interface, int duration_4ms) {
         .wIndex        = (uint16_t)interface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 /* ---- Configuration descriptor walker --------------------------- */
@@ -428,7 +430,8 @@ static int find_msc_interface(const uint8_t *cfg, int cfg_len,
 
 /* ---- Per-device enumeration ------------------------------------ */
 
-static struct usb_device *alloc_device(int low_speed) {
+static struct usb_device *alloc_device(int low_speed,
+                                       const struct usb_hc_ops *hc) {
     for (int i = 0; i < USB_MAX_DEVICES; i++) {
         if (!g_devices[i].in_use) {
             memset(&g_devices[i], 0, sizeof(g_devices[i]));
@@ -436,14 +439,17 @@ static struct usb_device *alloc_device(int low_speed) {
             g_devices[i].addr          = 0;
             g_devices[i].low_speed     = low_speed;
             g_devices[i].ep0_max_packet = 8;     /* USB 1.1 default */
+            g_devices[i].hc            = hc;
             return &g_devices[i];
         }
     }
     return 0;
 }
 
-void usb_enumerate_default(int low_speed, const char *origin) {
-    struct usb_device *d = alloc_device(low_speed);
+void usb_enumerate_default(int low_speed, const char *origin,
+                           const struct usb_hc_ops *hc) {
+    if (!hc) hc = &g_uhci_hc_ops;       /* legacy callers default to UHCI */
+    struct usb_device *d = alloc_device(low_speed, hc);
     if (!d) {
         kprintf("[usb] no free device slot for %s\n", origin);
         return;
@@ -590,24 +596,57 @@ void usb_enumerate_default(int low_speed, const char *origin) {
 /* ---- Top-level init -------------------------------------------- */
 
 void usb_init(void) {
-    if (uhci_init() != 0) {
-        kprintf("[usb] no UHCI controller — USB stack disabled\n");
-        return;
+    int any_hc = 0;
+
+    /* EHCI first — it grabs ports from companions (CONFIGFLAG=1 in
+     * ehci_init). High-speed devices go through here at 480 Mbps;
+     * low/full-speed devices on the same physical ports get released
+     * to the UHCI companion below, which probes them next. */
+    if (ehci_present()) {
+        any_hc = 1;
+        int ehci_connected[16];
+        int ehci_n = 16;
+        ehci_probe_ports(ehci_connected, &ehci_n);
+        for (int i = 0; i < ehci_n; i++) {
+            if (!ehci_connected[i]) continue;
+            kprintf("[usb] ehci port %d: high-speed device attached\n", i);
+            char tag[24];
+            int o = 0;
+            tag[o++] = 'e'; tag[o++] = 'h'; tag[o++] = 'c'; tag[o++] = 'i';
+            tag[o++] = ' '; tag[o++] = 'p'; tag[o++] = 'o'; tag[o++] = 'r';
+            tag[o++] = 't'; tag[o++] = ' ';
+            if (i >= 10) tag[o++] = (char)('0' + i / 10);
+            tag[o++] = (char)('0' + i % 10);
+            tag[o] = 0;
+            usb_enumerate_default(/*low_speed=*/0, tag, &g_ehci_hc_ops);
+        }
     }
 
-    int connected[2], low_speed[2], n_ports = 2;
-    uhci_probe_ports(connected, low_speed, &n_ports);
-
-    for (int i = 0; i < n_ports; i++) {
-        if (connected[i]) {
-            kprintf("[usb] port %d: %s-speed device attached\n",
-                    i + 1, low_speed[i] ? "low" : "full");
-            char tag[16];
-            tag[0] = 'p'; tag[1] = 'o'; tag[2] = 'r'; tag[3] = 't';
-            tag[4] = ' '; tag[5] = (char)('0' + i + 1); tag[6] = 0;
-            usb_enumerate_default(low_speed[i], tag);
-        } else {
-            kprintf("[usb] port %d: no device\n", i + 1);
+    /* UHCI: low/full-speed devices left over after EHCI release.
+     * Existing PIIX3 setups put their ports here. */
+    if (uhci_init() == 0) {
+        any_hc = 1;
+        int connected[2], low_speed[2], n_ports = 2;
+        uhci_probe_ports(connected, low_speed, &n_ports);
+        for (int i = 0; i < n_ports; i++) {
+            if (connected[i]) {
+                kprintf("[usb] uhci port %d: %s-speed device attached\n",
+                        i + 1, low_speed[i] ? "low" : "full");
+                char tag[24];
+                int o = 0;
+                tag[o++] = 'u'; tag[o++] = 'h'; tag[o++] = 'c'; tag[o++] = 'i';
+                tag[o++] = ' '; tag[o++] = 'p'; tag[o++] = 'o'; tag[o++] = 'r';
+                tag[o++] = 't'; tag[o++] = ' ';
+                tag[o++] = (char)('0' + i + 1);
+                tag[o] = 0;
+                usb_enumerate_default(low_speed[i], tag, &g_uhci_hc_ops);
+            } else {
+                kprintf("[usb] uhci port %d: no device\n", i + 1);
+            }
         }
+    }
+
+    if (!any_hc) {
+        kprintf("[usb] no UHCI/EHCI controller — USB stack disabled\n");
     }
 }
