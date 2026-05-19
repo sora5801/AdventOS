@@ -198,15 +198,16 @@ static void sel_delete(void) {
     g_dirty = 1;
 }
 
-/* Session 153 — undo stack.  One entry per edit, with light
- * coalescing: consecutive forward-typing or contiguous-backspace
- * runs collapse into a single Ctrl-Z step.  Per-entry text cap is
- * 40 bytes, so very large sel_delete()s only partially restore
- * (cursor still lands at the right offset; missing bytes lost).
+/* Session 153/154 — undo + redo stacks.  Each edit pushes onto
+ * the undo stack with light coalescing (forward-typing bursts and
+ * contiguous backspaces collapse into one Ctrl-Z step).  Ctrl-Z
+ * (undo) and Ctrl-Y (redo) shuffle entries between the two
+ * stacks.  Per-entry text cap is 40 bytes; very large sel_deletes
+ * still restore cursor position but truncate text past 40.
  *
- * No redo (Ctrl-Y) yet — once you type after undoing, the popped
- * history is gone.  Same convention as a typical first-pass
- * editor undo. */
+ * Convention: any FRESH edit (via the _record wrappers) clears
+ * the redo stack — once you start editing again the popped redo
+ * history is gone, matching how every other editor behaves. */
 #define UNDO_MAX 64
 #define UNDO_PIECE_MAX 40
 
@@ -218,8 +219,27 @@ struct undo_entry {
 };
 static struct undo_entry g_undo[UNDO_MAX];
 static int g_undo_count;
+static struct undo_entry g_redo[UNDO_MAX];
+static int g_redo_count;
+
+/* Push an entry onto a generic undo/redo stack with FIFO eviction
+ * at cap.  No coalescing here — coalesce only happens on the undo
+ * stack via undo_push() below. */
+static void stack_push(struct undo_entry *stk, int *cnt,
+                       const struct undo_entry *e) {
+    if (*cnt >= UNDO_MAX) {
+        for (int i = 0; i < UNDO_MAX - 1; i++) stk[i] = stk[i + 1];
+        (*cnt) = UNDO_MAX - 1;
+    }
+    stk[(*cnt)++] = *e;
+}
 
 static void undo_push(int kind, int offset, int len, const char *text) {
+    /* Session 154 — any fresh edit invalidates the redo history.
+     * Caller is the _record() wrapper, which means a user-initiated
+     * edit just happened, not an undo or redo replay. */
+    g_redo_count = 0;
+
     if (g_undo_count > 0) {
         struct undo_entry *prev = &g_undo[g_undo_count - 1];
         /* Type-forward coalesce: prev was insert ending exactly at
@@ -227,6 +247,12 @@ static void undo_push(int kind, int offset, int len, const char *text) {
         if (kind == 1 && prev->kind == 1
             && offset == prev->offset + prev->len
             && prev->len + len <= UNDO_PIECE_MAX) {
+            /* Session 154 — append the inserted byte(s) to text[]
+             * too so redo can re-insert without reading g_buf. */
+            if (text) {
+                for (int i = 0; i < len && prev->len + i < UNDO_PIECE_MAX; i++)
+                    prev->text[prev->len + i] = text[i];
+            }
             prev->len += len;
             return;
         }
@@ -254,25 +280,31 @@ static void undo_push(int kind, int offset, int len, const char *text) {
     e->kind = kind;
     e->offset = offset;
     e->len = len;
-    if (kind == 2 && text) {
+    /* Session 154 — store text for both kinds: kind=1 needs it so
+     * redo can re-insert; kind=2 already needed it for undo. */
+    if (text) {
         int n = len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : len;
         for (int i = 0; i < n; i++) e->text[i] = text[i];
     }
 }
 
-static void undo_pop(void) {
-    if (g_undo_count == 0) return;
-    struct undo_entry *e = &g_undo[--g_undo_count];
+/* Apply the inverse of `e` to g_buf, returning an entry suitable
+ * for pushing on the opposite stack so the action can be replayed
+ * in the other direction.  Used by both undo_pop and redo_pop. */
+static struct undo_entry apply_inverse(const struct undo_entry *e) {
+    struct undo_entry inv = *e;
     if (e->kind == 1) {
-        /* Insert was: bytes added at [offset, offset+len).  Remove
-         * them; place cursor at offset. */
+        /* Insert was at [offset, offset+len).  Capture the bytes
+         * before deletion in case the existing entry's text[] is
+         * stale (e.g. for old pre-session-154 entries; defensive). */
+        int n = e->len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : e->len;
+        for (int i = 0; i < n; i++) inv.text[i] = g_buf[e->offset + i];
         for (int i = e->offset; i + e->len < g_len; i++)
             g_buf[i] = g_buf[i + e->len];
         g_len -= e->len;
         g_cur = e->offset;
+        inv.kind = 2;   /* opposite stack will undo "this delete" */
     } else if (e->kind == 2) {
-        /* Delete removed e->text from offset.  Re-insert and place
-         * cursor after the restored block. */
         int len = e->len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : e->len;
         if (g_len + len < BUF_MAX) {
             for (int i = g_len + len - 1; i >= e->offset + len; i--)
@@ -282,7 +314,25 @@ static void undo_pop(void) {
             g_len += len;
             g_cur = e->offset + len;
         }
+        inv.kind = 1;   /* opposite stack will undo "this insert" */
     }
+    return inv;
+}
+
+static void undo_pop(void) {
+    if (g_undo_count == 0) return;
+    struct undo_entry e = g_undo[--g_undo_count];
+    struct undo_entry inv = apply_inverse(&e);
+    stack_push(g_redo, &g_redo_count, &inv);
+    sel_clear();
+    g_dirty = 1;
+}
+
+static void redo_pop(void) {
+    if (g_redo_count == 0) return;
+    struct undo_entry e = g_redo[--g_redo_count];
+    struct undo_entry inv = apply_inverse(&e);
+    stack_push(g_undo, &g_undo_count, &inv);
     sel_clear();
     g_dirty = 1;
 }
@@ -292,7 +342,9 @@ static void undo_pop(void) {
  * Ctrl-Z replays the original state exactly. */
 static void buf_insert_record(char c) {
     if (g_len >= BUF_MAX - 1) return;
-    undo_push(1, g_cur, 1, NULL);
+    /* Session 154 — pass the inserted byte so redo can re-insert
+     * without scanning g_buf later. */
+    undo_push(1, g_cur, 1, &c);
     buf_insert(c);
 }
 static void buf_delete_record(void) {
@@ -491,6 +543,10 @@ int main(int argc, char **argv) {
                     }
                     if (k == 0x1A) {                  /* Ctrl-Z — undo */
                         undo_pop();
+                        break;
+                    }
+                    if (k == 0x19) {                  /* Ctrl-Y — redo */
+                        redo_pop();
                         break;
                     }
                     if (k == 0x13) {              /* Ctrl+S — save */

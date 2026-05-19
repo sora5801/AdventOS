@@ -26,6 +26,7 @@ DESCRIPTION
                         (replaces selection if any)
       Ctrl+F            open search bar at bottom (session 152)
       Ctrl+Z            undo the last edit (session 153)
+      Ctrl+Y            redo the last undone edit (session 154)
 
     Search mode (after Ctrl+F):
       printable ASCII   append to the search pattern; matches
@@ -52,11 +53,12 @@ LIMITATIONS
     Single 8 KiB buffer cap.  No file picker yet (path is set
     at launch via argv[1]).  Search (session 152) is forward-
     only with wrap; no Shift+Enter "previous match" yet, no
-    regex, no case-insensitive toggle.  Undo (session 153)
-    has no Ctrl-Y redo; once you type after undoing, the
-    popped history is gone.  Per-undo-entry text snap is 40
-    bytes, so undoing a very large selection-delete restores
-    the cursor position but not the text content.  Arrow-key
+    regex, no case-insensitive toggle.  Undo/redo (sessions
+    153/154) coalesce typing bursts + backspaces into one
+    step; a fresh edit clears the redo stack.  Per-entry text
+    snap is 40 bytes, so undoing/redoing a very large
+    selection-delete restores the cursor position but not the
+    text content past 40 bytes.  Arrow-key
     support relies on the kernel's ANSI CSI passthrough for
     arrows (ESC '[' A/B/C/D), same path the shell uses for
     history navigation.
