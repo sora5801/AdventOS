@@ -127,13 +127,22 @@ struct ctx_menu_state {
 };
 static struct ctx_menu_state g_ctx_menu;
 
-#define CTXMENU_W       100
+#define CTXMENU_W       128
 #define CTXMENU_ITEM_H  18
-#define CTXMENU_N_ITEMS 2
+/* Session 148 — extend context menu with "Move to WS N" entries
+ * for each of the 4 workspaces.  Total = 2 (Raise / Close) +
+ * NUM_WORKSPACES = 6 items.  Selecting "Move to WS <current>" is a
+ * no-op (window stays put); keeping the entry there gives a fixed
+ * menu layout so muscle memory works. */
+#define CTXMENU_N_ITEMS (2 + NUM_WORKSPACES)
 
 static const char *g_ctx_labels[CTXMENU_N_ITEMS] = {
     "Raise",
     "Close",
+    "Move to WS 1",
+    "Move to WS 2",
+    "Move to WS 3",
+    "Move to WS 4",
 };
 
 static int g_drag_idx = -1;
@@ -607,8 +616,16 @@ static void paint_ctx_menu(struct gfx_ctx *ctx) {
         int iy = y + i * CTXMENU_ITEM_H;
         if (i > 0) gfx_line(ctx, x + 1, iy, x + CTXMENU_W - 2, iy,
                             0x404850u);
+        /* Session 148 — dim the "Move to WS <current>" row so the
+         * user knows it's a no-op (the window is already on this
+         * workspace).  Items 2..5 correspond to workspaces 0..3. */
+        unsigned int fg = GFX_WHITE;
+        if (i >= 2 && i < 2 + NUM_WORKSPACES
+            && (i - 2) == g_current_workspace) {
+            fg = 0x707880u;     /* dimmed */
+        }
         gfx_text(ctx, x + 8, iy + 5, g_ctx_labels[i],
-                 GFX_WHITE, GFX_TRANSPARENT);
+                 fg, GFX_TRANSPARENT);
     }
 }
 
@@ -1015,6 +1032,21 @@ int main(int argc, char **argv) {
                     struct sys_wm_event ev = {0};
                     ev.type = WM_EV_CLOSE;
                     sys_wm_event_push(g_ctx_menu.target_id, &ev);
+                } else if (item >= 2 && item < 2 + NUM_WORKSPACES
+                           && target_idx >= 0) {
+                    /* Session 148 — Move to WS <item-2>.  If the
+                     * destination is the current workspace, this is
+                     * a no-op.  Otherwise the window's `workspace`
+                     * field changes; on the next frame paint + hit-
+                     * test on the current workspace skip it (gone
+                     * from view), and selecting that workspace via
+                     * the top-bar or Alt+N reveals it again. */
+                    int dst = item - 2;
+                    g_windows[target_idx].workspace = dst;
+                    if (dst != g_current_workspace
+                        && focused == target_idx) {
+                        focused = -1;
+                    }
                 }
                 g_ctx_menu.open = 0;
                 goto after_press_hit;
