@@ -1013,6 +1013,24 @@ void syscall_dispatch(struct registers *r) {
         case SYS_CLIPBOARD_GET:
             ret = clipboard_get((void *)(uintptr_t)a, (int)b);
             break;
+        /* Session 143 — toast-notification ring. */
+        case SYS_WM_NOTIFY: {
+            const char *text = (const char *)(uintptr_t)a;
+            int         len  = (int)b;
+            if (!text || len <= 0) { ret = -1; break; }
+            if (len > 256) len = 256;     /* hard cap before wm_notify_push */
+            extern int wm_notify_push(const char *, int);
+            ret = wm_notify_push(text, len);
+            break;
+        }
+        case SYS_WM_POLL_NOTIFY: {
+            char *buf = (char *)(uintptr_t)a;
+            int   cap = (int)b;
+            if (!buf || cap <= 0) { ret = 0; break; }
+            extern int wm_notify_pop(char *, int);
+            ret = wm_notify_pop(buf, cap);
+            break;
+        }
         case SYS_GETRANDOM: {
             extern int virtio_rng_get(void *, int);
             extern int virtio_rng_available(void);
