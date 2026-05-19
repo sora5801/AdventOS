@@ -24,6 +24,17 @@ DESCRIPTION
       Ctrl+X            cut selection to clipboard
       Ctrl+V            paste clipboard contents at the cursor
                         (replaces selection if any)
+      Ctrl+F            open search bar at bottom (session 152)
+
+    Search mode (after Ctrl+F):
+      printable ASCII   append to the search pattern; matches
+                        highlight in mustard yellow inline; the
+                        cursor jumps to the first match as you type
+      Backspace         shorten the pattern
+      Enter             jump to the next match (wraps to top)
+      Esc               close the search bar; matches stop
+                        highlighting but the cursor stays where it
+                        landed
 
     Mouse: clicking places the cursor.  Click-and-drag selects a
     range; the highlighted bytes have a blue background.  Drag
@@ -37,11 +48,13 @@ DESCRIPTION
     cursor position as "L<row>:<col> B<total-bytes>".
 
 LIMITATIONS
-    Single 8 KiB buffer cap.  No selection, search, undo, or
-    file picker — those are future polish.  Arrow-key support
-    relies on the kernel's ANSI CSI passthrough for arrows
-    (ESC '[' A/B/C/D), same path the shell uses for history
-    navigation.
+    Single 8 KiB buffer cap.  No undo (Ctrl+Z) and no file
+    picker yet — those are future polish.  Search (session
+    152) is forward-only with wrap; no Shift+Enter "previous
+    match" yet, no regex, no case-insensitive toggle.  Arrow-
+    key support relies on the kernel's ANSI CSI passthrough
+    for arrows (ESC '[' A/B/C/D), same path the shell uses
+    for history navigation.
 
 SEE ALSO
     wmtype(1), wmterm(1), wmd(1)

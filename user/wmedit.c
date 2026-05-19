@@ -73,6 +73,39 @@ static int   g_drag;
 static int   g_scroll_row;   /* hoisted out of main() so byte_at_xy
                               * can use it from event handlers */
 
+/* Session 152 — incremental search.  Ctrl-F opens a search bar
+ * at the bottom; typing builds g_search_pat; matches in the
+ * viewport are highlighted yellow.  Enter jumps the cursor to
+ * the next match (wrapping); Esc closes search.  We keep the
+ * pattern + match-state across frames so the highlight survives
+ * scrolling. */
+#define SEARCH_PAT_MAX 48
+static int  g_search_mode;
+static char g_search_pat[SEARCH_PAT_MAX];
+static int  g_search_len;
+/* Find the next match at or after `from`, wrapping to 0 if no
+ * match in [from, len].  Returns the byte offset of the match
+ * or -1 if g_search_pat doesn't occur in g_buf. */
+static int find_match(int from) {
+    if (g_search_len <= 0 || g_search_len > g_len) return -1;
+    int last = g_len - g_search_len;
+    for (int i = from; i <= last; i++) {
+        int ok = 1;
+        for (int j = 0; j < g_search_len; j++) {
+            if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+        }
+        if (ok) return i;
+    }
+    for (int i = 0; i < from && i <= last; i++) {
+        int ok = 1;
+        for (int j = 0; j < g_search_len; j++) {
+            if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+        }
+        if (ok) return i;
+    }
+    return -1;
+}
+
 static int sel_lo(void) {
     return g_sel_anchor < g_cur ? g_sel_anchor : g_cur;
 }
@@ -282,6 +315,41 @@ int main(int argc, char **argv) {
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
                     unsigned int k = ev.keycode;
+                    /* Session 152 — search-mode key dispatch.  When
+                     * Ctrl-F has opened the search bar, all keystrokes
+                     * go into g_search_pat instead of g_buf.  Esc
+                     * closes the bar; Enter jumps to the next match;
+                     * Backspace shortens the pattern.  Cursor + buffer
+                     * are untouched (search is read-only navigation). */
+                    if (g_search_mode) {
+                        if (k == 27) {              /* Esc — close */
+                            g_search_mode = 0;
+                            break;
+                        }
+                        if (k == '\r' || k == '\n') {
+                            int m = find_match(g_cur + 1);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        if (k == 0x08 || k == 0x7F) {
+                            if (g_search_len > 0) g_search_len--;
+                            g_search_pat[g_search_len] = 0;
+                            /* Re-find from current cursor (or start). */
+                            int m = find_match(g_cur);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        if (k >= 0x20 && k <= 0x7E
+                            && g_search_len < SEARCH_PAT_MAX - 1) {
+                            g_search_pat[g_search_len++] = (char)k;
+                            g_search_pat[g_search_len] = 0;
+                            int m = find_match(g_cur);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        /* Anything else ignored while searching. */
+                        break;
+                    }
                     /* ANSI CSI: ESC '[' <final>. */
                     if (esc_state == 1) {
                         if (k == '[') { esc_state = 2; break; }
@@ -297,6 +365,13 @@ int main(int argc, char **argv) {
                         break;
                     }
                     if (k == 27) { esc_state = 1; break; }
+                    if (k == 0x06) {                  /* Ctrl-F — open search */
+                        g_search_mode = 1;
+                        g_search_len = 0;
+                        g_search_pat[0] = 0;
+                        sel_clear();
+                        break;
+                    }
                     if (k == 0x13) {              /* Ctrl+S — save */
                         int rc = save_file();
                         /* Session 143 — toast feedback. */
@@ -411,6 +486,28 @@ int main(int argc, char **argv) {
                            : "wmedit  (click to focus)",
                  GFX_WHITE, GFX_TRANSPARENT);
 
+        /* Session 152 — find all visible matches before painting so
+         * the body loop can yellow-highlight each match span. */
+        int matches[64];
+        int n_matches = 0;
+        if (g_search_mode && g_search_len > 0
+            && g_search_len <= g_len) {
+            int last = g_len - g_search_len;
+            int i = 0;
+            while (i <= last && n_matches < 64) {
+                int ok = 1;
+                for (int j = 0; j < g_search_len; j++) {
+                    if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+                }
+                if (ok) {
+                    matches[n_matches++] = i;
+                    i += g_search_len;
+                } else {
+                    i++;
+                }
+            }
+        }
+
         /* Text body. */
         int text_y0 = HDR_H + 4;
         int byte = row_start_off(g_scroll_row);
@@ -426,6 +523,16 @@ int main(int argc, char **argv) {
                     if (byte >= slo && byte < shi) {
                         wm_fill_rect(&win, GRID_X + col * CELL_W, y,
                                      CELL_W, LINE_H, 0x305078u);
+                    }
+                    /* Session 152 — search-match highlight (mustard
+                     * yellow), painted under glyph + over selection. */
+                    for (int m = 0; m < n_matches; m++) {
+                        if (byte >= matches[m]
+                            && byte < matches[m] + g_search_len) {
+                            wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                         CELL_W, LINE_H, 0x807030u);
+                            break;
+                        }
                     }
                     gfx_glyph(&sctx, GRID_X + col * CELL_W, y,
                               g_buf[byte], 0xC0E0C0u, GFX_TRANSPARENT);
@@ -459,25 +566,41 @@ int main(int argc, char **argv) {
         }
         caret_phase++;
 
-        /* Footer status bar. */
+        /* Footer status bar.  Session 152 — in search mode the
+         * footer becomes "Find: <pat>_  Esc:close  Enter:next" with
+         * a distinct yellow-tinted background so the mode is
+         * unmistakable. */
         int fy = WIN_H - FOOTER_H + 2;
-        wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
-                     0x202830u);
-        int fx = draw_str(&sctx, 6, fy, g_path, 0xE0E0E0u);
-        fx += 4;
-        if (g_dirty) fx = draw_str(&sctx, fx, fy, "[*]", 0xE0E030u);
-        fx += 8;
-        char info[40];
-        int n = 0;
-        const char *p = "L"; while (*p && n < 39) info[n++] = *p++;
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_row + 1);
-        if (n < 39) info[n++] = ':';
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_col + 1);
-        if (n < 39) info[n++] = ' ';
-        if (n < 39) info[n++] = 'B';
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)g_len);
-        info[n] = 0;
-        draw_str(&sctx, fx, fy, info, 0x80C080u);
+        if (g_search_mode) {
+            wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
+                         0x403820u);   /* dark mustard */
+            int fx = draw_str(&sctx, 6, fy, "Find: ", 0xFFFFFFu);
+            fx = draw_str(&sctx, fx, fy, g_search_pat, 0xFFE080u);
+            /* Blinking '_' cursor at end of pattern. */
+            if (((caret_phase / 12) & 1) == 0) {
+                draw_str(&sctx, fx, fy, "_", 0xFFFFFFu);
+            }
+            draw_str(&sctx, WIN_W - 200, fy,
+                     "Esc:close  Enter:next", 0xC0C0A0u);
+        } else {
+            wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
+                         0x202830u);
+            int fx = draw_str(&sctx, 6, fy, g_path, 0xE0E0E0u);
+            fx += 4;
+            if (g_dirty) fx = draw_str(&sctx, fx, fy, "[*]", 0xE0E030u);
+            fx += 8;
+            char info[40];
+            int n = 0;
+            const char *p = "L"; while (*p && n < 39) info[n++] = *p++;
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_row + 1);
+            if (n < 39) info[n++] = ':';
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_col + 1);
+            if (n < 39) info[n++] = ' ';
+            if (n < 39) info[n++] = 'B';
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)g_len);
+            info[n] = 0;
+            draw_str(&sctx, fx, fy, info, 0x80C080u);
+        }
 
         wm_present(&win);
         sys_sleep_ms(33);
