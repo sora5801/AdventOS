@@ -1356,7 +1356,19 @@ int main(int argc, char **argv) {
 
         /* Session 142 — cursor glyph removed; QEMU's host pointer
          * (synced to ms.x / ms.y via usb-tablet, session 141) is
-         * the visible pointer. */
+         * the visible pointer.
+         *
+         * Session 144 — calibration marker.  Tiny 4x4 hollow yellow
+         * square at the kernel-tracked click position so we can
+         * visually compare to where QEMU draws the host cursor.
+         * Whichever direction the host cursor sits from the
+         * marker is the SHIFT direction we need to apply in
+         * kernel/mouse.c's MOUSE_HOTSPOT_D[XY] macros to align
+         * clicks with the perceived cursor. */
+        {
+            int cx = ms.x, cy = ms.y;
+            gfx_rect(&ctx, cx - 2, cy - 2, 4, 4, GFX_YELLOW);
+        }
 
         gfx_present(&ctx);
         sys_sleep_ms(16);

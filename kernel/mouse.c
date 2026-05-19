@@ -167,8 +167,14 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
  * A small constant SW offset compensates closely enough that
  * the click lands where the user perceives the cursor.  Adjust
  * MOUSE_HOTSPOT_DX / DY here if your display backend differs. */
-#define MOUSE_HOTSPOT_DX  (-3)
-#define MOUSE_HOTSPOT_DY  (+3)
+/* Session 144 — initial guess was -3/+3 (shift SW).  User reports
+ * the drift got WORSE, meaning the click was already SW of the
+ * visible cursor and I should have shifted the other way.  Reset
+ * to 0 here while we add a visible calibration marker (next: wmd
+ * paints a tiny dot at the kernel cursor position so we can see
+ * the actual misalignment direction). */
+#define MOUSE_HOTSPOT_DX  (0)
+#define MOUSE_HOTSPOT_DY  (0)
 
 void mouse_set_absolute(int x, int y, int buttons) {
     x += MOUSE_HOTSPOT_DX;
