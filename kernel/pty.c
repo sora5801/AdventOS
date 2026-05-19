@@ -90,6 +90,21 @@ static int signal_interrupted(void) {
     return (t->sig_pending & ~t->sig_mask) != 0;
 }
 
+/* Session 157 — non-blocking peek helpers.  Used by sys_read on
+ * an FD_PTY_M / FD_PTY_S that has FD_FL_NONBLOCK set so the WM
+ * client (wmterm) doesn't block its main loop on a quiet shell. */
+int pty_master_read_avail(int idx) {
+    if (!valid(idx)) return -1;
+    struct pty *p = &g_ptys[idx];
+    return (p->s_to_m_head != p->s_to_m_tail) ? 1 : 0;
+}
+
+int pty_slave_read_avail(int idx) {
+    if (!valid(idx)) return -1;
+    struct pty *p = &g_ptys[idx];
+    return (p->m_to_s_head != p->m_to_s_tail) ? 1 : 0;
+}
+
 int pty_master_read(int idx, void *buf, int n) {
     if (!valid(idx)) return -1;
     struct pty *p = &g_ptys[idx];

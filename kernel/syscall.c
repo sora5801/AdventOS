@@ -543,9 +543,24 @@ void syscall_dispatch(struct registers *r) {
                     ret = pipe_read(e->obj_idx, buf, n);
                     break;
                 case FD_PTY_M:
+                    /* Session 157 — honor FD_FL_NONBLOCK so wmterm's
+                     * main loop doesn't block forever waiting on a
+                     * quiet shell.  Without this, sys_fd_nb(master,1)
+                     * was silently ignored, sys_read blocked, and
+                     * wm_poll_event never got called — that's why
+                     * typing + close were broken from session 145
+                     * until now. */
+                    if (e->flags & FD_FL_NONBLOCK) {
+                        int av = pty_master_read_avail(e->obj_idx);
+                        if (av != 1) { ret = 0; break; }
+                    }
                     ret = pty_master_read(e->obj_idx, buf, n);
                     break;
                 case FD_PTY_S:
+                    if (e->flags & FD_FL_NONBLOCK) {
+                        int av = pty_slave_read_avail(e->obj_idx);
+                        if (av != 1) { ret = 0; break; }
+                    }
                     ret = pty_slave_read(e->obj_idx, buf, n);
                     break;
                 case FD_CDC_ACM: {

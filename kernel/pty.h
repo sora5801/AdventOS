@@ -61,6 +61,13 @@ int  pty_slave_refs (int idx);
 int  pty_master_read(int idx, void *buf, int n);
 int  pty_slave_read (int idx, void *buf, int n);
 
+/* Session 157 — peek helpers used by FD_FL_NONBLOCK reads.  Return
+ * 1 if at least one byte is immediately available (so a read would
+ * not block), 0 if the ring is empty and the other side is still
+ * alive (a blocking read would yield), or -1 if the idx is bad. */
+int  pty_master_read_avail(int idx);
+int  pty_slave_read_avail (int idx);
+
 /* Write to the OTHER side's input ring. master_write puts bytes into
  * m_to_s (so slave_read picks them up); slave_write puts into s_to_m.
  * Blocks while the destination ring is full; returns -1 if the other

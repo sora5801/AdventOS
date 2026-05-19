@@ -2,7 +2,7 @@ NAME
     wmterm - terminal-emulator WM client (Path C phase 27)
 
 SYNOPSIS
-    wmterm [SECONDS]
+    wmterm [-v] [SECONDS]
 
 DESCRIPTION
     Open a 540x240 WM window hosting a 60x24 grid of text and
@@ -14,6 +14,11 @@ DESCRIPTION
     shell exactly as if it were a "real" terminal.  Anything
     the shell writes to stdout / stderr goes through the master
     fd back out and into the local text grid.
+
+    `-v` enables per-event diagnostic prints (FOCUS / UNFOCUS /
+    KEY / read) to the launching console — useful for tracing
+    WM event delivery, off by default so a normal session
+    doesn't spam its parent terminal.
 
     The grid is repainted every frame in light-green text on a
     near-black background.  A blinking white caret marks the
@@ -32,6 +37,14 @@ DESCRIPTION
     Exit after SECONDS (default 120) or when the WM closes the
     window.  Closing wmterm leaves the child sh.elf running
     until its own EOF on stdin — there's no SIGHUP wiring yet.
+
+HISTORY
+    Session 157 wired sys_read(FD_PTY_M/_S) to honor FD_FL_NONBLOCK
+    so wmterm's main loop can drain its event queue every tick
+    without blocking on a quiet shell.  Before that fix, wmterm
+    appeared to "hang" — typing and the close X never reached it
+    because wm_poll_event ran at most once per tick, and the read
+    after it blocked forever.
 
 SEE ALSO
     sh(1), wmd(1), wmtype(1)

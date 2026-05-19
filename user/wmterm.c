@@ -135,9 +135,21 @@ static void vt_feed(unsigned char b) {
     }
 }
 
+/* Session 157 — `wmterm -v <secs>` (or env WMTERM_VERBOSE=1) prints
+ * one line per FOCUS/UNFOCUS/KEY/read event.  Used by the smoke test
+ * to verify the PTY-non-block fix round-trips events end-to-end;
+ * leaving it always-on would spam the launching console with one
+ * line per keystroke, so the default is quiet. */
+static int g_verbose = 0;
+
 int main(int argc, char **argv) {
     int seconds = 120;
-    if (argc >= 2) seconds = my_atoi_str(argv[1]);
+    int posarg = 1;
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'v' && !argv[1][2]) {
+        g_verbose = 1;
+        posarg = 2;
+    }
+    if (argc > posarg) seconds = my_atoi_str(argv[posarg]);
     if (seconds <= 0) seconds = 120;
 
     struct wm_window win;
@@ -145,7 +157,7 @@ int main(int argc, char **argv) {
         printf("wmterm: SYS_WM_CREATE failed; is wmd running?\n");
         return 1;
     }
-    printf("wmterm: id=%u\n", win.id);
+    printf("wmterm: id=%u%s\n", win.id, g_verbose ? " (verbose)" : "");
 
     struct gfx_ctx sctx;
     make_surface_ctx(&sctx, &win);
@@ -193,12 +205,21 @@ int main(int argc, char **argv) {
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
             switch (ev.type) {
-                case WM_EV_FOCUS:   has_focus = 1; break;
-                case WM_EV_UNFOCUS: has_focus = 0; break;
+                case WM_EV_FOCUS:
+                    has_focus = 1;
+                    if (g_verbose) printf("wmterm: FOCUS\n");
+                    break;
+                case WM_EV_UNFOCUS:
+                    has_focus = 0;
+                    if (g_verbose) printf("wmterm: UNFOCUS\n");
+                    break;
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
                     char c = (char)ev.keycode;
-                    sys_write(master, &c, 1);
+                    int wr = sys_write(master, &c, 1);
+                    if (g_verbose)
+                        printf("wmterm: KEY 0x%x wr=%d\n",
+                               (unsigned)(unsigned char)c, wr);
                     break;
                 }
                 default: break;
@@ -210,6 +231,9 @@ int main(int argc, char **argv) {
         char buf[READ_BUF];
         int n = sys_read(master, buf, sizeof(buf));
         if (n > 0) {
+            if (g_verbose)
+                printf("wmterm: rd n=%d first=0x%x\n",
+                       n, (unsigned)(unsigned char)buf[0]);
             for (int i = 0; i < n; i++) vt_feed((unsigned char)buf[i]);
         }
 
