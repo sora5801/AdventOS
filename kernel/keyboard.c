@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "kprintf.h"
 #include "serial.h"
+#include "task.h"
 #include "../include/io.h"
 
 #define KBD_DATA_PORT 0x60
@@ -269,6 +270,12 @@ void keyboard_inject(const char *bytes, int n) {
     for (int i = 0; i < n; i++) buf_push(bytes[i]);
 }
 
+/* Session 160 — keyboard grab state.  wmd calls keyboard_grab(pid)
+ * at startup so it becomes the sole consumer; keyboard_wait_char
+ * yields all other tasks until grab is cleared.  task_destroy in
+ * kernel/task.c clears this if the grabber dies without releasing. */
+static int g_kbd_grab_pid = 0;
+
 char keyboard_wait_char(void) {
     /* Session 68: actively poll both input paths each iteration.
      *
@@ -303,9 +310,22 @@ char keyboard_wait_char(void) {
      * the BKL drop in between is the whole point — it lets the peer
      * CPU's kernel task acquire it, do its work, release. */
     extern void task_yield(void);
+    extern struct task *task_current(void);
     for (;;) {
         keyboard_poll_once();
         serial_poll_once();
+
+        /* Session 160 — if some other task has grabbed the keyboard
+         * (typically wmd), don't compete for the ring; yield until
+         * the grab is released.  Without this the outer shell at its
+         * raw-mode prompt races wmd for every keystroke and `wmterm &`
+         * users see typing eaten by sh's read_line_interactive instead
+         * of arriving at the focused WM client. */
+        struct task *t = task_current();
+        if (g_kbd_grab_pid != 0 && t && (int)t->id != g_kbd_grab_pid) {
+            task_yield();
+            continue;
+        }
 
         if (kbd_head != kbd_tail) {
             char c = kbd_buf[kbd_tail];
@@ -314,4 +334,12 @@ char keyboard_wait_char(void) {
         }
         task_yield();
     }
+}
+
+void keyboard_grab(int pid) {
+    g_kbd_grab_pid = pid;
+}
+
+int keyboard_grabbed_by(void) {
+    return g_kbd_grab_pid;
 }

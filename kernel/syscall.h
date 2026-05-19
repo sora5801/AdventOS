@@ -390,6 +390,14 @@ struct sys_limits {
 /* Session 151 — screenshot trigger channel.  USB-HID intercepts
  * Alt+P and posts here; wmd polls per frame.  Single-shot flag. */
 #define SYS_WM_POLL_SCREENSHOT 108 /* (eax=108) -> 1 if pending else 0 */
+#define SYS_KBD_GRAB        109 /* (eax=109, ebx=on) -> 0/-1.
+                                   on=1: current task becomes the sole
+                                   consumer of the kbd ring — every other
+                                   task that lands in keyboard_wait_char
+                                   yields until the grabber releases.
+                                   on=0: release.  Used by wmd to stop the
+                                   outer shell from eating keystrokes the
+                                   user intends for a focused WM client. */
 
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */

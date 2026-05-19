@@ -435,6 +435,15 @@ int sys_kbd_poll(void) {
     return ret;
 }
 
+int sys_kbd_grab(int on) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_KBD_GRAB), "b"(on)
+                      : "memory");
+    return ret;
+}
+
 int sys_ptrace(int op, int pid, void *args) {
     int ret;
     __asm__ volatile ("int $0x80"

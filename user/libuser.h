@@ -157,6 +157,7 @@ typedef unsigned int   size_t;
 #define SYS_WM_POLL_NOTIFY       106
 #define SYS_WM_POLL_WORKSPACE    107
 #define SYS_WM_POLL_SCREENSHOT   108
+#define SYS_KBD_GRAB             109
 
 /* Session 70: syscall sandbox.
  *
@@ -484,6 +485,7 @@ int      sys_openpty(int fds[2]);
  *   ptrace(op,pid,a)  : ptrace multiplexed syscall — see syscall.h for
  *                       the op set + ptrace_args layout. */
 int      sys_kbd_poll    (void);
+int      sys_kbd_grab    (int on);   /* session 160 — wmd claims kbd ring */
 int      sys_ptrace      (int op, int pid, void *args);
 
 /* Session 107 — Path C: userspace framebuffer access.

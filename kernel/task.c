@@ -1063,6 +1063,14 @@ void task_exit_current(int exit_code) {
     extern void wm_on_task_exit(struct task *);
     wm_on_task_exit(t);
 
+    /* Session 160 — if this task was the keyboard grabber, release
+     * the grab so the kernel-console shell (or whatever's next) can
+     * resume reading kbd.  Without this, a wmd that crashes leaves
+     * the system unable to take keyboard input until reboot. */
+    extern int  keyboard_grabbed_by(void);
+    extern void keyboard_grab(int);
+    if (keyboard_grabbed_by() == (int)t->id) keyboard_grab(0);
+
     /* Close everything we still have open. Critical for pipes:
      * without this, a child that exits without explicitly close()'ing
      * its pipe-write end would leave write_refs > 0 forever and the

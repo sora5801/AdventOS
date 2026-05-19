@@ -24,4 +24,14 @@ void keyboard_inject(const char *bytes, int n);
  * firing (QEMU 10.x / chipset-routing issue). */
 void keyboard_poll_once(void);
 
+/* Session 160 — keyboard grab.  wmd calls keyboard_grab(pid) at
+ * startup so it becomes the sole consumer of the kbd ring; any
+ * other task that lands in keyboard_wait_char (e.g. the kernel-console
+ * shell sitting at its prompt) yields indefinitely until wmd releases
+ * the grab.  Without this, foreground/background races between wmd
+ * and the outer shell mean keystrokes the user thinks are going to
+ * wmterm sometimes get eaten by sh.elf's read_line_interactive. */
+void keyboard_grab(int pid);
+int  keyboard_grabbed_by(void);
+
 #endif

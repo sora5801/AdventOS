@@ -991,6 +991,17 @@ void syscall_dispatch(struct registers *r) {
             }
             break;
         }
+        case SYS_KBD_GRAB: {
+            /* Session 160 — current task claims (a=1) or releases (a=0)
+             * the kbd ring.  Tasks that lose the race in keyboard_wait_char
+             * yield until released.  task_destroy clears this if the
+             * grabber exits without explicitly releasing. */
+            extern void keyboard_grab(int pid);
+            if ((int)a) keyboard_grab((int)task_current()->id);
+            else        keyboard_grab(0);
+            ret = 0;
+            break;
+        }
         /* Session 112 — WM client protocol. See kernel/wm.c for
          * the per-syscall semantics; the dispatcher is just a thin
          * passthrough. */

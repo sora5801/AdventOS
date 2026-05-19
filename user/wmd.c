@@ -1028,6 +1028,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Session 160 — kbd grab is conditional: we only claim the ring
+     * while a CLIENT window has focus.  Without a focused client
+     * there's nobody to route keystrokes to anyway, so leaving the
+     * outer shell able to read kbd at that point is the right
+     * behaviour (otherwise `wmd &` would lock the launching shell
+     * out before the user can even type `wmterm`).  The flag mirrors
+     * the kernel grab state so we only issue the syscall on edges. */
+    int kbd_grabbed = 0;
+
     if (show_demos) init_demo_windows(ctx.width, ctx.height);
 
     unsigned int t0 = sys_time();
@@ -1340,6 +1349,16 @@ int main(int argc, char **argv) {
                 sys_wm_event_push(new_focus_id, &ev);
             }
             prev_focus_id = new_focus_id;
+        }
+
+        /* Session 160 — grab the kbd ring exactly when a client has
+         * focus.  Drop the grab the moment focus leaves a client (or
+         * goes to a non-client window) so the launching shell can
+         * resume reading kbd.  Only issue the syscall on edges. */
+        int want_grab = (new_focus_id != 0);
+        if (want_grab != kbd_grabbed) {
+            sys_kbd_grab(want_grab);
+            kbd_grabbed = want_grab;
         }
         if (released) {
             /* Session 138 — snap-to-edge.  If a title-bar drag is
@@ -1668,6 +1687,11 @@ int main(int argc, char **argv) {
         sys_sleep_ms(16);
     }
 
+    /* Session 160 — defensive release.  Normally the per-frame
+     * edge-tracker above has already dropped the grab whenever no
+     * client is focused, so this is a no-op in the common case.
+     * task_exit_current also clears it on abnormal exit. */
+    if (kbd_grabbed) sys_kbd_grab(0);
     gfx_release(&ctx);
     printf("wmd: released\n");
     return 0;
