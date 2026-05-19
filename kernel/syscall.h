@@ -367,6 +367,30 @@ struct sys_limits {
 #define SYS_CLIPBOARD_SET  102  /* (eax=102, ebx=buf, ecx=len)  -> 0 / -1 */
 #define SYS_CLIPBOARD_GET  103  /* (eax=103, ebx=buf, ecx=cap)  -> stored_len or 0 */
 
+#define SYS_OPEN_A      104 /* (eax=104, ebx=name) -> tmpfs fd (preserves
+                             * existing content) or -1. Drives shell `>>`
+                             * append redirect. tmpfs_write always appends
+                             * to end-of-file, so opening without truncate
+                             * is enough to make `>>` work. Slots 100-103
+                             * already taken (above). */
+
+/* Session 143 — toast-notification channel.  Apps post short status
+ * text ("saved /tmp/foo (123 B)") to a small kernel ring; wmd drains
+ * one entry per frame and pops up a fading toast in the bottom-right.
+ * Decoupled from SYS_WM_EVENT_POLL because the ring lives outside the
+ * per-window event queues — any task can push without owning a window. */
+#define SYS_WM_NOTIFY       105 /* (eax=105, ebx=text, ecx=len)  -> 0 / -1 */
+#define SYS_WM_POLL_NOTIFY  106 /* (eax=106, ebx=buf, ecx=cap)   -> bytes or 0 */
+
+/* Session 147 — workspace / virtual-desktop switch channel.  USB-HID
+ * intercepts Alt+1..4 and posts here; wmd polls once per frame.
+ * Poll returns 0..3 (workspace index) or -1 if no request pending. */
+#define SYS_WM_POLL_WORKSPACE  107 /* (eax=107) -> 0..3 or -1 */
+
+/* Session 151 — screenshot trigger channel.  USB-HID intercepts
+ * Alt+P and posts here; wmd polls per frame.  Single-shot flag. */
+#define SYS_WM_POLL_SCREENSHOT 108 /* (eax=108) -> 1 if pending else 0 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */

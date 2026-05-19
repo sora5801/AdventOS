@@ -84,6 +84,31 @@ static struct wm_state *g_state;
  * a small max so a stuck-keyboard never overflows. */
 static volatile unsigned int g_alttab_pending;
 
+/* Session 147 — workspace switch request.  usb_hid intercepts
+ * Alt+1..4 and posts the workspace index here; wmd polls once
+ * per frame.  -1 = no pending switch; set by post, cleared by
+ * poll.  No queue — only the most-recent request matters. */
+static volatile int g_workspace_pending = -1;
+
+/* Session 151 — screenshot request.  Alt+P intercepted by usb_hid
+ * sets this flag; wmd polls each frame, and when set dumps its
+ * current ctx framebuffer to /tmp/screen.ppm as a binary P6 PPM. */
+static volatile int g_screenshot_pending = 0;
+
+/* Session 143 — toast-notification ring.  Apps post short status
+ * text (e.g. "saved /tmp/foo (123 B)") via SYS_WM_NOTIFY; wmd
+ * drains via SYS_WM_POLL_NOTIFY each frame and pops up a toast.
+ * Cap is small — toasts are ephemeral and lossy is fine. */
+#define WM_NOTIFY_MAX        8
+#define WM_NOTIFY_TEXT_MAX  64
+struct wm_notify_slot {
+    char text[WM_NOTIFY_TEXT_MAX];
+    int  len;
+};
+static struct wm_notify_slot g_notify_ring[WM_NOTIFY_MAX];
+static int g_notify_head;   /* next write */
+static int g_notify_tail;   /* next read */
+
 static int  ensure_state(void) {
     if (g_state) return 0;
     g_state = (struct wm_state *)kmalloc(sizeof(*g_state));
@@ -361,6 +386,58 @@ int wm_poll_alttab(struct task *caller) {
     if (g_alttab_pending == 0) return 0;
     g_alttab_pending--;
     return 1;
+}
+
+/* Session 147 — workspace switch channel.  Same one-slot pattern
+ * as alttab but carries a value 0..NUM_WORKSPACES-1 (= 0..3). */
+void wm_post_workspace(int n) {
+    if (n >= 0 && n < 4) g_workspace_pending = n;
+}
+
+int wm_poll_workspace(struct task *caller) {
+    if (g_wm_owner != caller) return -1;
+    int n = g_workspace_pending;
+    g_workspace_pending = -1;
+    return n;
+}
+
+/* Session 151 — screenshot channel.  Single-shot flag; wmd polls
+ * each frame and triggers a /tmp/screen.ppm dump on edge. */
+void wm_post_screenshot(void) {
+    g_screenshot_pending = 1;
+}
+
+int wm_poll_screenshot(struct task *caller) {
+    if (g_wm_owner != caller) return 0;
+    if (!g_screenshot_pending) return 0;
+    g_screenshot_pending = 0;
+    return 1;
+}
+
+/* Session 143 — notification ring entry points. */
+int wm_notify_push(const char *text, int len) {
+    if (!text || len <= 0) return -1;
+    if (len > WM_NOTIFY_TEXT_MAX - 1) len = WM_NOTIFY_TEXT_MAX - 1;
+    int next = (g_notify_head + 1) % WM_NOTIFY_MAX;
+    if (next == g_notify_tail) return -1;   /* ring full; drop */
+    struct wm_notify_slot *s = &g_notify_ring[g_notify_head];
+    for (int i = 0; i < len; i++) s->text[i] = text[i];
+    s->text[len] = 0;
+    s->len = len;
+    g_notify_head = next;
+    return 0;
+}
+
+int wm_notify_pop(char *buf, int cap) {
+    if (g_notify_tail == g_notify_head) return 0;     /* empty */
+    if (cap <= 0) return 0;
+    struct wm_notify_slot *s = &g_notify_ring[g_notify_tail];
+    int len = s->len;
+    if (len > cap - 1) len = cap - 1;
+    for (int i = 0; i < len; i++) buf[i] = s->text[i];
+    buf[len] = 0;
+    g_notify_tail = (g_notify_tail + 1) % WM_NOTIFY_MAX;
+    return len;
 }
 
 void wm_on_task_exit(struct task *t) {

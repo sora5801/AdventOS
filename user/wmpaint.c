@@ -69,6 +69,65 @@ static void draw_line(struct wm_window *w, int x0, int y0, int x1, int y1,
     }
 }
 
+/* Session 150 — write the canvas (everything below the toolbar)
+ * to /tmp/paint.ppm as a binary P6 PPM.  Streams one row at a
+ * time so we don't have to materialise a 300 KB temp buffer in
+ * the wmpaint .bin blob.  wm_notify confirms the save. */
+static void itoa_app(char *buf, int *pos, int v) {
+    char t[12]; int n = 0;
+    if (v == 0) { t[n++] = '0'; }
+    else { while (v) { t[n++] = '0' + (v % 10); v /= 10; } }
+    while (n-- > 0) buf[(*pos)++] = t[n];
+}
+
+static void save_canvas(struct wm_window *win) {
+    int fd = sys_open_w("/tmp/paint.ppm");
+    if (fd < 0) {
+        wm_notify("wmpaint: save failed");
+        return;
+    }
+    int canvas_w = WIN_W;
+    int canvas_h = WIN_H - TOOLBAR_H;
+
+    /* Header. */
+    char hdr[32]; int hn = 0;
+    hdr[hn++] = 'P'; hdr[hn++] = '6'; hdr[hn++] = '\n';
+    itoa_app(hdr, &hn, canvas_w);
+    hdr[hn++] = ' ';
+    itoa_app(hdr, &hn, canvas_h);
+    hdr[hn++] = '\n';
+    hdr[hn++] = '2'; hdr[hn++] = '5'; hdr[hn++] = '5'; hdr[hn++] = '\n';
+    sys_write(fd, hdr, hn);
+
+    /* One row buffer = 1200 bytes; on the stack is fine. */
+    unsigned int *pix   = win->pixels;
+    unsigned int  pitch = win->pitch_px;
+    unsigned char row[WIN_W * 3];
+    int total_bytes = hn;
+    for (int y = TOOLBAR_H; y < WIN_H; y++) {
+        for (int x = 0; x < WIN_W; x++) {
+            unsigned int c = pix[y * pitch + x];
+            row[x*3 + 0] = (unsigned char)((c >> 16) & 0xFF);
+            row[x*3 + 1] = (unsigned char)((c >>  8) & 0xFF);
+            row[x*3 + 2] = (unsigned char)( c        & 0xFF);
+        }
+        sys_write(fd, row, canvas_w * 3);
+        total_bytes += canvas_w * 3;
+    }
+    sys_close(fd);
+
+    /* Build the toast: "saved /tmp/paint.ppm (NNN B)" */
+    char tn[64]; int tnn = 0;
+    const char *m = "saved /tmp/paint.ppm (";
+    while (*m && tnn < (int)sizeof(tn) - 1) tn[tnn++] = *m++;
+    itoa_app(tn, &tnn, total_bytes);
+    if (tnn < (int)sizeof(tn) - 3) {
+        tn[tnn++] = ' '; tn[tnn++] = 'B'; tn[tnn++] = ')';
+    }
+    tn[tnn] = 0;
+    wm_notify(tn);
+}
+
 /* Redraw the top toolbar — gets called every frame because the
  * paint canvas is the surface itself and we don't full-clear. */
 static void paint_toolbar(struct wm_window *win, struct gfx_ctx *sctx,
@@ -91,7 +150,7 @@ static void paint_toolbar(struct wm_window *win, struct gfx_ctx *sctx,
 
     /* Hint text. */
     gfx_text(sctx, 4 + 7 * 22 + 8, 8,
-             "drag to draw - 1..7 color - c clear - q quit",
+             "1..7 color  c clear  Ctrl-S save  q quit",
              GFX_GREY, GFX_TRANSPARENT);
     (void)radius;
 }
@@ -168,6 +227,9 @@ int main(int argc, char **argv) {
                                      WIN_W, WIN_H - TOOLBAR_H, 0x282828u);
                     }
                     else if (k == 'q' || k == 'Q') quit = 1;
+                    else if (k == 0x13) {         /* Ctrl-S save */
+                        save_canvas(&win);
+                    }
                     else if (k == '+' || k == '=') {
                         if (radius < 6) radius++;
                     } else if (k == '-' || k == '_') {

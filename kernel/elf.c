@@ -175,8 +175,11 @@ void elf_setup_args(struct elf_load_result *r,
     uint32_t cur_off = r->stack_size;
     uint32_t cur_va  = USER_STACK_VA + r->stack_size;
 
-    uint32_t str_va[16];
-    if (argc > 16) argc = 16;
+    /* Match SYS_EXEC's EXEC_MAX_ARGS so shell glob expansions
+     * (e.g. `ls *.elf` with 70+ binaries) survive into the new
+     * task. 128 * 4 = 512 bytes of kernel stack — small. */
+    uint32_t str_va[128];
+    if (argc > 128) argc = 128;
 
     /* 1. Strings, in reverse so argv[0]'s string ends up lowest. */
     for (int i = argc - 1; i >= 0; i--) {

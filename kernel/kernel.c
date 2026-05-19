@@ -47,11 +47,14 @@
 #include "ac97.h"
 #include "usb_core.h"
 #include "usb_cdc_acm.h"
+#include "usb_cdc_ecm.h"
+#include "ehci.h"
 #include "blkdev.h"
 #include "virtio_blk.h"
 #include "virtio_net.h"
 #include "virtio_scsi.h"
 #include "ahci.h"
+#include "nvme.h"
 #include "virtio_rng.h"
 #include "virtio_console.h"
 #include "virtio_balloon.h"
@@ -227,6 +230,12 @@ void kmain(uint32_t boot_drive) {
     virtio_scsi_init();
     kputs("done\n");
 
+    /* NVMe — modern PCIe SSD controller. Registers attached
+     * namespace 1 as a blkdev. Silent no-op when no `-device nvme`. */
+    kputs("[boot] probing NVMe... ");
+    nvme_init();
+    kputs("done\n");
+
     /* virtio-rng / -console / -balloon: more paravirtualized devices.
      * All silently no-op when not present. */
     kputs("[boot] probing virtio-rng... ");
@@ -327,6 +336,18 @@ void kmain(uint32_t boot_drive) {
      * just no-op. */
     ac97_init();
 
+    /* EHCI (USB 2.0) probe — brings up the controller, takes BIOS
+     * handoff, surveys the root-hub ports. Class-driver transfer
+     * integration is a follow-up so any high-speed devices on EHCI
+     * ports get released to the UHCI companion. Silent no-op when
+     * no EHCI is wired. */
+    kputs("[boot] probing EHCI... ");
+    if (ehci_init() == 0) {
+        kputs("ok\n");
+    } else {
+        kputs("absent\n");
+    }
+
     /* USB stack: probes UHCI on the PIIX3 PCI device, enumerates
      * any attached HID keyboard, spawns a polling task that injects
      * keystrokes into the same ring buffer the PS/2 driver uses.
@@ -343,6 +364,9 @@ void kmain(uint32_t boot_drive) {
      * to be live for any DHCP packet to be received. The RTL8139
      * path is IRQ-driven and doesn't care about this ordering. */
     virtio_net_start_polling();
+    /* Same reasoning for USB CDC-ECM: polled RX, so start the poller
+     * before DHCP can be tried. No-op if no ECM device is bound. */
+    usb_cdc_ecm_start_polling();
 
     /* UDP transport — must come before DHCP, which uses port 68/67. */
     udp_init();
@@ -387,18 +411,19 @@ void kmain(uint32_t boot_drive) {
      * HID, etc.) that need to run on whichever CPU schedule(). */
     usb_start_polling();
     usb_cdc_acm_start_polling();
+    /* usb_cdc_ecm_start_polling already fired above before DHCP. */
     /* virtio_net_start_polling already fired above before DHCP. */
     virtio_console_start_polling();
     virtio_balloon_start_task();
 
     /* Auto-mount AdventFS-formatted disks on USB / AHCI / virtio-scsi
-     * blkdevs at /mnt/usb, /mnt/sata, /mnt/scsi respectively. Silently
-     * no-ops if no such drive is present or its sector 0 doesn't have
-     * the AdventFS magic. */
+     * / NVMe blkdevs at /mnt/usb, /mnt/sata, /mnt/scsi, /mnt/nvme.
+     * Silently no-ops if no such drive is present or its sector 0
+     * doesn't have the AdventFS magic. */
     {
         extern int blkdev_count(void);
         extern struct blkdev *blkdev_get(int idx);
-        int usb_mounted = 0, sata_mounted = 0, scsi_mounted = 0;
+        int usb_mounted = 0, sata_mounted = 0, scsi_mounted = 0, nvme_mounted = 0;
         for (int i = 1; i < blkdev_count(); i++) {
             struct blkdev *b = blkdev_get(i);
             if (!b) continue;
@@ -409,16 +434,21 @@ void kmain(uint32_t boot_drive) {
             int is_vscsi = (b->name[0] == 'v' && b->name[1] == 's' &&
                             b->name[2] == 'c' && b->name[3] == 's' &&
                             b->name[4] == 'i');
-            if (!is_usb && !is_sata && !is_vscsi) continue;
+            int is_nvme  = (b->name[0] == 'n' && b->name[1] == 'v' &&
+                            b->name[2] == 'm' && b->name[3] == 'e');
+            if (!is_usb && !is_sata && !is_vscsi && !is_nvme) continue;
             const char *mp     = is_usb   ? "/mnt/usb"
                               : is_sata  ? "/mnt/sata"
-                                         : "/mnt/scsi";
+                              : is_vscsi ? "/mnt/scsi"
+                                         : "/mnt/nvme";
             const char *fsname = is_usb   ? "usbfs"
                               : is_sata  ? "satafs"
-                                         : "scsifs";
+                              : is_vscsi ? "scsifs"
+                                         : "nvmefs";
             int *flag          = is_usb   ? &usb_mounted
                               : is_sata  ? &sata_mounted
-                                         : &scsi_mounted;
+                              : is_vscsi ? &scsi_mounted
+                                         : &nvme_mounted;
             if (*flag) continue;
             struct fs_instance *inst =
                 fs_create_instance(b, /*base_lba=*/0, b->n_blocks);

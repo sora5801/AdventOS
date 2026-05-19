@@ -98,3 +98,11 @@ int wm_clipboard_set(const void *buf, int len) {
 int wm_clipboard_get(void *buf, int cap) {
     return sys_clipboard_get(buf, cap);
 }
+
+/* Session 143 — convenience wrapper that measures the string. */
+int wm_notify(const char *text) {
+    if (!text) return -1;
+    int n = 0;
+    while (text[n] && n < 256) n++;
+    return sys_wm_notify(text, n);
+}

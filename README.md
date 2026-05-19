@@ -23,10 +23,11 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | Sandbox masks + per-task resource limits (RSS/CPU/wall/FDs) | ✅ |
 | AdventFS (custom on-disk FS) — files, directories, perms | ✅ |
 | Block cache, virtual FS layer, /proc | ✅ |
-| ATA driver, USB UHCI controller, USB HID keyboard, USB Mass Storage, USB CDC-ACM serial | ✅ |
-| AHCI SATA controller (modern hard-disk interface) | ✅ |
+| ATA driver, USB UHCI + EHCI 2.0 (480 Mbps full transfer path), USB HID keyboard, USB Mass Storage, USB CDC-ACM serial, USB CDC-ECM Ethernet | ✅ |
+| AHCI SATA controller — IRQ-driven, NCQ (32 in-flight slots) | ✅ |
+| NVMe — modern PCIe-attached SSD interface (admin + I/O queue pairs, IDENTIFY, READ / WRITE) | ✅ |
 | virtio-blk + virtio-scsi + virtio-net + virtio-rng + virtio-console + virtio-balloon + virtio-9p (host fs passthrough, read+write+rename) | ✅ |
-| e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net) | ✅ |
+| e1000 / 82540EM gigabit NIC (alongside rtl8139 + virtio-net + USB CDC-ECM) | ✅ |
 | AC97 audio + `aplay` userspace consumer (PCM/WAV streaming) | ✅ |
 | TCP/UDP, DHCP client, DNS resolver + cache, NTP client | ✅ |
 | TLS 1.3 (ECDHE-RSA + AES-128-GCM, real-world server interop) | ✅ |
@@ -104,6 +105,14 @@ Recent session deep dives:
 - [Session 135 — Path B tcc fully works inside AdventOS](docs/121-pathB-tcc-fully-working.md)
 - [Session 134 — Path B tcc port, Phase 2 (running inside AdventOS)](docs/120-pathB-tcc-phase2.md)
 - [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
+- [Session 154 — Path C phase 47: wmedit Ctrl-Y redo](docs/140-pathC-wmedit-redo.md)
+- [Session 153 — Path C phase 46: wmedit Ctrl-Z undo](docs/139-pathC-wmedit-undo.md)
+- [Session 152 — Path C phase 45: wmedit Ctrl-F search](docs/138-pathC-wmedit-search.md)
+- [Session 151 — Path C phase 44: Alt+P screenshot](docs/137-pathC-screenshot.md)
+- [Session 150 — Path C phase 43: wmpaint Ctrl-S save](docs/136-pathC-wmpaint-save.md)
+- [Session 149 — Path C phase 42: wmview image viewer](docs/135-pathC-wmview.md)
+- [Session 126 — Path E phase 9: EHCI transfer integration](docs/127-pathE-ehci-transfers.md)
+- [Session 125 — Path E phase 8: NVMe + EHCI + AHCI IRQ/NCQ + CDC-ECM](docs/126-pathE-nvme-ehci-ahci-ecm.md)
 - [Session 139 — Path C phase 32: wmcalc calculator](docs/125-pathC-wmcalc.md)
 - [Session 138 — Path C phase 31: snap-to-edge + drop shadows](docs/124-pathC-snap-shadows.md)
 - [Session 137 — Path C phase 30: wmedit text editor](docs/123-pathC-wmedit.md)
@@ -171,7 +180,7 @@ AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BI
 Remaining candidate paths:
 - **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination, or a real `tcc` port for full-C support.
 - **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E — Drivers extension** — sessions 118–124 covered virtio-blk/scsi/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM with `/dev/ttyACM0` userspace device + AC97 consumer + WSL build path + IRQ-driven virtio + chain-style shared-PCI-IRQ dispatch + e1000 NIC + AHCI. Still candidate: USB EHCI (USB 2.0), USB CDC-ECM, NVMe, AHCI IRQ + NCQ.
+- **Path E — Drivers extension** — sessions 118–125 covered virtio-blk/scsi/net/rng/console/balloon/9p (read+write+rename) + USB CDC-ACM with `/dev/ttyACM0` userspace device + USB CDC-ECM USB-Ethernet + AC97 consumer + WSL build path + IRQ-driven virtio + chain-style shared-PCI-IRQ dispatch + e1000 NIC + AHCI (now IRQ-driven + NCQ) + NVMe + USB EHCI controller bring-up. Path E **backlog drained**; remaining work (EHCI transfer-path integration, AHCI multi-slot concurrent, NVMe MSI-X) is the next set of standalone polish sessions.
 
 ## License
 

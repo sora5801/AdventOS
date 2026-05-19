@@ -146,6 +146,18 @@ typedef unsigned int   size_t;
 #define SYS_CLIPBOARD_SET         102
 #define SYS_CLIPBOARD_GET         103
 
+/* Path A polish — `>>` append-mode tmpfs open. Slots 100-103 are
+ * taken by SYS_WM_POLL_ALTTAB / SYS_RENAME / SYS_CLIPBOARD_SET /
+ * SYS_CLIPBOARD_GET, so we slide to 104. */
+#define SYS_OPEN_A               104
+
+/* Session 143 — toast-notification channel (push from any app,
+ * drained by wmd). */
+#define SYS_WM_NOTIFY            105
+#define SYS_WM_POLL_NOTIFY       106
+#define SYS_WM_POLL_WORKSPACE    107
+#define SYS_WM_POLL_SCREENSHOT   108
+
 /* Session 70: syscall sandbox.
  *
  * `sys_sandbox_install` installs a syscall allow-bitmap. Pass a
@@ -399,6 +411,18 @@ int      sys_rename (const char *oldp, const char *newp);
 int      sys_clipboard_set(const void *buf, int len);
 int      sys_clipboard_get(void *buf, int cap);
 
+/* Session 143 — toast notifications.  Push short status strings
+ * ("saved foo (123 B)") to a kernel ring; wmd drains one per frame
+ * and renders a fading toast in the bottom-right.  Useful from any
+ * app — wmd is the only consumer.
+ *
+ *   sys_wm_notify(text, len)        0 on success, -1 on full / bad args
+ *   sys_wm_poll_notify(buf, cap)    bytes filled (NUL-terminated), 0 = empty
+ *
+ * Text is truncated at 63 bytes inside the kernel ring. */
+int      sys_wm_notify     (const char *text, int len);
+int      sys_wm_poll_notify(char *buf, int cap);
+
 /* Block-device access. dev_idx 0 is the boot ATA disk; USB drives
  * appear at higher indices once enumerated. SYS_BLOCK_INFO returns
  * the device's block_size + n_blocks + name; READ/WRITE transfer
@@ -580,6 +604,8 @@ int      sys_wm_event_poll (unsigned int window_id,
  * per drain).  Returns 1 if at least one is pending and
  * decrements; 0 otherwise. */
 int      sys_wm_poll_alttab(void);
+int      sys_wm_poll_workspace(void);
+int      sys_wm_poll_screenshot(void);
 /* Session 60: SNTP + DNS-cache + DHCP-info wrappers. */
 int      sys_ntp_sync    (const unsigned char ip[4]);
 int      sys_ntp_test_responder(int on, unsigned int epoch);
@@ -606,6 +632,7 @@ int      sys_serial_inject(const char *bytes, int n);
 int      sys_pipe   (int fds[2]);
 int      sys_dup2   (int oldfd, int newfd);
 int      sys_open_w (const char *name);
+int      sys_open_a (const char *name);
 
 /* Signals.
  *   kill(pid, sig)            queues sig in pid's pending set

@@ -541,6 +541,24 @@ int sys_wm_poll_alttab(void) {
                       : "memory");
     return ret;
 }
+/* Session 147 — workspace switch poll. */
+int sys_wm_poll_workspace(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_WORKSPACE)
+                      : "memory");
+    return ret;
+}
+/* Session 151 — screenshot trigger poll. */
+int sys_wm_poll_screenshot(void) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_SCREENSHOT)
+                      : "memory");
+    return ret;
+}
 
 /* Session 136 — clipboard. */
 int sys_clipboard_set(const void *buf, int len) {
@@ -556,6 +574,24 @@ int sys_clipboard_get(void *buf, int cap) {
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_CLIPBOARD_GET), "b"(buf), "c"(cap)
+                      : "memory");
+    return ret;
+}
+
+/* Session 143 — toast notifications. */
+int sys_wm_notify(const char *text, int len) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_NOTIFY), "b"(text), "c"(len)
+                      : "memory");
+    return ret;
+}
+int sys_wm_poll_notify(char *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_NOTIFY), "b"(buf), "c"(cap)
                       : "memory");
     return ret;
 }
@@ -908,6 +944,15 @@ int sys_open_w(const char *name) {
     __asm__ volatile ("int $0x80"
                       : "=a"(ret)
                       : "a"(SYS_OPEN_W), "b"(name)
+                      : "memory");
+    return ret;
+}
+
+int sys_open_a(const char *name) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_OPEN_A), "b"(name)
                       : "memory");
     return ret;
 }

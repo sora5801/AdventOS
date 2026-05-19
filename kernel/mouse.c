@@ -49,6 +49,14 @@ static int     g_buttons;     /* low 3 bits = L|R|M */
 static uint8_t g_pkt[3];
 static int     g_pkt_idx;
 
+/* Session 144 — set the first time the USB tablet reports an
+ * absolute position.  Once a tablet is alive we ignore PS/2 mouse
+ * deltas because QEMU routes in-window movement to PS/2 (relative)
+ * AND boundary events to the tablet (absolute); both updating the
+ * same g_mouse_x/y leaves the cursor desynchronised from the host
+ * pointer until the user exits and re-enters the window. */
+static int     g_tablet_active;
+
 static void wait_input_empty(void) {
     for (int i = 0; i < 100000; i++) {
         if (!(inb(KBD_STATUS) & STATUS_IBF)) return;
@@ -130,6 +138,16 @@ void mouse_process_byte(uint8_t b) {
     if (g_pkt_idx < 3) return;
     g_pkt_idx = 0;
 
+    /* Session 144 — if usb-tablet has ever reported, ignore PS/2
+     * deltas entirely.  QEMU emits BOTH PS/2 deltas (for in-window
+     * movement) AND tablet absolutes (for boundary crossings) when
+     * both devices are attached; letting PS/2 update position drifts
+     * the kernel pos away from where the host cursor visually is
+     * until the user exits + re-enters the window, which triggers
+     * a tablet abs report that resyncs.  Tablet is the authoritative
+     * pointer; drop PS/2 to silence the drift. */
+    if (g_tablet_active) return;
+
     /* Decode 9-bit deltas. byte0 X_SIGN → 0x100 bit of dx; similarly Y. */
     int dx = (int)g_pkt[1] - ((g_pkt[0] << 4) & 0x100);
     int dy = (int)g_pkt[2] - ((g_pkt[0] << 3) & 0x100);
@@ -151,4 +169,58 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
     if (x_out)       *x_out = g_mouse_x;
     if (y_out)       *y_out = g_mouse_y;
     if (buttons_out) *buttons_out = g_buttons;
+}
+
+/* Session 141 — USB tablet absolute-positioning entry point.
+ * Called from kernel/usb_hid.c's tablet polling task.  No PS/2
+ * packet bookkeeping — just overwrite the position.
+ *
+ * Session 144 — observed (~3 px) NE drift between the visible
+ * host cursor and the guest's click position with this scaling
+ * alone.  Likely a combination of:
+ *   - integer-division truncation in the host→tablet→guest
+ *     round-trip (raw_x * (fb_w-1) / 32767 floors toward zero)
+ *   - host cursor hotspot vs. image-centre mismatch in the
+ *     display backend's rendering (GTK / WSLg / etc)
+ * A small constant SW offset compensates closely enough that
+ * the click lands where the user perceives the cursor.  Adjust
+ * MOUSE_HOTSPOT_DX / DY here if your display backend differs. */
+/* Session 144 — empirical hotspot offset.
+ *
+ * Iteration log:
+ *   -3/+3 → drift got worse  (kernel pushed too far SW)
+ *   +3/-3 → still NE         (kernel pushed too far NE)
+ *   0/0   → still slightly NE of cursor (~1 px)
+ *
+ * Both larger values straddle the right answer, so the true drift
+ * is ~1 px NE.  Small -1/+1 SW nudge to compensate.
+ *
+ * Note: the user also observes position-dependent offsets when
+ * moving the cursor in/out of the QEMU window — those are display-
+ * backend artifacts (host OS vs guest tablet coordinate translation
+ * differences across the window boundary) and not fixable here. */
+#define MOUSE_HOTSPOT_DX  (-1)
+#define MOUSE_HOTSPOT_DY  (+1)
+
+void mouse_set_absolute(int x, int y, int buttons) {
+    x += MOUSE_HOTSPOT_DX;
+    y += MOUSE_HOTSPOT_DY;
+    const struct vbe_state *v = vbe_state();
+    int max_x = (v && v->enabled) ? (int)v->width  - 1 : 1023;
+    int max_y = (v && v->enabled) ? (int)v->height - 1 : 767;
+    if (x < 0)     x = 0;
+    if (y < 0)     y = 0;
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+    g_mouse_x = x;
+    g_mouse_y = y;
+    g_buttons = buttons & 0x07;
+}
+
+/* Session 144 — called from usb_hid_attach the moment a tablet
+ * is enumerated.  Pre-emptively silences PS/2 deltas so even the
+ * first in-window movement after boot lands at the tablet's
+ * absolute position rather than drifting via PS/2. */
+void mouse_set_tablet_active(void) {
+    g_tablet_active = 1;
 }
