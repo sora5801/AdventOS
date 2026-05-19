@@ -103,6 +103,12 @@ static const struct launch_entry g_launch_items[] = {
     { "wmterm",  "/wmterm.elf"   },
     { "wmedit",  "/wmedit.elf"   },
     { "wmcalc",  "/wmcalc.elf"   },
+    /* Session 142 — explicit user-facing "Shell" label that launches
+     * the terminal emulator (wmterm) holding a sh.elf instance.  The
+     * wmterm entry above stays so the technical name is still
+     * accessible; "Shell" is the friendly label that says what it
+     * does at a glance. */
+    { "Shell",   "/wmterm.elf"   },
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -163,10 +169,12 @@ static int fmt_u(char *buf, int cap, unsigned int v) {
     return out;
 }
 
-static void draw_cursor(struct gfx_ctx *ctx, int cx, int cy, unsigned int rgb) {
-    gfx_line(ctx, cx - CURSOR_R, cy, cx + CURSOR_R, cy, rgb);
-    gfx_line(ctx, cx, cy - CURSOR_R, cx, cy + CURSOR_R, rgb);
-}
+/* Session 142 — draw_cursor removed.  The wmd-drawn crosshair was
+ * redundant once session 141's usb-tablet locked QEMU's host
+ * pointer to the guest cursor coordinates.  The host cursor (the
+ * OS arrow) is now the only visible pointer; ms.x / ms.y still
+ * drive every click + drag handler below, just without a glyph
+ * painted over them. */
 
 /* Window content painters. */
 static void paint_clock(struct gfx_ctx *ctx, struct window *w,
@@ -1240,10 +1248,9 @@ int main(int argc, char **argv) {
          * everything (last paint wins). */
         paint_ctx_menu(&ctx);
 
-        /* Cursor: red if dragging, otherwise white. */
-        unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;
-        if (left && g_drag_idx < 0) cursor_rgb = GFX_YELLOW; /* click on bg */
-        draw_cursor(&ctx, ms.x, ms.y, cursor_rgb);
+        /* Session 142 — cursor glyph removed; QEMU's host pointer
+         * (synced to ms.x / ms.y via usb-tablet, session 141) is
+         * the visible pointer. */
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
