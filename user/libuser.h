@@ -745,16 +745,143 @@ int      sys_bcache_stats(uint32_t out[5]);
 void     putchar(char c);
 void     puts(const char *s);
 void     printf(const char *fmt, ...);
+/* sprintf / snprintf are varargs shims; the v* variants take a va_list
+ * already (useful for forwarding from another varargs function). All
+ * trampoline into libc.bin's shared formatter core. */
+int      sprintf (char *buf, const char *fmt, ...);
+int      snprintf(char *buf, size_t cap, const char *fmt, ...);
+int      vsprintf (char *buf, const char *fmt, va_list ap);
+int      vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap);
 
 size_t   strlen(const char *s);
 int      strcmp(const char *a, const char *b);
 int      strncmp(const char *a, const char *b, size_t n);
-void    *memset(void *p, int c, size_t n);
-void    *memcpy(void *d, const void *s, size_t n);
-int      memcmp(const void *a, const void *b, size_t n);
+char    *strcpy (char *d, const char *s);
+char    *strncpy(char *d, const char *s, size_t n);
+char    *strcat (char *d, const char *s);
+void    *memset (void *p, int c, size_t n);
+void    *memcpy (void *d, const void *s, size_t n);
+void    *memmove(void *d, const void *s, size_t n);
+int      memcmp (const void *a, const void *b, size_t n);
+const void  *memchr (const void *p, int c, size_t n);
 
-/* Common C-library bits used by the coreutils sweep (session 26). */
+/* Common C-library bits used by the coreutils sweep (session 26)
+ * and grown out to a full C-subset surface for session 132 (Path B
+ * tcc port Phase 2). All trampoline into libc.bin at LIBC_BASE. */
 int          atoi  (const char *s);
-const char  *strchr(const char *s, int c);
+long         atol  (const char *s);
+long         strtol(const char *s, char **end, int base);
+int          abs   (int x);
+void        *calloc (size_t nm, size_t sz);
+void        *realloc(void *p, size_t n);
+const char  *strchr (const char *s, int c);
+const char  *strrchr(const char *s, int c);
+const char  *strstr (const char *h, const char *n);
+
+/* ctype.h. ASCII only. */
+int      isalpha (int c);
+int      isdigit (int c);
+int      isxdigit(int c);
+int      isspace (int c);
+int      isalnum (int c);
+int      isupper (int c);
+int      islower (int c);
+int      toupper (int c);
+int      tolower (int c);
+
+/* Self-introspection: out[0]=magic, out[1]=version, out[2]=count. */
+void     libc_info(uint32_t out[3]);
+
+/* Session 134 — FILE * surface (Path B tcc port phase 2).
+ *
+ * FILE is opaque to user code; mirror struct lives in libc/libc.h.
+ * fopen "r" loads the full file into a malloc'd buffer at open time;
+ * "w" / "a" buffer writes and flush on fclose via sys_fs_write. So
+ * there's no real kernel seek — fseek/ftell move a cursor inside
+ * the buffer. stdin/stdout/stderr are SENTINEL POINTER values (1,2,3),
+ * never dereferenced; fwrite/fputs/fprintf detect them and dispatch
+ * to sys_write directly.
+ *
+ * Limits: 16 FILE* open at once, max 4MB read-file size. */
+struct __libc_FILE;
+typedef struct __libc_FILE FILE;
+
+#define EOF        (-1)
+#define SEEK_SET    0
+#define SEEK_CUR    1
+#define SEEK_END    2
+
+#define stdin   ((FILE *)1)
+#define stdout  ((FILE *)2)
+#define stderr  ((FILE *)3)
+
+FILE   *fopen   (const char *path, const char *mode);
+int     fclose  (FILE *f);
+size_t  fread   (void *ptr, size_t sz, size_t nm, FILE *f);
+size_t  fwrite  (const void *ptr, size_t sz, size_t nm, FILE *f);
+int     fseek   (FILE *f, long offset, int whence);
+long    ftell   (FILE *f);
+int     fputs   (const char *s, FILE *f);
+int     fputc   (int c, FILE *f);
+int     ferror  (FILE *f);
+int     feof    (FILE *f);
+int     remove  (const char *path);
+int     fflush  (FILE *f);
+char   *fgets   (char *s, int n, FILE *f);
+int     fgetc   (FILE *f);
+int     fprintf (FILE *f, const char *fmt, ...);
+int     vfprintf(FILE *f, const char *fmt, va_list ap);
+
+/* Session 134 — POSIX fd layer over a fake-fd table.  open() loads
+ * read-only files entirely into RAM; lseek/read serve from buffer.
+ * Write-mode open() pairs with fdopen() to share a FILE * buffer.
+ * Fake fds occupy [100, 116); real kernel fds are below that.
+ * unlink/getenv/system are stubs around their natural backing. */
+#define O_RDONLY    0
+#define O_WRONLY    1
+#define O_RDWR      2
+#define O_CREAT     0100
+#define O_TRUNC     01000
+#define O_APPEND    02000
+#define O_BINARY    0           /* no-op on Unix-style FS */
+
+int      open  (const char *path, int flags, ...);
+int      read  (int fd, void *buf, int n);
+int      write (int fd, const void *buf, int n);
+long     lseek (int fd, long offset, int whence);
+int      close (int fd);
+int      unlink(const char *path);
+FILE    *fdopen(int fd, const char *mode);
+
+/* Process / env stragglers. exit forwards to sys_exit. abort exits
+ * with code 134 (128 + SIGABRT — same convention as POSIX shells).
+ * getenv/system are deliberate stubs (no env, no shell exec). */
+void     exit  (int code) __attribute__((noreturn));
+void     abort (void)     __attribute__((noreturn));
+char    *getenv(const char *name);
+int      system(const char *cmd);
+
+extern int errno;
+
+/* time(NULL) -> wall-clock seconds.  out, if non-NULL, also stores it.
+ * time_t typedef is `long` to match POSIX (32-bit sufficient for AdventOS). */
+typedef long time_t;
+time_t time(time_t *out);
+
+/* gettimeofday — second-resolution; tv_usec stays 0. */
+struct timeval { long tv_sec; long tv_usec; };
+int      gettimeofday(struct timeval *tv, void *tz);
+
+/* setjmp/longjmp — i386 ABI, jmp_buf = 6 ints (ebx,esi,edi,ebp,esp,eip).
+ * Implementation lives in user/libuser.c as inline asm. */
+typedef int jmp_buf[6];
+int      setjmp (jmp_buf env);
+void     longjmp(jmp_buf env, int val) __attribute__((noreturn));
+
+/* qsort + strtoll + strerror trampoline into libc.bin. */
+void     qsort   (void *base, size_t nm, size_t sz,
+                  int (*cmp)(const void *, const void *));
+long long strtoll(const char *s, char **end, int base);
+const char *strerror(int errnum);
 
 #endif

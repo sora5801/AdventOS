@@ -221,3 +221,61 @@ long strtol(const char *s, char **end, int base) {
 }
 
 int abs(int x) { return x < 0 ? -x : x; }
+
+/* Session 134 — strtoll, the 64-bit cousin of strtol.  tcc emits
+ * 64-bit constants and uses this to parse the source-level literals.
+ * Same logic as strtol but on a `long long` accumulator. */
+long long strtoll(const char *s, char **end, int base) {
+    long long v = 0;
+    int sign = 1;
+    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+    if      (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') {             s++; }
+    if (base == 0) {
+        if (*s == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (*s == '0') { base = 8; s++; }
+        else { base = 10; }
+    } else if (base == 16 && *s == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+    for (;;) {
+        int d;
+        if (*s >= '0' && *s <= '9')      d = *s - '0';
+        else if (*s >= 'a' && *s <= 'z') d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'Z') d = *s - 'A' + 10;
+        else break;
+        if (d >= base) break;
+        v = v * base + d;
+        s++;
+    }
+    if (end) *end = (char *)s;
+    return v * sign;
+}
+
+/* qsort — Lomuto partition, recursive. tcc only sorts small arrays
+ * (case-statement values, sometimes section indices) so plain quicksort
+ * without median-of-three is fine. */
+static void qsort_swap(char *a, char *b, size_t sz) {
+    while (sz--) { char t = *a; *a++ = *b; *b++ = t; }
+}
+static void qsort_inner(char *base, int lo, int hi, size_t sz,
+                        int (*cmp)(const void *, const void *)) {
+    if (lo >= hi) return;
+    char *pivot = base + (size_t)hi * sz;
+    int i = lo - 1;
+    for (int j = lo; j < hi; j++) {
+        if (cmp(base + (size_t)j * sz, pivot) <= 0) {
+            i++;
+            if (i != j) qsort_swap(base + (size_t)i * sz, base + (size_t)j * sz, sz);
+        }
+    }
+    i++;
+    if (i != hi) qsort_swap(base + (size_t)i * sz, base + (size_t)hi * sz, sz);
+    qsort_inner(base, lo, i - 1, sz, cmp);
+    qsort_inner(base, i + 1, hi, sz, cmp);
+}
+void qsort(void *base, size_t nm, size_t sz,
+           int (*cmp)(const void *, const void *)) {
+    if (nm < 2 || sz == 0 || !cmp) return;
+    qsort_inner((char *)base, 0, (int)nm - 1, sz, cmp);
+}

@@ -57,6 +57,7 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_MEMMOVE]      = memmove,
     [LIBC_FN_MEMCMP]       = memcmp,
     [LIBC_FN_MEMCHR]       = memchr,
+    [LIBC_FN_STRERROR]     = strerror,
 
     [LIBC_FN_ATOI]         = atoi,
     [LIBC_FN_ATOL]         = atol,
@@ -66,6 +67,8 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_FREE]         = free,
     [LIBC_FN_CALLOC]       = calloc,
     [LIBC_FN_REALLOC]      = realloc,
+    [LIBC_FN_QSORT]        = qsort,
+    [LIBC_FN_STRTOLL]      = strtoll,
 
     [LIBC_FN_ISALPHA]      = isalpha,
     [LIBC_FN_ISDIGIT]      = isdigit,
@@ -75,12 +78,30 @@ void *const libc_exports[LIBC_EXPORT_COUNT] = {
     [LIBC_FN_ISLOWER]      = islower,
     [LIBC_FN_TOUPPER]      = toupper,
     [LIBC_FN_TOLOWER]      = tolower,
+    [LIBC_FN_ISXDIGIT]     = isxdigit,
 
     [LIBC_FN_PUTCHAR]      = putchar_,
     [LIBC_FN_PUTS]         = puts_,
     [LIBC_FN_VPRINTF]      = vprintf_,
     [LIBC_FN_VSPRINTF]     = vsprintf_,
     [LIBC_FN_VSNPRINTF]    = vsnprintf_,
+
+    /* Session 134 — FILE * + stdio family for the tcc port. */
+    [LIBC_FN_VFPRINTF]     = vfprintf_,
+    [LIBC_FN_FOPEN]        = fopen_,
+    [LIBC_FN_FCLOSE]       = fclose_,
+    [LIBC_FN_FREAD]        = fread_,
+    [LIBC_FN_FWRITE]       = fwrite_,
+    [LIBC_FN_FSEEK]        = fseek_,
+    [LIBC_FN_FTELL]        = ftell_,
+    [LIBC_FN_FPUTS]        = fputs_,
+    [LIBC_FN_FPUTC]        = fputc_,
+    [LIBC_FN_FERROR]       = ferror_,
+    [LIBC_FN_FEOF]         = feof_,
+    [LIBC_FN_REMOVE]       = remove_,
+    [LIBC_FN_FFLUSH]       = fflush_,
+    [LIBC_FN_FGETS]        = fgets_,
+    [LIBC_FN_FGETC]        = fgetc_,
 
     [LIBC_FN_MALLOC_BRK]   = malloc_brk_,
     [LIBC_FN_MALLOC_USED]  = malloc_used_,

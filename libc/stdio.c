@@ -104,36 +104,52 @@ static int do_format(struct sink *s, const char *fmt, va_list ap) {
     while (*fmt) {
         if (*fmt != '%') { s->putc(s, *fmt++); continue; }
         fmt++;
-        /* Minimal width spec: "%0Nx" / "%0Nd" — leading zero + a
-         * single decimal digit (1..8). Anything more exotic (left
-         * justify, dynamic width, etc.) falls through to the no-
-         * width path. The session-57 debugger prints addresses as
-         * %08x; before this the format string was dumped literally
-         * because there was no parser at all. */
+        /* Width spec.  Two shapes supported:
+         *   %0Nx / %0Nd — leading zero + decimal digits (zero-pad)
+         *   %*X         — width comes from an int va_arg (used by tcc
+         *                 for stack-indent prints; session 137).
+         * Anything fancier (left-justify, precision) falls through
+         * to the no-width path. */
         int width = 0;
+        int got_width = 0;
         if (*fmt == '0') {
             fmt++;
             while (*fmt >= '0' && *fmt <= '9') {
                 width = width * 10 + (*fmt - '0');
                 fmt++;
             }
+            got_width = (width > 0);
+        } else if (*fmt == '*') {
+            fmt++;
+            width = va_arg(ap, int);
+            if (width < 0) width = 0;
+            got_width = 1;
         }
         switch (*fmt) {
             case 'c': s->putc(s, (char)va_arg(ap, int)); break;
             case 's': {
                 const char *p = va_arg(ap, const char *);
                 if (!p) p = "(null)";
+                /* Width applies to %s only when explicitly given.
+                 * Pad on the LEFT (right-justified) up to `width` chars
+                 * — that matches glibc and the tcc usage that prompted
+                 * adding this. */
+                if (got_width) {
+                    int len = 0;
+                    for (const char *q = p; *q; q++) len++;
+                    while (len < width) { s->putc(s, ' '); len++; }
+                }
                 while (*p) s->putc(s, *p++);
                 break;
             }
             case 'd': case 'i': put_dec_signed  (s, va_arg(ap, int32_t)); break;
             case 'u':           put_dec_unsigned(s, va_arg(ap, uint32_t)); break;
             case 'x':
-                if (width > 0) put_hex_pad(s, va_arg(ap, uint32_t), 0, width);
+                if (got_width) put_hex_pad(s, va_arg(ap, uint32_t), 0, width);
                 else           put_hex    (s, va_arg(ap, uint32_t), 0);
                 break;
             case 'X':
-                if (width > 0) put_hex_pad(s, va_arg(ap, uint32_t), 1, width);
+                if (got_width) put_hex_pad(s, va_arg(ap, uint32_t), 1, width);
                 else           put_hex    (s, va_arg(ap, uint32_t), 1);
                 break;
             case 'o':           put_oct         (s, va_arg(ap, uint32_t)); break;

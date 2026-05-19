@@ -63,10 +63,25 @@
  * gfx + mouse demos + man pages. After --gc-sections shaved ~21 KiB
  * off kernel.bin, the extra 1 KiB of super-block buffer fits with
  * room to spare. FS_SUPER_SECTORS bumped 9 -> 11 to cover the
- * 5120-byte entry table. Old fs.img files are incompatible. */
-#define FS_SUPER_SECTORS        11u
+ * 5120-byte entry table. Old fs.img files are incompatible.
+ *
+ * Session 137 — bumped to 192 because the tcc-UX work ships ~25
+ * header stubs + runtime sources at /tcc/include and /tcc/lib so
+ * `tcc /hello.c -o /hello.elf` works on stock source.  Each new
+ * entry consumes one slot.  192 * 32 = 6144B entry table + 512B
+ * header = 6656B / 512 = 13 sectors of super, up from 11.
+ *
+ * Session 137 follow-up — bumped to 256.  After main's Path C +
+ * Path E sessions merged in, the on-disk + boot-time entry count
+ * was reaching 192/192 before cc/tcc could create their output
+ * files (sshd's first-boot host-key creation alone takes us from
+ * 191 -> 192). 256 * 32 = 8192B entry table + 512B header = 8704B
+ * / 512 = 17 sectors of super, up from 13.  fs_write_super_inst's
+ * super buffer is now kmalloc'd rather than stack-allocated so the
+ * 8.5 KiB buffer doesn't blow the 16 KiB kernel task stack. */
+#define FS_SUPER_SECTORS        17u
 #define FS_NAME_MAX             16
-#define FS_MAX_FILES            160
+#define FS_MAX_FILES            256
 #define FS_ENTRY_SIZE           32
 #define FS_MAGIC                "ADVENTFS"
 

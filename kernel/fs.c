@@ -2,6 +2,7 @@
 #include "ata.h"
 #include "bcache.h"
 #include "blkdev.h"
+#include "kmalloc.h"
 #include "task.h"
 #include "kprintf.h"
 #include "string.h"
@@ -209,12 +210,30 @@ void fs_init(void) {
 }
 
 static int fs_write_super_inst(struct fs_instance *inst) {
-    uint8_t sb[FS_SUPER_SECTORS * 512];
-    for (int i = 0; i < (int)sizeof(sb); i++) sb[i] = 0;
+    /* Session 137 followup — heap-allocate the superblock buffer
+     * instead of stack-allocating it.  At FS_MAX_FILES=192 the buffer
+     * is 6656 bytes, which combined with main's recent kernel growth
+     * (virtio-scsi, AHCI, clipboard, etc.) pushed the kernel-task
+     * stack past its 16 KiB cap. The symptom was sys_fs_write
+     * silently returning -1 — touch / cc / tcc / fclose-flush all
+     * failed to persist files even though echo > (tmpfs) worked.
+     *
+     * Stays kmalloc/kfree rather than a static buffer because we
+     * may be called concurrently on AP cores (fs_write_super_inst
+     * is called inside the BKL today, but heap is the safer default
+     * if we ever loosen that). */
+    uint32_t total = FS_SUPER_SECTORS * 512;
+    uint8_t *sb = (uint8_t *)kmalloc(total);
+    if (!sb) return -1;
+    for (uint32_t i = 0; i < total; i++) sb[i] = 0;
     memcpy(sb, &inst->super, sizeof(inst->super));
     for (uint32_t s = 0; s < FS_SUPER_SECTORS; s++) {
-        if (inst_write_sector(inst, inst->base_lba + s, sb + s * 512) != 0) return -1;
+        if (inst_write_sector(inst, inst->base_lba + s, sb + s * 512) != 0) {
+            kfree(sb);
+            return -1;
+        }
     }
+    kfree(sb);
     return 0;
 }
 

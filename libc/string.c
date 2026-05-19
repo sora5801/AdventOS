@@ -118,3 +118,13 @@ const void *memchr(const void *p, int c, size_t n) {
     }
     return NULL;
 }
+
+/* Session 134 — strerror.  AdventOS has no real errno values yet;
+ * tcc only calls strerror to format messages it then prints, so a
+ * one-size-fits-all string is enough. (Could grow later if more
+ * specific messages are useful — kernel doesn't currently set a
+ * per-syscall errno.) */
+const char *strerror(int errnum) {
+    (void)errnum;
+    return "I/O error";
+}

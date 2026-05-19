@@ -217,6 +217,31 @@ mkdir -p libwm/_obj
 LIBWM_OBJS=(libwm/_obj/libwm.o)
 echo "        libwm.o = $(stat -c%s libwm/_obj/libwm.o) bytes"
 
+# Session 133 (Path B Phase 1 of the tcc port): build a HOST copy of
+# tcc.  This is a Phase 1 stepping-stone — Phase 2 cross-compiles tcc
+# with USER_CFLAGS for tcc.elf running INSIDE AdventOS, and that's
+# a multi-session libuser-expansion project. The host build verifies
+# the source we vendored is internally consistent and useful as a
+# reference. See tcc/README.AdventOS for the integration plan.
+#
+# Skipped silently if tcc/ isn't present (don't break the build for
+# folks who don't want the extra 1.8MB source tree).
+if [ -d tcc ] && [ -f tcc/tcc.c ]; then
+    echo "[5f/7] build host tcc (Phase 1 — i386 ELF cross-compiler)"
+    # Generate tccdefs_.h from include/tccdefs.h via the c2str helper.
+    # Only re-run when the input changes.
+    if [ ! -f tcc/tccdefs_.h ] || [ tcc/include/tccdefs.h -nt tcc/tccdefs_.h ]; then
+        "$CC" -DC2STR tcc/conftest.c -o tcc/c2str.exe
+        tcc/c2str.exe tcc/include/tccdefs.h tcc/tccdefs_.h >/dev/null
+    fi
+    # One-source build: tcc.c #includes libtcc.c which transitively
+    # includes every other source. ONE_SOURCE + TCC_TARGET_I386 are
+    # the only -D flags strictly required.
+    "$CC" -DONE_SOURCE -DTCC_TARGET_I386 -w -O2 \
+        -Itcc -o tcc/tcc.exe tcc/tcc.c
+    echo "        tcc.exe = $(stat -c%s tcc/tcc.exe) bytes (i386 cross-compiler)"
+fi
+
 echo "[5/7] build user programs"
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/start.o   user/start.S
 "$CC" "${USER_CFLAGS[@]}" -c -o user/_obj/libuser.o user/libuser.c
@@ -232,7 +257,7 @@ echo "[5/7] build user programs"
 # path-A "usable Unix" coreutils gap-fill.
 USER_PROGS=(hello sh echo httpd ed init
             head tail tee tr seq kill pwd
-            nc wget telnet irc ircd beep usbtest vi id
+            nc wget telnet irc ircd beep usbtest vi id fwtest tcc
             dbg dbgtest sandbox kvctl agentctl sleep
             sandbox-selftest limits-selftest kv-selftest
             smp-hammer
@@ -494,6 +519,43 @@ pct() { echo $(( $1 * 100 / $2 )); }
 echo "sizes: kernel.bin $kernel_size/$kernel_budget ($(pct $kernel_size $kernel_budget)%)" \
      " agent.tools.json $manifest_size/$AGENTD_MANIFEST_MAX ($(pct $manifest_size $AGENTD_MANIFEST_MAX)%)" \
      " agentd.bin $agentd_size/$AGENTD_BIN_MAX ($(pct $agentd_size $AGENTD_BIN_MAX)%)"
+
+# Session 134 (Path B Phase 2 of the tcc port): CROSS-compile tcc for
+# AdventOS so it runs inside the OS. Uses our libuser+libc.bin libc
+# surface; stub system headers in tcc/adventos-include/ keep gcc from
+# pulling in the host Windows ucrt.  See docs/120-pathB-tcc-phase2.md.
+#
+# Two -D flags disable subsystems we don't need:
+#   CONFIG_TCC_SEMLOCK=0  — single-threaded, no pthread sem_t needed
+#   CONFIG_TCC_BACKTRACE=0 — no signal-handler-based crash dumps
+# CONFIG_TCC_STATIC=1 keeps tcc from referencing dlopen at link time.
+if [ -d tcc ] && [ -f tcc/tcc.c ] && [ -d tcc/adventos-include ]; then
+    echo "[5g/7] cross-compile tcc.elf (Phase 2 — tcc running inside AdventOS)"
+    mkdir -p tcc/_obj
+    # MSYS_NO_PATHCONV=1: keeps MSYS from rewriting "/tcc" in the
+    # -DCONFIG_TCCDIR flag as a Windows absolute path (C:/Program Files/...).
+    # We want the literal string "/tcc" baked into the binary so the
+    # in-AdventOS tcc looks at /tcc/include for stdarg.h etc.
+    MSYS_NO_PATHCONV=1 "$CC" "${USER_CFLAGS[@]}" \
+        -nostdinc \
+        -U_WIN32 -U_WIN64 -U__WIN32__ -U__WIN32 -U__MINGW32__ -U__MINGW64__ \
+        -DTCC_TARGET_I386 -DONE_SOURCE -DCONFIG_TCC_STATIC=1 \
+        -DCONFIG_TCC_PREDEFS=1 -DCONFIG_TCC_SEMLOCK=0 \
+        -DCONFIG_TCC_BACKTRACE=0 \
+        -DTCC_VERSION='"0.9.28adventos"' \
+        -DCONFIG_TCCDIR='"/tcc"' \
+        -include tcc/adventos-include/adventos-libc.h \
+        -Iuser -Itcc/adventos-include -Itcc -Itcc/include \
+        -w -c -o tcc/_obj/tcc-cross.o tcc/tcc.c
+    "$CC" "${USER_CFLAGS[@]}" -w \
+        -c -o tcc/_obj/softfp_stubs.o tcc/adventos-include/softfp_stubs.c
+    "$LD" -m i386pe -T user/user.ld -o tcc/_obj/tcc.elf \
+        user/_obj/start.o tcc/_obj/tcc-cross.o user/_obj/libuser.o \
+        tcc/_obj/softfp_stubs.o
+    "$OBJCOPY" -O binary -j .text -j .rdata -j .data \
+        tcc/_obj/tcc.elf tcc/_obj/tcc.bin
+    echo "        tcc.bin = $(stat -c%s tcc/_obj/tcc.bin) bytes (i386 AdventOS user program)"
+fi
 
 echo "[6/7] build disk image (boot + kernel)"
 cat boot/boot.bin kernel/kernel.bin > os.img
