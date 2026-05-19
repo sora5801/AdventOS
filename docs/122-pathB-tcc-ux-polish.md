@@ -140,7 +140,12 @@ Three smoke tests cover the surface:
 - `user/tcc.c` — new (993 bytes once compiled) wrapper.
 - `user/libuser.c` — two #ifndef __TINYC__ guards.
 - `libc/stdio.c` — `%*s` width-from-arg support in `do_format`.
-- `kernel/fs.h` + `mkfs.py` — FS_MAX_FILES 160→192, FS_SUPER_SECTORS 11→13.
+- `kernel/fs.h` + `mkfs.py` — FS_MAX_FILES 160→192→**256**, FS_SUPER_SECTORS
+  11→13→**17** (the second bump after the merge from main showed boot
+  was already hitting 192/192 before cc/tcc could create output).
+- `kernel/fs.c` — heap-allocate the superblock buffer in
+  `fs_write_super_inst` so the 8.7 KiB buffer at FS_MAX_FILES=256
+  doesn't blow the 16 KiB kernel task stack.
 - `mkfs.py` — `/tcc`, `/tcc/lib`, `/tcc/include` dirs + 24 runtime/header entries.
 - `build.sh` — `MSYS_NO_PATHCONV=1` + `-DCONFIG_TCCDIR='"/tcc"'`.
 - `fs/_tccrt_start.c` — new, 21 lines of asm.
@@ -148,6 +153,27 @@ Three smoke tests cover the surface:
 - `smoke_tcc_polish.py` — new end-to-end UX smoke.
 - `docs/122-pathB-tcc-ux-polish.md` — this file.
 - `README.md` — current-session pointer.
+
+## Follow-up: FS slot exhaustion (post-main-merge)
+
+When origin/main was merged into the Path B branches in a later
+session, the boot-time entry count reached 192/192 before any user
+program could create a new file. The 25-file `/tcc/` runtime tree
+plus main's own additions (wmedit, wmcalc, wmterm, snap-shadows,
+etc., plus boot-time creates like sshd's host key and `/var`,
+`/var/kv` directories) pushed the boot fs_count to exactly 192.
+
+The symptom was `sys_fs_write` silently returning -1 — `cc -o foo`,
+`tcc -c foo.c -o foo.o`, `touch /foo`, and FILE * `fclose` flushes
+all failed even though `echo > foo` worked (tmpfs path, no entry
+needed in AdventFS).
+
+Fix: bump `FS_MAX_FILES` 192 → 256 and `FS_SUPER_SECTORS` 13 → 17.
+The on-disk super-block buffer in `fs_write_super_inst` becomes
+8704 bytes (256 × 32 entry table + 512 header), which crowds the
+16 KiB kernel task stack alongside other locals — so the buffer is
+now `kmalloc`'d rather than stack-allocated. cc, tcc, and touch all
+work cleanly again after the bump.
 
 ## Genuine follow-ups
 

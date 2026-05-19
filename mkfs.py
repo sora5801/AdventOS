@@ -34,9 +34,9 @@ EHDR_SIZE         = 52
 PHDR_SIZE         = 32
 
 FS_NAME_MAX       = 16
-FS_MAX_FILES      = 192         # session 137; must match kernel/fs.h
+FS_MAX_FILES      = 256         # session 137; must match kernel/fs.h
 FS_ENTRY_SIZE     = 32          # name(16) + start(4) + size(4) + type(1) + parent(1) + 6 reserved
-FS_SUPER_SECTORS  = 13          # 1 header + 12 entry sectors (192 * 32 = 6144B); must match kernel/fs.h
+FS_SUPER_SECTORS  = 17          # 1 header + 16 entry sectors (256 * 32 = 8192B); must match kernel/fs.h
 
 FS_TYPE_FREE      = 0
 FS_TYPE_FILE      = 1
