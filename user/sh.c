@@ -169,6 +169,200 @@ static char g_tok_raw[ARG_MAX];
  *
  * The 2-char operators are checked before their 1-char prefixes so
  * `&&` tokenizes as one operator, not two `&` tokens. */
+/* ---- Brace expansion ---- */
+
+/* Find the `{` of the first unquoted, expandable brace group in
+ * `line`, starting at offset `from`. Returns the index of `{` or -1
+ * if none. "Expandable" means the contents have a top-level `,` or
+ * `..`; bare `${var}` and `((expr))` style sequences don't count. */
+static int brace_find(const char *line, int from) {
+    int in_sq = 0, in_dq = 0;
+    int i = from;
+    while (line[i]) {
+        char c = line[i];
+        if (c == '\\' && line[i + 1]) { i += 2; continue; }
+        if (c == '\'' && !in_dq) { in_sq = !in_sq; i++; continue; }
+        if (c == '"'  && !in_sq) { in_dq = !in_dq; i++; continue; }
+        if (in_sq || in_dq) { i++; continue; }
+
+        /* Skip `${...}` and `$(...)` — these are parameter / arithmetic
+         * expansions, not brace lists. */
+        if (c == '$' && (line[i + 1] == '{' || line[i + 1] == '(')) {
+            char open = line[i + 1], close = (open == '{') ? '}' : ')';
+            int d = 0;
+            i += 2;
+            d = 1;
+            while (line[i] && d > 0) {
+                if (line[i] == open) d++;
+                else if (line[i] == close) d--;
+                i++;
+            }
+            continue;
+        }
+        if (c == '{') {
+            /* Peek inside for `,` or `..` at depth 0. */
+            int j = i + 1, depth = 1;
+            int has = 0;
+            while (line[j] && depth > 0) {
+                if (line[j] == '{') depth++;
+                else if (line[j] == '}') { depth--; if (depth == 0) break; }
+                else if (depth == 1) {
+                    if (line[j] == ',')                              has = 1;
+                    else if (line[j] == '.' && line[j + 1] == '.')   has = 1;
+                }
+                j++;
+            }
+            if (line[j] == '}' && has) return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+/* Parse a `{a..b}` numeric range. Returns 1 on success (and fills lo,
+ * hi), 0 if the body isn't a valid range. Negative numbers OK. */
+static int brace_parse_range(const char *body, int bodylen, int *lo, int *hi) {
+    int i = 0;
+    int sign = 1, n = 0;
+    if (i < bodylen && body[i] == '-') { sign = -1; i++; }
+    int any = 0;
+    while (i < bodylen && body[i] >= '0' && body[i] <= '9') {
+        n = n * 10 + body[i] - '0'; i++; any = 1;
+    }
+    if (!any) return 0;
+    *lo = sign * n;
+    if (i + 1 >= bodylen || body[i] != '.' || body[i + 1] != '.') return 0;
+    i += 2;
+    sign = 1; n = 0; any = 0;
+    if (i < bodylen && body[i] == '-') { sign = -1; i++; }
+    while (i < bodylen && body[i] >= '0' && body[i] <= '9') {
+        n = n * 10 + body[i] - '0'; i++; any = 1;
+    }
+    if (!any) return 0;
+    *hi = sign * n;
+    return i == bodylen ? 1 : 0;
+}
+
+/* One-shot expansion of the brace group at line[brace_pos]. Mutates
+ * line in place: `pre{a,b}post` becomes `prea post preb post`. Returns
+ * the byte length after expansion, or -1 if it would overflow `cap`. */
+static int brace_expand_one(char *line, int len, int cap, int brace_pos) {
+    int open = brace_pos;
+    /* Find matching `}` (same depth). */
+    int close = open + 1, depth = 1;
+    while (close < len && depth > 0) {
+        if (line[close] == '{') depth++;
+        else if (line[close] == '}') { depth--; if (depth == 0) break; }
+        close++;
+    }
+    if (close >= len || line[close] != '}') return len;
+
+    /* Word boundaries (whitespace / operators on either side). */
+    int ws = open;
+    while (ws > 0 && line[ws - 1] != ' ' && line[ws - 1] != '\t' &&
+           line[ws - 1] != ';' && line[ws - 1] != '|' &&
+           line[ws - 1] != '&' && line[ws - 1] != '<' &&
+           line[ws - 1] != '>')
+        ws--;
+    int we = close + 1;
+    while (line[we] && line[we] != ' ' && line[we] != '\t' &&
+           line[we] != ';' && line[we] != '|' && line[we] != '&' &&
+           line[we] != '<' && line[we] != '>')
+        we++;
+
+    /* Slice the prefix / body / suffix. */
+    int  prefix_len = open - ws;
+    int  body_lo    = open + 1;
+    int  body_hi    = close;
+    int  suffix_len = we - (close + 1);
+    char prefix[128]; if (prefix_len > 127) prefix_len = 127;
+    char suffix[128]; if (suffix_len > 127) suffix_len = 127;
+    for (int i = 0; i < prefix_len; i++) prefix[i] = line[ws + i];
+    prefix[prefix_len] = 0;
+    for (int i = 0; i < suffix_len; i++) suffix[i] = line[close + 1 + i];
+    suffix[suffix_len] = 0;
+
+    /* Build the expansion in a scratch buffer. Each alt = prefix + ALT + suffix. */
+    char out[LINE_MAX * 2];
+    int  o = 0;
+
+    int rlo, rhi;
+    if (brace_parse_range(&line[body_lo], body_hi - body_lo, &rlo, &rhi)) {
+        int step = (rhi >= rlo) ? 1 : -1;
+        for (int v = rlo; ; v += step) {
+            if (o > 0 && o < (int)sizeof(out) - 1) out[o++] = ' ';
+            int p = 0; while (prefix[p] && o < (int)sizeof(out) - 1) out[o++] = prefix[p++];
+            char nb[12]; int ni = 0;
+            int t = v, neg = 0;
+            if (t < 0) { neg = 1; t = -t; }
+            if (t == 0) nb[ni++] = '0';
+            while (t) { nb[ni++] = '0' + t % 10; t /= 10; }
+            if (neg && o < (int)sizeof(out) - 1) out[o++] = '-';
+            while (ni-- && o < (int)sizeof(out) - 1) out[o++] = nb[ni];
+            int s = 0; while (suffix[s] && o < (int)sizeof(out) - 1) out[o++] = suffix[s++];
+            if (v == rhi) break;
+            /* Cap iterations defensively. */
+            if (o > LINE_MAX) break;
+        }
+    } else {
+        /* Comma list: scan body at depth 0 for `,` separators. */
+        int start = body_lo;
+        int first = 1;
+        int depth2 = 0;
+        for (int j = body_lo; j <= body_hi; j++) {
+            char c = (j < body_hi) ? line[j] : ',';     /* virtual trailing , */
+            if (j < body_hi && c == '{') depth2++;
+            else if (j < body_hi && c == '}') depth2--;
+            if ((j == body_hi || (depth2 == 0 && c == ',')) ) {
+                if (!first && o < (int)sizeof(out) - 1) out[o++] = ' ';
+                first = 0;
+                int p = 0; while (prefix[p] && o < (int)sizeof(out) - 1) out[o++] = prefix[p++];
+                for (int k = start; k < j && o < (int)sizeof(out) - 1; k++) out[o++] = line[k];
+                int s = 0; while (suffix[s] && o < (int)sizeof(out) - 1) out[o++] = suffix[s++];
+                start = j + 1;
+            }
+        }
+    }
+    out[o] = 0;
+
+    /* Splice out into line, replacing [ws..we). The tail must move
+     * the right way to avoid self-clobber:
+     *   - growing (o > we-ws): copy high-to-low so the tail's tail
+     *     lands at the new high end before its lower bytes are read.
+     *   - shrinking (o < we-ws): copy low-to-high.
+     *   - same size: no move. */
+    int tail_len = len - we;
+    int new_len  = ws + o + tail_len;
+    if (new_len >= cap) return -1;
+    int delta = o - (we - ws);
+    if (delta > 0) {
+        for (int i = tail_len - 1; i >= 0; i--)
+            line[ws + o + i] = line[we + i];
+    } else if (delta < 0) {
+        for (int i = 0; i < tail_len; i++)
+            line[ws + o + i] = line[we + i];
+    }
+    for (int i = 0; i < o; i++) line[ws + i] = out[i];
+    line[new_len] = 0;
+    return new_len;
+}
+
+/* Iterative brace expansion. Each pass expands ONE brace group; we
+ * repeat until none remain or we hit a sanity cap. Cartesian products
+ * (`{a,b}{1,2}` -> `a1 a2 b1 b2`) fall out naturally because the
+ * second brace gets a fresh pass after the first expanded. */
+static int brace_expand_line(char *line, int cap) {
+    int len = 0; while (line[len]) len++;
+    for (int pass = 0; pass < 64; pass++) {
+        int pos = brace_find(line, 0);
+        if (pos < 0) return 0;
+        int new_len = brace_expand_one(line, len, cap, pos);
+        if (new_len < 0) return -1;
+        len = new_len;
+    }
+    return 0;
+}
+
 static int tokenize(char *line, char **tokens, int cap) {
     int n = 0;
     char *p = line;
@@ -205,8 +399,7 @@ static int tokenize(char *line, char **tokens, int cap) {
 
         /* ---- One-char operators ---- */
         if (*p == '|' || *p == '>' || *p == '<' ||
-            *p == '&' || *p == ';' ||
-            *p == '{' || *p == '}') {
+            *p == '&' || *p == ';') {
             char saved = *p;
             *p++ = 0;
             static char pipe_tok[2] = {'|', 0};
@@ -214,15 +407,11 @@ static int tokenize(char *line, char **tokens, int cap) {
             static char lt_tok  [2] = {'<', 0};
             static char amp_tok [2] = {'&', 0};
             static char semi_tok[2] = {';', 0};
-            static char lbr_tok [2] = {'{', 0};
-            static char rbr_tok [2] = {'}', 0};
             tokens[n++] = (saved == '|') ? pipe_tok :
                           (saved == '>') ? gt_tok   :
                           (saved == '<') ? lt_tok   :
                           (saved == '&') ? amp_tok  :
-                          (saved == ';') ? semi_tok :
-                          (saved == '{') ? lbr_tok  :
-                                           rbr_tok;
+                                           semi_tok;
             continue;
         }
 
@@ -243,8 +432,7 @@ static int tokenize(char *line, char **tokens, int cap) {
         tokens[n++] = out;
         while (*p && *p != ' ' && *p != '\t' &&
                *p != '|' && *p != '>' && *p != '<' &&
-               *p != '&' && *p != ';' &&
-               *p != '{' && *p != '}') {
+               *p != '&' && *p != ';') {
             if (*p == '\'' || *p == '"') {
                 char q = *p++;
                 /* Single quotes mark the token as raw — its $ refs
@@ -852,12 +1040,50 @@ static int run_pipeline(struct pipeline *pl) {
     int pids[PIPELINE_MAX];
     for (int i = 0; i < n; i++) pids[i] = -1;
 
+    /* Pre-flight: probe each stage's binary BEFORE forking. There's
+     * an unresolved kernel-side bug where a child that returns from a
+     * failed sys_exec can only emit a single byte to stderr before
+     * halting (the "sh: exec failed" hang). Probing upfront with
+     * sys_open lets us report "command not found" cleanly from the
+     * parent and skip the broken path entirely.
+     *
+     * Skips internal-only stages (e.g. builtins promoted into a
+     * pipeline — they have no `.elf` to find). We rely on the same
+     * resolve_program path the child would use. */
+    for (int i = 0; i < n; i++) {
+        const char *probe_path = resolve_program(pl->stages[i].argv[0]);
+        int fd = sys_open(probe_path);
+        if (fd < 0) {
+            puts("sh: command not found: ");
+            puts(pl->stages[i].argv[0]);
+            puts("\n");
+            for (int k = 0; k < n - 1; k++) {
+                sys_close(pipes[k][0]); sys_close(pipes[k][1]);
+            }
+            if (outfd >= 0) sys_close(outfd);
+            if (infd  >= 0) sys_close(infd);
+            return 127;
+        }
+        sys_close(fd);
+    }
+
     /* Pipeline pgrp = pid of the FIRST child. The first fork's child
      * calls setpgid(0,0) to make itself the leader; subsequent
      * children join via setpgid(0, leader_pid). The parent does the
-     * same calls for safety against fork-vs-exec races. */
+     * same calls for safety against fork-vs-exec races.
+     *
+     * Fast path: single foreground stage → skip the whole pgrp dance.
+     * The child runs in the shell's own pgrp and inherits the tty's
+     * foreground pgrp directly. This dodges a long-standing hang where
+     * the child writes "sh: exec failed: …" to fd 2 in the brief
+     * window between its `setpgid(0,0)` and the parent's
+     * `tcsetpgrp(0, pgleader)` — a small race in the kernel's
+     * scheduling path that we can't fix from userspace, but DON'T
+     * trigger if we just don't change pgrps. The cost is no job
+     * control for these commands, which doesn't matter when there's
+     * exactly one foreground stage. */
     int pgleader = 0;
-
+    int use_pgrp = (n > 1) || pl->bg;
     for (int i = 0; i < n; i++) {
         int pid = sys_fork();
         if (pid < 0) {
@@ -875,9 +1101,11 @@ static int run_pipeline(struct pipeline *pl) {
 
         if (pid == 0) {
             /* Child stage i — set pgrp first so a quick-exit doesn't
-             * race the parent's setpgid. */
-            if (i == 0) setpgid(0, 0);              /* leader */
-            else        setpgid(0, pgleader);       /* joiner */
+             * race the parent's setpgid. Skipped on the fast path. */
+            if (use_pgrp) {
+                if (i == 0) setpgid(0, 0);              /* leader */
+                else        setpgid(0, pgleader);       /* joiner */
+            }
 
             /* Stage 0 stdin: pipeline-supplied infile beats default. */
             if (i == 0 && infd >= 0) sys_dup2(infd, 0);
@@ -937,7 +1165,7 @@ static int run_pipeline(struct pipeline *pl) {
         if (i == 0) pgleader = pid;
         /* Parent-side setpgid mirror — avoids the race window where
          * the child has forked but not yet setpgid'd. */
-        setpgid(pid, pgleader);
+        if (use_pgrp) setpgid(pid, pgleader);
     }
 
     /* Parent: drop all pipe references so writers can see EOF. */
@@ -979,8 +1207,11 @@ static int run_pipeline(struct pipeline *pl) {
         return -1;
     }
 
-    /* Foreground: hand the tty over, wait for everyone, take it back. */
-    tcsetpgrp(0, pgleader);
+    /* Foreground: hand the tty over (multi-stage only), wait for
+     * everyone, take it back. Single-stage fast path skips the
+     * hand-off — the child already runs in the shell's pgrp which
+     * is the tty's foreground. */
+    if (use_pgrp) tcsetpgrp(0, pgleader);
 
     int last_code = 0;
     int waited    = 0;
@@ -994,7 +1225,7 @@ static int run_pipeline(struct pipeline *pl) {
         waited++;
     }
 
-    tcsetpgrp(0, getpgid(0));        /* shell's own pgrp back to fg */
+    if (use_pgrp) tcsetpgrp(0, getpgid(0));
     return last_code;
 }
 
@@ -1367,10 +1598,20 @@ static void position_cursor(int prompt_row, int want_col_in_buf) {
     sys_tty_cursor(prompt_row, prompt_len() + want_col_in_buf);
 }
 
-/* Filename completion. Walk cwd looking for entries that start with the
- * last "word" of buf (everything after the final whitespace). On exactly
- * one match, splice in the missing tail + a trailing space. On multiple
- * matches, list them on a new line then redraw the prompt + buffer. */
+/* List of shell builtins for tab completion of the first word. Kept
+ * sorted alphabetically for predictable listing order. */
+static const char *g_builtin_names[] = {
+    "[", "break", "cd", "continue", "env", "exit", "export", "forktest",
+    "help", "history", "jobs", "keys", "ls", "pid", "pwd", "read",
+    "return", "shift", "sleep", "source", "test", "time", "unset", 0
+};
+
+/* Tab completion. Three flavors picked by the cursor's word:
+ *   - first word on the line  → builtins + defined functions + /*.elf
+ *   - word starts with `$`    → env var names from g_env_buf
+ *   - everything else         → filenames in cwd
+ * On exactly one match the tail is spliced in + trailing space; on
+ * multiple matches the list is printed below and the prompt redrawn. */
 static void tab_complete(char *buf, int *len_p, int cap) {
     int len = *len_p;
     int word_start = len;
@@ -1382,31 +1623,94 @@ static void tab_complete(char *buf, int *len_p, int cap) {
     int prefix_len = len - word_start;
     const char *prefix = &buf[word_start];
 
-    char cwd[64];
-    if (sys_getcwd(cwd, sizeof(cwd)) < 0) return;
+    /* Detect what we're completing. */
+    int is_first  = (word_start == 0);
+    int is_envvar = (prefix_len > 0 && prefix[0] == '$');
 
-    int iter = 0;
-    char name[17];
-    char matches[16][17];
+    char matches[16][32];
     int  n_matches = 0;
     int  overflowed = 0;
-    while (sys_readdir(cwd, &iter, name) >= 0) {
-        name[16] = 0;
-        int ok = 1;
-        for (int i = 0; i < prefix_len; i++) {
-            if (name[i] != prefix[i]) { ok = 0; break; }
-        }
-        if (!ok) continue;
-        if (n_matches < 16) {
+
+    /* Helper: try to add `name` to matches[] if it matches the prefix.
+     * Skips duplicates so builtins + .elf files don't double-list. */
+    #define MAYBE_ADD(SRC, SKIP)  do {                                   \
+        const char *_s = (SRC);                                          \
+        int _slen = 0; while (_s[_slen]) _slen++;                        \
+        if (_slen <= (int)sizeof(matches[0]) - 1) {                      \
+            int _ok = 1;                                                 \
+            for (int _i = (SKIP); _i < prefix_len; _i++)                 \
+                if (_s[_i - (SKIP)] != prefix[_i]) { _ok = 0; break; }   \
+            if (_ok) {                                                   \
+                int _dup = 0;                                            \
+                for (int _m = 0; _m < n_matches; _m++)                   \
+                    if (strcmp(matches[_m], _s) == 0) { _dup = 1; break; } \
+                if (!_dup) {                                             \
+                    if (n_matches < 16) {                                \
+                        int _j = 0;                                      \
+                        while (_s[_j] && _j < (int)sizeof(matches[0]) - 1) \
+                            { matches[n_matches][_j] = _s[_j]; _j++; }   \
+                        matches[n_matches][_j] = 0;                      \
+                        n_matches++;                                     \
+                    } else overflowed = 1;                               \
+                }                                                        \
+            }                                                            \
+        }                                                                \
+    } while (0)
+
+    if (is_envvar) {
+        /* `$PREF` → match against env var NAMEs (just the part before `=`). */
+        for (int i = 0; i < g_env_count; i++) {
+            const char *e = g_env_buf[i];
+            char nm[34]; nm[0] = '$';
             int j = 0;
-            while (name[j] && j < 16) { matches[n_matches][j] = name[j]; j++; }
-            matches[n_matches][j] = 0;
-            n_matches++;
-        } else {
-            overflowed = 1;
-            n_matches++;
+            while (e[j] && e[j] != '=' && j < (int)sizeof(nm) - 2) {
+                nm[j + 1] = e[j]; j++;
+            }
+            nm[j + 1] = 0;
+            MAYBE_ADD(nm, 0);
+        }
+    } else if (is_first) {
+        /* Builtins. */
+        for (int i = 0; g_builtin_names[i]; i++) MAYBE_ADD(g_builtin_names[i], 0);
+
+        /* Defined shell functions. */
+        for (int i = 0; i < FUNC_MAX; i++) {
+            if (g_funcs[i].in_use) MAYBE_ADD(g_funcs[i].name, 0);
+        }
+
+        /* `.elf` binaries in /. Strip the `.elf` suffix for the menu so
+         * `ec<TAB>` completes to `echo`, not `echo.elf`. */
+        int iter = 0;
+        char name[17];
+        while (sys_readdir("/", &iter, name) >= 0) {
+            name[16] = 0;
+            int nlen = 0; while (name[nlen] && nlen < 16) nlen++;
+            if (nlen > 4 && name[nlen-4]=='.' && name[nlen-3]=='e' &&
+                name[nlen-2]=='l' && name[nlen-1]=='f') {
+                char trimmed[17];
+                int k;
+                for (k = 0; k < nlen - 4; k++) trimmed[k] = name[k];
+                trimmed[k] = 0;
+                MAYBE_ADD(trimmed, 0);
+            }
         }
     }
+
+    /* Fall back to filename completion when no command-name matches
+     * (or when this isn't a first-word / envvar case). */
+    if (n_matches == 0 && !is_envvar) {
+        char cwd[64];
+        if (sys_getcwd(cwd, sizeof(cwd)) < 0) return;
+        int iter = 0;
+        char name[17];
+        while (sys_readdir(cwd, &iter, name) >= 0) {
+            name[16] = 0;
+            MAYBE_ADD(name, 0);
+        }
+    }
+
+    #undef MAYBE_ADD
+
     if (n_matches == 0) return;
 
     if (n_matches == 1) {
@@ -2921,11 +3225,14 @@ static void expand_vars_segment(char **toks, int lo, int hi) {
         /* Single-quoted tokens are preserved verbatim — bash treats
          * `'$x'` as the literal three-byte string. */
         if (i < ARG_MAX && g_tok_raw[i]) continue;
+        /* Tilde expansion: leading `~` or `~/...` -> $HOME. Bare `~user`
+         * is unsupported (no passwd lookup) — we just leave it literal. */
+        int has_tilde = (t[0] == '~' && (t[1] == 0 || t[1] == '/'));
         int has = 0;
         for (int k = 0; t[k]; k++) {
             if (t[k] == '$' && t[k + 1]) { has = 1; break; }
         }
-        if (!has) continue;
+        if (!has && !has_tilde) continue;
 
         if (g_dollar_q_off >= DOLLAR_Q_POOL_LEN - 1) return;
         char *out = &g_dollar_q_pool[g_dollar_q_off];
@@ -2933,6 +3240,13 @@ static void expand_vars_segment(char **toks, int lo, int hi) {
         int   cap = DOLLAR_Q_POOL_LEN - g_dollar_q_off - 1;
 
         int k = 0;
+        /* Leading tilde first — `~` or `~/...` -> $HOME (no `~user`). */
+        if (has_tilde) {
+            const char *home = env_get("HOME");
+            if (!home || !*home) home = "/";
+            emit_str(out, &o, cap, home);
+            k = 1;            /* skip the literal `~` */
+        }
         while (t[k] && o < cap) {
             if (t[k] != '$' || !t[k + 1]) {
                 out[o++] = t[k++];
@@ -3199,6 +3513,43 @@ static int chain_kind(const char *t) {
  * `g_last_status` is updated for every segment so `$?` reflects the
  * most recently completed pipeline. */
 static void execute_line(char *line_in) {
+    /* History recall: replace the whole line if it starts with `!!`
+     * (repeat last) or `!N` (1-indexed history entry). No partial
+     * replacement (i.e. no `!grep` style prefix match) for now. */
+    if (line_in[0] == '!' && line_in[1]) {
+        const char *recall = 0;
+        if (line_in[1] == '!') {
+            /* `!!` — last command. */
+            if (g_hist_count > 0) recall = g_hist[g_hist_count - 1];
+        } else if (line_in[1] >= '0' && line_in[1] <= '9') {
+            int n = 0;
+            int j = 1;
+            while (line_in[j] >= '0' && line_in[j] <= '9') {
+                n = n * 10 + (line_in[j] - '0');
+                j++;
+            }
+            if (n >= 1 && n <= g_hist_count) recall = g_hist[n - 1];
+        }
+        if (recall) {
+            puts(recall); puts("\n");
+            /* Run the recalled line and ALSO record it under its
+             * original form in history (the next `!!` should give us
+             * the recalled command, not the `!!` shorthand). */
+            char re[LINE_MAX];
+            int ri = 0;
+            while (recall[ri] && ri < (int)sizeof(re) - 1) { re[ri] = recall[ri]; ri++; }
+            re[ri] = 0;
+            hist_add(re);
+            execute_line(re);
+            return;
+        }
+        if (line_in[1] == '!' || (line_in[1] >= '0' && line_in[1] <= '9')) {
+            puts("sh: !: event not found\n");
+            g_last_status = 1;
+            return;
+        }
+    }
+
     /* Tokenize the raw input directly. We used to run expand_vars
      * here for word splitting, but that ran ONCE per line — so
      * `for x in a b ; do echo $x ; done` would expand $x against
@@ -3210,6 +3561,15 @@ static void execute_line(char *line_in) {
     int  li = 0;
     while (line_in[li] && li < (int)sizeof(line) - 1) { line[li] = line_in[li]; li++; }
     line[li] = 0;
+
+    /* Brace expansion (`{a,b,c}` lists and `{N..M}` ranges) runs at
+     * the line level before tokenize, so a single brace group fans
+     * out into multiple words. */
+    if (brace_expand_line(line, sizeof(line)) < 0) {
+        puts("sh: brace expansion overflowed line buffer\n");
+        g_last_status = 2;
+        return;
+    }
 
     char *toks[ARG_MAX];
     int ntok = tokenize(line, toks, ARG_MAX);
@@ -6360,7 +6720,10 @@ int main(int argc, char **argv) {
         puts(current_prompt());
         int n = read_line_interactive(line, sizeof(line));
         if (n <= 0) continue;
-        hist_add(line);
+        /* `!`-prefixed lines (history recall) are added to history
+         * AFTER expansion by execute_line itself — recording the
+         * literal `!!` here would cause infinite recursion. */
+        if (line[0] != '!') hist_add(line);
         execute_line(line);
     }
 }
