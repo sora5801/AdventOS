@@ -27,6 +27,7 @@
 #include "usb.h"
 #include "usb_core.h"
 #include "uhci.h"
+#include "usb_hc.h"
 #include "kprintf.h"
 #include "string.h"
 #include "kmalloc.h"
@@ -77,8 +78,8 @@ static int cdc_set_control_line_state(struct cdc_device *c,
         .wIndex        = (uint16_t)c->comm_iface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(c->dev->addr, c->dev->low_speed,
-                                 c->dev->ep0_max_packet,
+    return c->dev->hc->control_transfer(c->dev->addr, c->dev->low_speed,
+                                        c->dev->ep0_max_packet,
                                  &s, 0, 0, 0);
 }
 
@@ -106,8 +107,8 @@ static int cdc_set_line_coding(struct cdc_device *c,
         .wIndex        = (uint16_t)c->comm_iface,
         .wLength       = 7,
     };
-    return uhci_control_transfer(c->dev->addr, c->dev->low_speed,
-                                 c->dev->ep0_max_packet,
+    return c->dev->hc->control_transfer(c->dev->addr, c->dev->low_speed,
+                                        c->dev->ep0_max_packet,
                                  &s, lc, 7, 0);
 }
 
@@ -176,8 +177,8 @@ int usb_cdc_acm_write(const void *data, int len) {
     memcpy(kbuf, data, len);
 
     spin_lock(&c->tx_lock);
-    int rc = uhci_bulk_out(c->dev->addr, c->ep_max, c->ep_out,
-                           kbuf, len, &c->out_toggle);
+    int rc = c->dev->hc->bulk_out(c->dev->addr, c->ep_max, c->ep_out,
+                                  kbuf, len, &c->out_toggle);
     spin_unlock(&c->tx_lock);
 
     kfree(kbuf);
@@ -190,8 +191,8 @@ static void cdc_poll_one(struct cdc_device *c) {
     /* Read up to ep_max bytes. NAK is normal (no data). */
     uint8_t buf[64];
     int max = c->ep_max < 64 ? c->ep_max : 64;
-    int rc = uhci_bulk_in(c->dev->addr, c->ep_max, c->ep_in,
-                          buf, max, &c->in_toggle);
+    int rc = c->dev->hc->bulk_in(c->dev->addr, c->ep_max, c->ep_in,
+                                 buf, max, &c->in_toggle);
     if (rc == USB_ERR_NAK || rc == USB_ERR_TIMEOUT) return;
     if (rc < 0) {
         /* Persistent error — back off but don't disable. */
@@ -261,8 +262,8 @@ int usb_cdc_acm_write_port(int port, const void *data, int len) {
     memcpy(kbuf, data, len);
 
     spin_lock(&c->tx_lock);
-    int rc = uhci_bulk_out(c->dev->addr, c->ep_max, c->ep_out,
-                           kbuf, len, &c->out_toggle);
+    int rc = c->dev->hc->bulk_out(c->dev->addr, c->ep_max, c->ep_out,
+                                  kbuf, len, &c->out_toggle);
     spin_unlock(&c->tx_lock);
 
     kfree(kbuf);

@@ -13,18 +13,36 @@ DESCRIPTION
 
     Keys (only delivered when the window has keyboard focus —
     click into the window first):
-      printable ASCII   insert at cursor
-      Enter             insert newline
-      Backspace / DEL   delete char before cursor
-      Tab               insert 4 spaces
-      Arrow keys        move cursor up/down/left/right
+      printable ASCII   insert at cursor (replaces selection)
+      Enter             insert newline (replaces selection)
+      Backspace / DEL   delete selection if any, else char before
+      Tab               insert 4 spaces (replaces selection)
+      Arrow keys        move cursor; clears any active selection
       Ctrl+S            save buffer to PATH
       Ctrl+Q            quit
-      Ctrl+C            copy entire buffer to the global clipboard
+      Ctrl+C            copy selection (or whole buffer if none)
+      Ctrl+X            cut selection to clipboard
       Ctrl+V            paste clipboard contents at the cursor
+                        (replaces selection if any)
+      Ctrl+F            open search bar at bottom (session 152)
+      Ctrl+Z            undo the last edit (session 153)
+      Ctrl+Y            redo the last undone edit (session 154)
 
-    Mouse: clicking in the text region positions the cursor on
-    the row/col under the click.
+    Search mode (after Ctrl+F):
+      printable ASCII   append to the search pattern; matches
+                        highlight in mustard yellow inline; the
+                        cursor jumps to the first match as you type
+      Backspace         shorten the pattern
+      Enter             jump to the next match (wraps to top)
+      Esc               close the search bar; matches stop
+                        highlighting but the cursor stays where it
+                        landed
+
+    Mouse: clicking places the cursor.  Click-and-drag selects a
+    range; the highlighted bytes have a blue background.  Drag
+    across rows for multi-line selection.  Caret is a 2-pixel
+    vertical line that blinks while focused and no selection is
+    active.
 
     The window title shows "wmedit  Ctrl-S save  Ctrl-Q quit"
     when focused.  The bottom status bar shows the path, a
@@ -32,11 +50,18 @@ DESCRIPTION
     cursor position as "L<row>:<col> B<total-bytes>".
 
 LIMITATIONS
-    Single 8 KiB buffer cap.  No selection, search, undo, or
-    file picker — those are future polish.  Arrow-key support
-    relies on the kernel's ANSI CSI passthrough for arrows
-    (ESC '[' A/B/C/D), same path the shell uses for history
-    navigation.
+    Single 8 KiB buffer cap.  No file picker yet (path is set
+    at launch via argv[1]).  Search (session 152) is forward-
+    only with wrap; no Shift+Enter "previous match" yet, no
+    regex, no case-insensitive toggle.  Undo/redo (sessions
+    153/154) coalesce typing bursts + backspaces into one
+    step; a fresh edit clears the redo stack.  Per-entry text
+    snap is 40 bytes, so undoing/redoing a very large
+    selection-delete restores the cursor position but not the
+    text content past 40 bytes.  Arrow-key
+    support relies on the kernel's ANSI CSI passthrough for
+    arrows (ESC '[' A/B/C/D), same path the shell uses for
+    history navigation.
 
 SEE ALSO
     wmtype(1), wmterm(1), wmd(1)
