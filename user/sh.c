@@ -1782,7 +1782,18 @@ static int read_line_interactive(char *buf, int cap) {
     for (;;) {
         char c;
         int  n = sys_read(0, &c, 1);
-        if (n <= 0) continue;
+        /* Session 158 — distinguish EOF (n == 0) from interrupted /
+         * non-block transient (n == -1).  EOF is fatal: the only way
+         * to get it is for the master side of our controlling tty to
+         * close (e.g. wmterm exits), and there's nothing useful for
+         * an interactive shell to do once stdin can never deliver
+         * another byte.  Restore tty mode, return EOF sentinel; the
+         * outer loop in main() exits the process. */
+        if (n == 0) {
+            tty_set_mode(prev_mode);
+            return -1;
+        }
+        if (n < 0) continue;
 
         /* Enter — commit the line. Move cursor to end first so the
          * trailing \n appears on the right row even if the user was
@@ -6747,7 +6758,16 @@ int main(int argc, char **argv) {
     for (;;) {
         puts(current_prompt());
         int n = read_line_interactive(line, sizeof(line));
-        if (n <= 0) continue;
+        /* Session 158 — read_line_interactive returns -1 specifically
+         * for EOF on stdin (master closed).  An empty Enter still
+         * returns 0; we treat that as "redraw the prompt", same as
+         * before.  EOF terminates the shell — there's no way to
+         * recover once the controlling tty's master is gone. */
+        if (n < 0) {
+            puts("\n");
+            sys_exit(0);
+        }
+        if (n == 0) continue;
         /* `!`-prefixed lines (history recall) are added to history
          * AFTER expansion by execute_line itself — recording the
          * literal `!!` here would cause infinite recursion. */

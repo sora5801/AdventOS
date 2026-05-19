@@ -61,8 +61,21 @@ static void try_free(struct pty *p) {
 
 void pty_close_master(int idx) {
     if (!valid(idx)) return;
-    if (g_ptys[idx].master_refs > 0) g_ptys[idx].master_refs--;
-    try_free(&g_ptys[idx]);
+    struct pty *p = &g_ptys[idx];
+    if (p->master_refs > 0) p->master_refs--;
+    /* Session 158 — POSIX-ish carrier loss: the last master close
+     * delivers SIGHUP to whichever process group has the slave as
+     * its controlling terminal.  Mirrors what Linux does when an
+     * xterm closes: the inner shell receives SIGHUP and the default
+     * action terminates it, so the slave isn't left spinning on
+     * read-returns-0.  fg_pgrp is set by tcsetpgrp(slave_fd, ...) —
+     * the inner sh.elf calls it at startup, so by the time wmterm
+     * closes, fg_pgrp is the sh's own pgid (or a foreground command
+     * that sh ran with tcsetpgrp). */
+    if (p->master_refs == 0 && p->fg_pgrp > 0) {
+        signal_send_pgrp((uint32_t)p->fg_pgrp, SIGHUP);
+    }
+    try_free(p);
 }
 
 void pty_close_slave(int idx) {
