@@ -138,6 +138,25 @@ static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
 static int g_prev_right;       /* session 124 — right-button edge */
 
+/* Session 143 — toast notifications.  Up to 4 stacked in the
+ * bottom-right; each lives ~3 s (180 frames @ 60fps) with a 0.5 s
+ * fade tail.  Drained from the kernel notify ring once per frame. */
+#define TOAST_MAX           4
+#define TOAST_TEXT_MAX     64
+#define TOAST_LIFE_FRAMES 180
+#define TOAST_FADE_FRAMES  30
+#define TOAST_W           240
+#define TOAST_H            36
+#define TOAST_GAP           6
+#define TOAST_MARGIN       12
+struct toast_slot {
+    int            in_use;
+    char           text[TOAST_TEXT_MAX];
+    int            len;
+    unsigned int   spawn_frame;
+};
+static struct toast_slot g_toasts[TOAST_MAX];
+
 /* Session 131 — window resize.  When the user drags the 12x12 grip
  * in the bottom-right corner of a CLIENT window, we set
  * g_resize_idx to that window's slot and update its outer (w, h)
@@ -602,6 +621,87 @@ static int in_titlebar(struct window *w, int px, int py) {
            py >= w->y && py < w->y + TITLE_H;
 }
 
+/* Session 143 — drain pending notifications from the kernel ring
+ * into our toast slot array.  Called once per frame; up to TOAST_MAX
+ * fresh toasts can arrive per tick before older ones must retire. */
+static void drain_toasts(unsigned int frame_no) {
+    for (int safety = 0; safety < TOAST_MAX; safety++) {
+        char buf[TOAST_TEXT_MAX];
+        int n = sys_wm_poll_notify(buf, (int)sizeof(buf));
+        if (n <= 0) return;
+        /* Find a free slot (or the oldest, if all are in use). */
+        int slot = -1;
+        unsigned int oldest_frame = (unsigned int)-1;
+        int oldest = 0;
+        for (int i = 0; i < TOAST_MAX; i++) {
+            if (!g_toasts[i].in_use) { slot = i; break; }
+            if (g_toasts[i].spawn_frame < oldest_frame) {
+                oldest_frame = g_toasts[i].spawn_frame;
+                oldest = i;
+            }
+        }
+        if (slot < 0) slot = oldest;
+        if (n > TOAST_TEXT_MAX - 1) n = TOAST_TEXT_MAX - 1;
+        for (int i = 0; i < n; i++) g_toasts[slot].text[i] = buf[i];
+        g_toasts[slot].text[n] = 0;
+        g_toasts[slot].len    = n;
+        g_toasts[slot].in_use = 1;
+        g_toasts[slot].spawn_frame = frame_no;
+    }
+}
+
+/* Lerp from c1 to c2 by alpha/255 (0 = c1, 255 = c2). */
+static unsigned int lerp_color(unsigned int c1, unsigned int c2, int a) {
+    if (a <= 0)   return c1;
+    if (a >= 255) return c2;
+    int r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+    int r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+    int r = r1 + ((r2 - r1) * a) / 255;
+    int g = g1 + ((g2 - g1) * a) / 255;
+    int b = b1 + ((b2 - b1) * a) / 255;
+    return ((unsigned int)r << 16) | ((unsigned int)g << 8) | (unsigned int)b;
+}
+
+/* Session 143 — paint toast notifications.  Stack bottom-up in the
+ * lower-right corner, above the taskbar.  Each toast fades by
+ * lerping its bg / fg toward the wallpaper darkness during the
+ * last TOAST_FADE_FRAMES of its life. */
+static void paint_toasts(struct gfx_ctx *ctx, unsigned int frame_no) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+    int stack_y = fb_h - TASKBAR_H - TOAST_MARGIN - TOAST_H;
+    for (int i = 0; i < TOAST_MAX; i++) {
+        struct toast_slot *t = &g_toasts[i];
+        if (!t->in_use) continue;
+        unsigned int age = frame_no - t->spawn_frame;
+        if (age >= TOAST_LIFE_FRAMES) { t->in_use = 0; continue; }
+        /* Fade alpha 0..255 going DOWN as age approaches life. */
+        int alpha = 255;
+        if (age > TOAST_LIFE_FRAMES - TOAST_FADE_FRAMES) {
+            int into = (int)age - (TOAST_LIFE_FRAMES - TOAST_FADE_FRAMES);
+            alpha = 255 - (into * 255) / TOAST_FADE_FRAMES;
+            if (alpha < 0) alpha = 0;
+        }
+        unsigned int bg     = lerp_color(0x0A0A14u, 0x202830u, alpha);
+        unsigned int border = lerp_color(0x0A0A14u, 0x4080E0u, alpha);
+        unsigned int text   = lerp_color(0x0A0A14u, 0xE0F0FFu, alpha);
+
+        int tx = fb_w - TOAST_W - TOAST_MARGIN;
+        int ty = stack_y;
+        gfx_fill_rect(ctx, tx, ty, TOAST_W, TOAST_H, bg);
+        gfx_rect    (ctx, tx, ty, TOAST_W, TOAST_H, border);
+        /* Soft 2-px shadow on right + bottom for depth. */
+        gfx_fill_rect(ctx, tx + TOAST_W, ty + 2, 2, TOAST_H,
+                      lerp_color(0x0A0A14u, 0x050508u, alpha));
+        gfx_fill_rect(ctx, tx + 2, ty + TOAST_H, TOAST_W, 2,
+                      lerp_color(0x0A0A14u, 0x050508u, alpha));
+        gfx_text(ctx, tx + 10, ty + (TOAST_H - 8) / 2,
+                 t->text, text, GFX_TRANSPARENT);
+        stack_y -= TOAST_H + TOAST_GAP;
+        if (stack_y < 0) break;     /* off-screen; later toasts hidden */
+    }
+}
+
 /* Session 131 — is (px,py) inside the bottom-right resize grip?
  * Only CLIENT windows get a grip; demo windows ignore resize. */
 static int in_resize_grip(struct window *w, int px, int py) {
@@ -766,6 +866,8 @@ int main(int argc, char **argv) {
         /* Session 112 — drain WM client events first so newly-
          * registered windows appear on this frame. */
         drain_wm_messages(ctx.width, ctx.height);
+        /* Session 143 — drain pending toast notifications. */
+        drain_toasts((unsigned int)tick);
 
         struct sys_mouse_state ms;
         if (sys_mouse_poll(&ms) < 0) break;
@@ -1247,6 +1349,10 @@ int main(int argc, char **argv) {
         /* Session 124 — right-click context menu on top of
          * everything (last paint wins). */
         paint_ctx_menu(&ctx);
+        /* Session 143 — toasts above context menu so they always
+         * stay readable even if a menu happens to pop near the
+         * notification stack. */
+        paint_toasts(&ctx, (unsigned int)tick);
 
         /* Session 142 — cursor glyph removed; QEMU's host pointer
          * (synced to ms.x / ms.y via usb-tablet, session 141) is

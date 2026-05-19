@@ -298,16 +298,44 @@ int main(int argc, char **argv) {
                     }
                     if (k == 27) { esc_state = 1; break; }
                     if (k == 0x13) {              /* Ctrl+S — save */
-                        save_file();
+                        int rc = save_file();
+                        /* Session 143 — toast feedback. */
+                        char tn[80];
+                        int p = 0;
+                        const char *m = (rc == 0) ? "saved " : "save failed: ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        for (int i = 0; g_path[i] && p < (int)sizeof(tn) - 1; i++)
+                            tn[p++] = g_path[i];
+                        if (rc == 0) {
+                            const char *q = " (";
+                            while (*q && p < (int)sizeof(tn) - 1) tn[p++] = *q++;
+                            p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)g_len);
+                            const char *r = " B)";
+                            while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        }
+                        tn[p] = 0;
+                        wm_notify(tn);
                     } else if (k == 0x11) {       /* Ctrl+Q — quit */
                         closed = 1;
                     } else if (k == 0x03) {       /* Ctrl+C — copy */
+                        int copied;
                         if (sel_active()) {
-                            wm_clipboard_set(g_buf + sel_lo(),
-                                             sel_hi() - sel_lo());
+                            copied = sel_hi() - sel_lo();
+                            wm_clipboard_set(g_buf + sel_lo(), copied);
                         } else {
+                            copied = g_len;
                             wm_clipboard_set(g_buf, g_len);
                         }
+                        /* Session 143 — toast on copy. */
+                        char tn[64];
+                        int p = 0;
+                        const char *m = "copied ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)copied);
+                        const char *r = " B";
+                        while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        tn[p] = 0;
+                        wm_notify(tn);
                     } else if (k == 0x18) {       /* Ctrl+X — cut */
                         if (sel_active()) {
                             wm_clipboard_set(g_buf + sel_lo(),

@@ -556,6 +556,24 @@ int sys_clipboard_get(void *buf, int cap) {
     return ret;
 }
 
+/* Session 143 — toast notifications. */
+int sys_wm_notify(const char *text, int len) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_NOTIFY), "b"(text), "c"(len)
+                      : "memory");
+    return ret;
+}
+int sys_wm_poll_notify(char *buf, int cap) {
+    int ret;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(SYS_WM_POLL_NOTIFY), "b"(buf), "c"(cap)
+                      : "memory");
+    return ret;
+}
+
 int sys_ntp_sync(const unsigned char ip[4]) {
     int ret;
     __asm__ volatile ("int $0x80"

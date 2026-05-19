@@ -374,6 +374,14 @@ struct sys_limits {
                              * is enough to make `>>` work. Slots 100-103
                              * already taken (above). */
 
+/* Session 143 — toast-notification channel.  Apps post short status
+ * text ("saved /tmp/foo (123 B)") to a small kernel ring; wmd drains
+ * one entry per frame and pops up a fading toast in the bottom-right.
+ * Decoupled from SYS_WM_EVENT_POLL because the ring lives outside the
+ * per-window event queues — any task can push without owning a window. */
+#define SYS_WM_NOTIFY       105 /* (eax=105, ebx=text, ecx=len)  -> 0 / -1 */
+#define SYS_WM_POLL_NOTIFY  106 /* (eax=106, ebx=buf, ecx=cap)   -> bytes or 0 */
+
 struct sys_fb_info {
     uint32_t  enabled;       /* 1 if a VBE framebuffer is available */
     uint32_t  width;         /* pixels */
