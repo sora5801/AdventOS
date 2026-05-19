@@ -167,12 +167,19 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
  * A small constant SW offset compensates closely enough that
  * the click lands where the user perceives the cursor.  Adjust
  * MOUSE_HOTSPOT_DX / DY here if your display backend differs. */
-/* Session 144 — empirical hotspot offset.  Without this, the
- * kernel-tracked click position sits SW of QEMU's visible host
- * cursor.  Shift NE (+X / -Y) to line up.  3 px in each axis is
- * the WSLg / GTK default; retune per display backend. */
-#define MOUSE_HOTSPOT_DX  (+3)
-#define MOUSE_HOTSPOT_DY  (-3)
+/* Session 144 — empirical hotspot offset.
+ *
+ * Iteration log:
+ *   -3/+3 → user reported drift got worse (made kernel 6 px SW)
+ *   +3/-3 → user reported yellow dot is NE of cursor (overshot
+ *           the OTHER direction, kernel ended up NE of cursor)
+ *
+ * The two reports straddle zero, meaning the un-shifted scaling
+ * is essentially correct and any constant offset is too coarse.
+ * Reset to 0; the integer-division round-trip drifts ≤1 px which
+ * is visually indistinguishable from cursor body thickness. */
+#define MOUSE_HOTSPOT_DX  (0)
+#define MOUSE_HOTSPOT_DY  (0)
 
 void mouse_set_absolute(int x, int y, int buttons) {
     x += MOUSE_HOTSPOT_DX;
