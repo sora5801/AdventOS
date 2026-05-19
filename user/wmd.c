@@ -103,12 +103,8 @@ static const struct launch_entry g_launch_items[] = {
     { "wmterm",  "/wmterm.elf"   },
     { "wmedit",  "/wmedit.elf"   },
     { "wmcalc",  "/wmcalc.elf"   },
-    /* Session 142 — explicit user-facing "Shell" label that launches
-     * the terminal emulator (wmterm) holding a sh.elf instance.  The
-     * wmterm entry above stays so the technical name is still
-     * accessible; "Shell" is the friendly label that says what it
-     * does at a glance. */
-    { "Shell",   "/wmterm.elf"   },
+    /* Session 145 — Shell entry removed; user noted it was a
+     * redundant alias for wmterm which already does the same thing. */
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -524,7 +520,12 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     int clock_w = 132;
     int clock_x = fb_w - clock_w;
     {
-        unsigned int ts = sys_time();
+        /* Session 145 — display Pacific Standard Time (UTC-8) so
+         * the taskbar clock matches wmclock's PST output instead
+         * of staying on raw UTC.  Same fixed offset, no DST. */
+        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        unsigned int raw = sys_time();
+        unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         unsigned int min = (ts / 60u) % 60u;
         unsigned int hr  = (ts / 3600u) % 24u;
         char buf[6];
@@ -1356,19 +1357,9 @@ int main(int argc, char **argv) {
 
         /* Session 142 — cursor glyph removed; QEMU's host pointer
          * (synced to ms.x / ms.y via usb-tablet, session 141) is
-         * the visible pointer.
-         *
-         * Session 144 — calibration marker.  Tiny 4x4 hollow yellow
-         * square at the kernel-tracked click position so we can
-         * visually compare to where QEMU draws the host cursor.
-         * Whichever direction the host cursor sits from the
-         * marker is the SHIFT direction we need to apply in
-         * kernel/mouse.c's MOUSE_HOTSPOT_D[XY] macros to align
-         * clicks with the perceived cursor. */
-        {
-            int cx = ms.x, cy = ms.y;
-            gfx_rect(&ctx, cx - 2, cy - 2, 4, 4, GFX_YELLOW);
-        }
+         * the visible pointer.  Calibration marker from session
+         * 144 also removed now that PS/2 drift is silenced and
+         * the kernel pointer tracks the host pointer 1:1. */
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
