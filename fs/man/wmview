@@ -1,0 +1,41 @@
+NAME
+    wmview - image viewer WM client (Path C phase 42)
+
+SYNOPSIS
+    wmview PATH [SECONDS]
+
+DESCRIPTION
+    Open a 400x300 window and display the contents of the
+    binary-PPM (P6) image at PATH.  Images larger than the
+    content area (400 wide, ~278 tall after title bar) are
+    clipped; smaller images are centered against a dark
+    background.  SECONDS is the lifetime cap (default 600 =
+    10 minutes); Ctrl-Q exits early.
+
+    The image is decoded once at startup and blitted directly
+    into the window's shared pixel surface — no per-pixel
+    syscall overhead.  Subsequent frames only repaint the
+    title bar so focus changes track correctly.
+
+    Format requirements:
+      - P6 magic ("P6" + whitespace, NOT the ASCII P3 variant)
+      - maxval 255 (8-bit RGB)
+      - '#'-prefixed comment lines allowed in the header
+
+    A test image ships at /sample.ppm — a 64x48 four-colour
+    quadrant tile with a diagonal brightness gradient.  Run:
+
+        wmview /sample.ppm
+
+    to verify the viewer is working.
+
+LIMITATIONS
+    No scaling — images larger than the window are clipped at
+    the top-left of the content area.  No PNG/JPEG/BMP support;
+    P6 PPM only.  No animation, no zoom, no save.  Single
+    256 KiB scratch buffer caps the largest file at ~256x256x4
+    with header overhead.
+
+SEE ALSO
+    wmpaint(1) draws PPM-style content procedurally.  wmd(1)
+    runs the WM that hosts this client.

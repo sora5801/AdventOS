@@ -110,6 +110,7 @@ static const struct launch_entry g_launch_items[] = {
     { "wmterm",  "/wmterm.elf"   },
     { "wmedit",  "/wmedit.elf"   },
     { "wmcalc",  "/wmcalc.elf"   },
+    { "wmview",  "/wmview.elf"   },   /* session 149 — image viewer */
     /* Session 145 — Shell entry removed; user noted it was a
      * redundant alias for wmterm which already does the same thing. */
 };

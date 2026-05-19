@@ -124,6 +124,8 @@ USER_PROGRAMS = [
     ('wmedit.elf',   'user/_obj/wmedit.bin',    None),
     # Session 139: path-C phase 32 — calculator.
     ('wmcalc.elf',   'user/_obj/wmcalc.bin',    None),
+    # Session 149: path-C phase 42 — image viewer.
+    ('wmview.elf',   'user/_obj/wmview.bin',    None),
     # Session 64: process listing for the agent-RPC tool surface.
     ('ps.elf',    'user/_obj/ps.bin',    None),
     # Network-app sweep — session 29.
@@ -207,6 +209,7 @@ RAW_BLOBS = [
 # (on-disk filename, source path, parent directory name or None for root)
 DATA_FILES = [
     ('hello.txt', 'fs/hello.txt', None),
+    ('sample.ppm', 'fs/sample.ppm', None),     # session 149 — wmview test image
     ('inittab',   'fs/inittab',   'etc'),
     ('passwd',    'fs/passwd',    'etc'),     # session 47
     ('ssh_keys',  'fs/ssh_keys',  'etc'),     # session 53 — pubkey auth
@@ -276,6 +279,7 @@ DATA_FILES = [
     ('wmterm',  'fs/man/wmterm',  'man'),  # session 134
     ('wmedit',  'fs/man/wmedit',  'man'),  # session 137
     ('wmcalc',  'fs/man/wmcalc',  'man'),  # session 139
+    ('wmview',  'fs/man/wmview',  'man'),  # session 149
     # Session 87 — sample script for the lua interpreter.
     ('hello.lua', 'fs/hello.lua', None),
     # Sessions 90/91/92 sample sources (hello.c, strs.c, chars.c) were
@@ -474,6 +478,34 @@ def build_image(directories, user_programs, raw_blobs, data_files,
             print(f"        [{i:2}] {kind} {parent_str}/{name}")
 
 
+def gen_sample_ppm():
+    """Session 149: 64x48 PPM test image — four colored quadrants
+    with a diagonal gradient overlay.  Easy to recognize on screen
+    and easy to pixel-check in a smoke test."""
+    W, H = 64, 48
+    out = bytearray()
+    out += b'P6\n'
+    out += f'{W} {H}\n'.encode('ascii')
+    out += b'255\n'
+    for y in range(H):
+        for x in range(W):
+            # Quadrants: TL red, TR green, BL blue, BR yellow.
+            # Modulate brightness by (x+y) so the image has gradients.
+            top = y < H // 2
+            left = x < W // 2
+            base_r = 255 if top and left else 0 if top else 255 if not left else 0
+            base_g = 255 if top and not left else 0 if (top and left) or (not top and left) else 255
+            base_b = 255 if not top and left else 0
+            if not top and not left:
+                base_r, base_g, base_b = 255, 255, 0  # yellow
+            shade = (x + y) * 200 // (W + H)        # 0..200
+            r = max(0, min(255, base_r - 50 + shade))
+            g = max(0, min(255, base_g - 50 + shade))
+            b = max(0, min(255, base_b - 50 + shade))
+            out += bytes([r, g, b])
+    return bytes(out)
+
+
 def build():
     """Build the boot disk filesystem image (fs.img)."""
     # Session 47: regenerate /etc/passwd on every build so the
@@ -485,6 +517,8 @@ def build():
     # "sh.elf". The exec then fails with -ENOENT.
     os.makedirs('fs', exist_ok=True)
     open('fs/passwd', 'wb').write(gen_passwd_file().encode('ascii'))
+    # Session 149: regenerate the sample PPM for wmview.
+    open('fs/sample.ppm', 'wb').write(gen_sample_ppm())
 
     print(f"        layout: superblock @ sector 0..{FS_SUPER_SECTORS - 1}, "
           f"data @ sector {FS_SUPER_SECTORS}+")
