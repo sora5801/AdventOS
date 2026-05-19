@@ -68,13 +68,23 @@
 #define USB_CLASS_HUB              0x09
 #define USB_CLASS_CDC_DATA         0x0A   /* CDC Data interface (bulk in/out) */
 
-/* CDC-ACM subclass + protocol */
+/* CDC subclass codes */
 #define USB_CDC_SUBCLASS_ACM       0x02   /* Abstract Control Model */
+#define USB_CDC_SUBCLASS_ECM       0x06   /* Ethernet Networking Control Model */
 
 /* CDC-ACM class requests */
 #define USB_CDC_REQ_SET_LINE_CODING         0x20
 #define USB_CDC_REQ_GET_LINE_CODING         0x21
 #define USB_CDC_REQ_SET_CONTROL_LINE_STATE  0x22
+
+/* CDC-ECM class requests */
+#define USB_CDC_REQ_SET_ETHERNET_PACKET_FILTER  0x43
+
+/* CDC functional descriptor subtypes (appear inside the
+ * configuration blob, btype = 0x24, blen + bsubtype + ...). */
+#define USB_CDC_FUNC_HEADER         0x00
+#define USB_CDC_FUNC_UNION          0x06
+#define USB_CDC_FUNC_ETHERNET       0x0F  /* Ethernet networking functional desc */
 
 /* HID subclass / protocol (boot interface) */
 #define USB_HID_SUBCLASS_BOOT      0x01

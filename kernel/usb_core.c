@@ -41,6 +41,11 @@ void usb_msc_attach(struct usb_device *d,
 void usb_hub_attach(struct usb_device *d);
 void usb_cdc_acm_attach(struct usb_device *d, int data_iface,
                         int comm_iface, int ep_in, int ep_out, int ep_max);
+void usb_cdc_ecm_attach(struct usb_device *d,
+                        int comm_iface, int data_iface,
+                        int data_iface_alt1,
+                        int ep_in, int ep_out, int ep_max,
+                        int imac_str_idx);
 
 /* Up to 4 simultaneous USB devices total (2 ports × possible
  * future hubs). Plenty for the demo. */
@@ -192,8 +197,15 @@ static int find_cdc_acm_interface(const uint8_t *cfg, int cfg_len,
         if (btype == USB_DT_INTERFACE && blen >= 9) {
             const struct usb_interface_descriptor *id =
                 (const struct usb_interface_descriptor *)(cfg + o);
+            /* Skip RNDIS devices (Microsoft's USB-Ethernet protocol):
+             * they advertise CDC_COMM / ACM with protocol 0xFF
+             * (vendor-specific). The CDC-ACM spec uses 0x00 (none),
+             * 0x01 (AT V.25ter), or 0x02..0x06 (modem command sets).
+             * Without this guard we try to SET_LINE_CODING an RNDIS
+             * device and it STALLs. */
             if (id->bInterfaceClass == USB_CLASS_CDC_COMM &&
-                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ACM)
+                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ACM &&
+                id->bInterfaceProtocol < 0x07)
             {
                 saw_comm = 1;
                 cur_comm = id->bInterfaceNumber;
@@ -229,6 +241,122 @@ static int find_cdc_acm_interface(const uint8_t *cfg, int cfg_len,
         *ep_out     = found_out;
         *ep_max     = max_in < max_out ? max_in : max_out;
         if (*ep_max == 0) *ep_max = 64;
+        return 1;
+    }
+    return 0;
+}
+
+/* Find a CDC-ECM device: Comm interface class 0x02 / subclass 0x06,
+ * an Ethernet Networking functional descriptor (btype 0x24,
+ * subtype 0x0F) that tells us iMACAddress, and a Data interface
+ * (class 0x0A) with an alternate setting that carries the bulk-IN/OUT
+ * pair. ECM convention: alt 0 has zero endpoints ("link down"), alt 1
+ * has the active endpoints. We track each interface's *active* alt
+ * (the last one we saw with non-zero endpoints) and use that.
+ *
+ * Returns 1 on success and fills out the params. */
+static int find_cdc_ecm_interface(const uint8_t *cfg, int cfg_len,
+                                  int *comm_iface, int *data_iface,
+                                  int *data_alt,
+                                  int *ep_in, int *ep_out, int *ep_max,
+                                  int *imac_str_idx)
+{
+    int o = 0;
+    int saw_comm = 0;
+    int cur_comm = -1;
+    int cur_imac = 0;
+
+    int in_data        = 0;       /* currently parsing an ECM data iface */
+    int cur_data       = -1;
+    int cur_data_alt   = 0;
+    int found_in = 0, found_out = 0, max_in = 0, max_out = 0;
+
+    /* Best (= first complete-with-endpoints) data alt we've seen. */
+    int best_data      = -1;
+    int best_alt       = 0;
+    int best_in        = 0;
+    int best_out       = 0;
+    int best_max       = 0;
+
+    while (o + 2 <= cfg_len) {
+        uint8_t blen  = cfg[o];
+        uint8_t btype = cfg[o + 1];
+        if (blen == 0 || o + blen > cfg_len) return 0;
+
+        if (btype == USB_DT_INTERFACE && blen >= 9) {
+            /* Close out the alt we were just parsing, if it had a
+             * bulk pair. */
+            if (in_data && found_in && found_out && best_data < 0) {
+                best_data = cur_data;
+                best_alt  = cur_data_alt;
+                best_in   = found_in;
+                best_out  = found_out;
+                best_max  = max_in < max_out ? max_in : max_out;
+            }
+
+            const struct usb_interface_descriptor *id =
+                (const struct usb_interface_descriptor *)(cfg + o);
+            if (id->bInterfaceClass == USB_CLASS_CDC_COMM &&
+                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ECM)
+            {
+                saw_comm = 1;
+                cur_comm = id->bInterfaceNumber;
+                in_data  = 0;
+            } else if (id->bInterfaceClass == USB_CLASS_CDC_DATA) {
+                in_data       = 1;
+                cur_data      = id->bInterfaceNumber;
+                cur_data_alt  = id->bAlternateSetting;
+                found_in = found_out = 0;
+                max_in   = max_out   = 0;
+            } else {
+                in_data = 0;
+            }
+        } else if (btype == 0x24 /* CS_INTERFACE */ && blen >= 3 &&
+                   saw_comm && in_data == 0)
+        {
+            /* Functional descriptor inside the comm interface. We
+             * only care about subtype 0x0F (Ethernet Networking):
+             *   [0] blen
+             *   [1] btype = 0x24
+             *   [2] bDescSubtype = 0x0F
+             *   [3] iMACAddress  <-- string descriptor index */
+            uint8_t sub = cfg[o + 2];
+            if (sub == USB_CDC_FUNC_ETHERNET && blen >= 4) {
+                cur_imac = cfg[o + 3];
+            }
+        } else if (btype == USB_DT_ENDPOINT && blen >= 7 && in_data) {
+            const struct usb_endpoint_descriptor *ed =
+                (const struct usb_endpoint_descriptor *)(cfg + o);
+            if ((ed->bmAttributes & USB_EP_TYPE_MASK) == USB_EP_TYPE_BULK) {
+                if (ed->bEndpointAddress & USB_EP_DIR_MASK) {
+                    found_in = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_in   = ed->wMaxPacketSize;
+                } else {
+                    found_out = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_out   = ed->wMaxPacketSize;
+                }
+            }
+        }
+        o += blen;
+    }
+    /* Tail case: last interface descriptor in the blob was a complete
+     * ECM data alt. */
+    if (in_data && found_in && found_out && best_data < 0) {
+        best_data = cur_data;
+        best_alt  = cur_data_alt;
+        best_in   = found_in;
+        best_out  = found_out;
+        best_max  = max_in < max_out ? max_in : max_out;
+    }
+
+    if (saw_comm && best_data >= 0) {
+        *comm_iface   = cur_comm;
+        *data_iface   = best_data;
+        *data_alt     = best_alt;
+        *ep_in        = best_in;
+        *ep_out       = best_out;
+        *ep_max       = best_max == 0 ? 64 : best_max;
+        *imac_str_idx = cur_imac;
         return 1;
     }
     return 0;
@@ -411,7 +539,7 @@ void usb_enumerate_default(int low_speed, const char *origin) {
 
     int iface, proto, ep, ep_max, ep_int;
     int ep_in, ep_out;
-    int comm_iface, data_iface;
+    int comm_iface, data_iface, data_alt, imac_idx;
 
     if (find_hid_interface(full_cfg, total_len,
                            &iface, &proto, &ep, &ep_max, &ep_int)) {
@@ -424,6 +552,24 @@ void usb_enumerate_default(int low_speed, const char *origin) {
         kprintf("[usb] addr %d: MSC iface=%d  ep_in=IN%d  ep_out=OUT%d  max=%d\n",
                 d->addr, iface, ep_in, ep_out, ep_max);
         usb_msc_attach(d, iface, ep_in, ep_out, ep_max);
+        kfree(full_cfg);
+    } else if (find_cdc_ecm_interface(full_cfg, total_len,
+                                      &comm_iface, &data_iface,
+                                      &data_alt,
+                                      &ep_in, &ep_out, &ep_max,
+                                      &imac_idx))
+    {
+        /* CDC-ECM check goes BEFORE CDC-ACM because the comm
+         * interface bInterfaceClass matches for both (0x02); the
+         * subclass differentiator (0x06 ECM vs 0x02 ACM) makes the
+         * two scans independent, but we still prefer the more
+         * specific one. */
+        kprintf("[usb] addr %d: CDC-ECM comm=%d data=%d(alt%d) "
+                "ep_in=IN%d ep_out=OUT%d max=%d imac_str=%d\n",
+                d->addr, comm_iface, data_iface, data_alt,
+                ep_in, ep_out, ep_max, imac_idx);
+        usb_cdc_ecm_attach(d, comm_iface, data_iface, data_alt,
+                           ep_in, ep_out, ep_max, imac_idx);
         kfree(full_cfg);
     } else if (find_cdc_acm_interface(full_cfg, total_len,
                                       &comm_iface, &data_iface,

@@ -77,6 +77,8 @@
 #include "string.h"
 #include "spinlock.h"
 #include "pit.h"
+#include "isr.h"
+#include "pic.h"
 
 #define AHCI_VENDOR     0x8086
 #define AHCI_DEV_ICH9   0x2922      /* `-device ahci` in QEMU */
@@ -106,6 +108,7 @@
 #define P_SSTS  0x28
 #define P_SCTL  0x2C
 #define P_SERR  0x30
+#define P_SACT  0x34       /* NCQ: bit-per-tag of pending queued commands */
 #define P_CI    0x38
 
 /* CMD bits. */
@@ -119,6 +122,14 @@
 #define TFD_DRQ  (1u << 3)
 #define TFD_BSY  (1u << 7)
 
+/* P_IE bits — enable individual interrupt sources. */
+#define IE_DHRE  (1u << 0)    /* D2H Register FIS — non-NCQ completion */
+#define IE_PSE   (1u << 1)    /* PIO Setup FIS */
+#define IE_DSE   (1u << 2)    /* DMA Setup FIS */
+#define IE_SDBE  (1u << 3)    /* Set Device Bits FIS — NCQ completion */
+#define IE_TFEE  (1u << 30)   /* Task-File Error */
+#define IE_HBFE  (1u << 29)   /* Host Bus Fatal Error */
+
 /* Device signatures (P_SIG). */
 #define SIG_SATA   0x00000101u
 
@@ -127,9 +138,25 @@
 #define DET_PRESENT_AND_OK  3
 
 /* ATA commands we use. */
-#define ATA_CMD_READ_DMA_EXT   0x25
-#define ATA_CMD_WRITE_DMA_EXT  0x35
-#define ATA_CMD_IDENTIFY       0xEC
+#define ATA_CMD_READ_DMA_EXT       0x25
+#define ATA_CMD_WRITE_DMA_EXT      0x35
+#define ATA_CMD_IDENTIFY           0xEC
+/* NCQ (Native Command Queuing) variants. Different FIS layout:
+ * sector count lives in features fields; the count byte holds the
+ * NCQ TAG (bits 7:3). Completion delivers a Set Device Bits FIS
+ * (clears SACT bit) instead of the usual D2H Register FIS. */
+#define ATA_CMD_READ_FPDMA_QUEUED  0x60
+#define ATA_CMD_WRITE_FPDMA_QUEUED 0x61
+
+#define IS_NCQ_CMD(c)  ((c) == ATA_CMD_READ_FPDMA_QUEUED || \
+                        (c) == ATA_CMD_WRITE_FPDMA_QUEUED)
+
+/* Number of NCQ slots we can address. Hardware supports up to 32;
+ * we allocate command tables for all of them so multi-slot use is
+ * just a matter of how many concurrent callers exist. Today the BKL
+ * makes that one — but switching to slot-0-only on a polled wait
+ * was the bottleneck NCQ exists to remove. */
+#define AHCI_N_SLOTS  32
 
 /* ---- on-the-wire structures ------------------------------------ */
 
@@ -164,10 +191,13 @@ struct ahci_port {
     int                in_use;
     int                port_idx;     /* 0..31 */
     volatile uint8_t  *regs;         /* port register base */
-    struct ahci_cmd_hdr   *clist;    /* command list (1 KiB) */
+    struct ahci_cmd_hdr   *clist;    /* command list (1 KiB, 32 hdrs) */
     void              *fis;          /* FIS RX area (256 B) */
-    struct ahci_cmd_table *ctbl;     /* slot-0 command table */
+    struct ahci_cmd_table *ctbls[AHCI_N_SLOTS];   /* per-slot tables */
     spinlock_t         lock;
+    uint32_t           free_mask;    /* bit-per-slot, 1 = available */
+    volatile uint32_t  completed_mask;  /* set by IRQ on completion */
+    volatile uint32_t  error_mask;      /* set by IRQ on TFEE */
     uint32_t           n_sectors;
     struct blkdev      bdev;
 };
@@ -231,32 +261,110 @@ static void port_start(volatile uint8_t *port) {
     pw32(port, P_CMD, cmd);
 }
 
-/* Wait until CI bit `slot` clears. Returns 0 on success, -1 on timeout
- * or task-file error. */
-static int wait_command(volatile uint8_t *port, int slot) {
-    for (int i = 0; i < 5000000; i++) {
-        uint32_t ci = pr32(port, P_CI);
-        if (!(ci & (1u << slot))) {
-            if (pr32(port, P_TFD) & TFD_ERR) return -1;
-            return 0;
+/* IRQ handler — walks every attached port and updates completed_mask
+ * for any commands that finished since the last call. Called from
+ * irq_handler via the isr.c chain; co-exists with virtio + e1000 on
+ * the same shared PCI line. */
+static void ahci_irq(struct registers *r) {
+    (void)r;
+    if (!g_ahci.in_use) return;
+    /* HBA_IS is a per-port bitmap — bit n set means port n raised
+     * an interrupt. Read-then-clear-by-writing-the-same-bits-back
+     * (write-1-to-clear). */
+    uint32_t hba_is = hr32(HBA_IS);
+    if (hba_is == 0) return;
+    hw32(HBA_IS, hba_is);
+
+    for (int i = 0; i < AHCI_MAX_PORTS; i++) {
+        if (!(hba_is & (1u << i))) continue;
+        struct ahci_port *p = &g_ahci.ports[i];
+        if (!p->in_use) continue;
+        /* Per-port IS: read + clear. Bit 30 (TFEE) = task-file error. */
+        uint32_t pis = pr32(p->regs, P_IS);
+        pw32(p->regs, P_IS, pis);
+        if (pis & (1u << 30)) {
+            /* Task-file error — mark every issued slot errored so
+             * the waiter unblocks with -1. */
+            p->error_mask |= ~p->free_mask;
         }
-        if (pr32(port, P_IS) & (1u << 30)) return -1;   /* task-file err */
+        /* For NCQ, completed bits clear from SACT.
+         * For non-NCQ, they clear from CI.
+         * A slot is "issued but no longer pending" if:
+         *   (it was issued, i.e. ~free_mask) AND (not in CI) AND (not in SACT). */
+        uint32_t ci    = pr32(p->regs, P_CI);
+        uint32_t sact  = pr32(p->regs, P_SACT);
+        uint32_t done  = (~p->free_mask) & ~ci & ~sact;
+        p->completed_mask |= done;
+    }
+}
+
+/* Wait until slot `slot` of port `p` completes. Returns 0 on success,
+ * -1 on timeout or task-file error.
+ *
+ * Uses pushfl/sti/hlt/popfl so an enclosing spin_lock (which we may
+ * be inside) doesn't gate forward progress: we temporarily enable
+ * IF for the hlt, then restore the caller's IF state. */
+static int wait_slot(struct ahci_port *p, int slot, uint32_t timeout_ms) {
+    uint32_t bit = (1u << slot);
+    uint32_t start = pit_ticks();
+    uint32_t deadline = (timeout_ms * 100u) / 1000u;
+    if (deadline == 0) deadline = 1;
+
+    while (!(p->completed_mask & bit)) {
+        if (p->error_mask & bit) {
+            p->error_mask &= ~bit;
+            return -1;
+        }
+        __asm__ volatile (
+            "pushfl\n\t"
+            "sti\n\t"
+            "hlt\n\t"
+            "popfl\n\t"
+            ::: "memory", "cc"
+        );
+        /* Also peek the port directly in case the IRQ went to
+         * another handler in the chain that doesn't know about us
+         * (or fired before we got a chance to record state). */
+        uint32_t ci    = pr32(p->regs, P_CI);
+        uint32_t sact  = pr32(p->regs, P_SACT);
+        if (!((ci | sact) & bit)) {
+            p->completed_mask |= bit;
+            break;
+        }
+        if (pit_ticks() - start > deadline) return -1;
+    }
+    p->completed_mask &= ~bit;
+    if (pr32(p->regs, P_TFD) & TFD_ERR) return -1;
+    return 0;
+}
+
+/* Allocate a free slot. Returns 0..AHCI_N_SLOTS-1 or -1 if all
+ * busy. Caller must hold p->lock. */
+static int alloc_slot(struct ahci_port *p) {
+    for (int i = 0; i < AHCI_N_SLOTS; i++) {
+        if (p->free_mask & (1u << i)) {
+            p->free_mask &= ~(1u << i);
+            return i;
+        }
     }
     return -1;
 }
 
-/* Fill a fresh H2D Register FIS into the command table CFIS area. */
+/* Fill a fresh H2D Register FIS into the command table CFIS area.
+ * Honors NCQ encoding when `cmd` is a queued opcode: sector count
+ * lives in the features fields and the count byte holds the NCQ TAG
+ * (low 5 bits shifted into [7:3]). */
 static void build_h2d_fis(struct ahci_cmd_table *ct,
                           uint8_t  cmd,
                           uint64_t lba,
-                          uint16_t count)
+                          uint16_t count,
+                          int      tag)
 {
     uint8_t *f = ct->cfis;
     memset(f, 0, 64);
     f[0]  = 0x27;                    /* H2D Register FIS */
     f[1]  = 0x80;                    /* C = 1 (command, not control) */
     f[2]  = cmd;
-    f[3]  = 0;                       /* features-low */
     f[4]  = (uint8_t)(lba      );
     f[5]  = (uint8_t)(lba >>  8);
     f[6]  = (uint8_t)(lba >> 16);
@@ -264,39 +372,70 @@ static void build_h2d_fis(struct ahci_cmd_table *ct,
     f[8]  = (uint8_t)(lba >> 24);
     f[9]  = (uint8_t)(lba >> 32);
     f[10] = (uint8_t)(lba >> 40);
-    f[11] = 0;                       /* features-high */
-    f[12] = (uint8_t)(count      );
-    f[13] = (uint8_t)(count >>  8);
+    if (IS_NCQ_CMD(cmd)) {
+        /* NCQ: count goes in features, tag goes in count[7:3]. */
+        f[3]  = (uint8_t)(count      );    /* features-low  */
+        f[11] = (uint8_t)(count >>  8);    /* features-high */
+        f[12] = (uint8_t)((tag & 0x1F) << 3);
+        f[13] = 0;
+    } else {
+        /* Plain LBA48 DMA: count in the count fields, no features. */
+        f[12] = (uint8_t)(count      );
+        f[13] = (uint8_t)(count >>  8);
+    }
 }
 
-/* Common DMA path: issue one ATA command with a single PRD pointing at
- * `buf`. `bytes` = data-phase byte count. `write_flag` = 1 for writes. */
+/* Common DMA path: pick a slot, build the chain, kick the port,
+ * wait. `write_flag` controls the W bit in the command header.
+ * Works for both NCQ (READ/WRITE FPDMA QUEUED) and legacy DMA EXT
+ * (READ/WRITE DMA EXT, IDENTIFY) opcodes — the FIS builder and the
+ * CI / SACT kicks branch on cmd. */
 static int port_dma_xfer(struct ahci_port *p, uint8_t cmd, uint64_t lba,
                          uint16_t count, void *buf, uint32_t bytes,
                          int write_flag)
 {
     spin_lock(&p->lock);
+    int slot = alloc_slot(p);
+    if (slot < 0) { spin_unlock(&p->lock); return -1; }
 
-    struct ahci_cmd_hdr *h = &p->clist[0];
+    struct ahci_cmd_hdr   *h  = &p->clist[slot];
+    struct ahci_cmd_table *ct = p->ctbls[slot];
+
     h->flags  = (uint16_t)(5 | (write_flag ? (1u << 6) : 0));  /* CFL=5 + W */
-    h->prdtl  = 1;
+    h->prdtl  = bytes ? 1 : 0;
     h->prdbc  = 0;
-    h->ctba   = (uint32_t)(uintptr_t)p->ctbl;
+    h->ctba   = (uint32_t)(uintptr_t)ct;
     h->ctbau  = 0;
 
-    build_h2d_fis(p->ctbl, cmd, lba, count);
+    build_h2d_fis(ct, cmd, lba, count, slot);
 
-    /* PRDT[0] -> caller's buffer. */
-    p->ctbl->prdt[0].dba  = (uint32_t)(uintptr_t)buf;
-    p->ctbl->prdt[0].dbau = 0;
-    p->ctbl->prdt[0].rsv  = 0;
-    p->ctbl->prdt[0].dbc  = (bytes - 1) & 0x3FFFFFu;   /* I bit clear */
+    if (bytes) {
+        ct->prdt[0].dba  = (uint32_t)(uintptr_t)buf;
+        ct->prdt[0].dbau = 0;
+        ct->prdt[0].rsv  = 0;
+        ct->prdt[0].dbc  = (bytes - 1) & 0x3FFFFFu;   /* I bit clear */
+    }
 
-    /* Clear pending IS bits and kick slot 0. */
-    pw32(p->regs, P_IS, 0xFFFFFFFFu);
-    pw32(p->regs, P_CI, 1u);
+    /* Don't blow away outstanding IS state — only ours. The IRQ
+     * handler clears per-port IS after recording completions. */
+    uint32_t bit = (1u << slot);
+    if (IS_NCQ_CMD(cmd)) {
+        /* NCQ: set SACT bit BEFORE CI. The HBA latches SACT into
+         * its internal queue state when CI is written. */
+        pw32(p->regs, P_SACT, bit);
+    }
+    pw32(p->regs, P_CI, bit);
 
-    int rc = wait_command(p->regs, 0);
+    /* Release the port lock around the wait so other tasks could in
+     * principle issue concurrent NCQ commands (BKL serializes today,
+     * but the structure is ready). */
+    spin_unlock(&p->lock);
+
+    int rc = wait_slot(p, slot, /*timeout_ms=*/5000);
+
+    /* Return the slot to the free pool no matter the outcome. */
+    spin_lock(&p->lock);
+    p->free_mask |= bit;
     spin_unlock(&p->lock);
     return rc;
 }
@@ -306,11 +445,9 @@ static int port_dma_xfer(struct ahci_port *p, uint8_t cmd, uint64_t lba,
 static int ahci_blkdev_read(struct blkdev *d, uint32_t lba, uint32_t n, void *buf) {
     struct ahci_port *p = (struct ahci_port *)d->driver_data;
     if (n == 0) return 0;
-    if (n > 256) return -1;          /* count is 16-bit but READ DMA EXT
-                                      * caps at 0xFFFF; we keep it small
-                                      * because PRD byte count is per-PRD
-                                      * and we use one PRD. */
-    return port_dma_xfer(p, ATA_CMD_READ_DMA_EXT, lba, (uint16_t)n,
+    if (n > 256) return -1;          /* count is 16-bit but our PRD
+                                      * is one entry; keep it small. */
+    return port_dma_xfer(p, ATA_CMD_READ_FPDMA_QUEUED, lba, (uint16_t)n,
                          buf, n * 512u, 0);
 }
 
@@ -318,7 +455,7 @@ static int ahci_blkdev_write(struct blkdev *d, uint32_t lba, uint32_t n, const v
     struct ahci_port *p = (struct ahci_port *)d->driver_data;
     if (n == 0) return 0;
     if (n > 256) return -1;
-    return port_dma_xfer(p, ATA_CMD_WRITE_DMA_EXT, lba, (uint16_t)n,
+    return port_dma_xfer(p, ATA_CMD_WRITE_FPDMA_QUEUED, lba, (uint16_t)n,
                          (void *)buf, n * 512u, 1);
 }
 
@@ -371,24 +508,42 @@ static int port_init(int idx) {
 
     p->clist = (struct ahci_cmd_hdr *)alloc_aligned(1024, 1024);
     p->fis   = alloc_aligned(256, 256);
-    p->ctbl  = (struct ahci_cmd_table *)alloc_aligned(
-                  sizeof(struct ahci_cmd_table), 128);
-    if (!p->clist || !p->fis || !p->ctbl) {
+    if (!p->clist || !p->fis) {
         kprintf("ahci: port %d alloc failed\n", idx);
         return -1;
     }
+    for (int s = 0; s < AHCI_N_SLOTS; s++) {
+        p->ctbls[s] = (struct ahci_cmd_table *)alloc_aligned(
+                          sizeof(struct ahci_cmd_table), 128);
+        if (!p->ctbls[s]) {
+            kprintf("ahci: port %d slot %d alloc failed\n", idx, s);
+            return -1;
+        }
+        memset(p->ctbls[s], 0, sizeof(struct ahci_cmd_table));
+    }
     memset(p->clist, 0, 1024);
     memset(p->fis,   0, 256);
-    memset(p->ctbl,  0, sizeof(struct ahci_cmd_table));
+    p->free_mask      = (AHCI_N_SLOTS == 32) ? 0xFFFFFFFFu
+                                             : ((1u << AHCI_N_SLOTS) - 1);
+    p->completed_mask = 0;
+    p->error_mask     = 0;
 
     pw32(p->regs, P_CLB,  (uint32_t)(uintptr_t)p->clist);
     pw32(p->regs, P_CLBU, 0);
     pw32(p->regs, P_FB,   (uint32_t)(uintptr_t)p->fis);
     pw32(p->regs, P_FBU,  0);
 
-    /* Clear errors and IS. */
+    /* Clear errors and IS, then enable the IRQ sources we care about. */
     pw32(p->regs, P_SERR, 0xFFFFFFFFu);
     pw32(p->regs, P_IS,   0xFFFFFFFFu);
+    pw32(p->regs, P_IE,   IE_DHRE | IE_PSE | IE_DSE | IE_SDBE |
+                          IE_TFEE | IE_HBFE);
+
+    /* Mark the port live for the IRQ handler BEFORE we issue any
+     * commands — IDENTIFY + the sanity probe both go through the
+     * IRQ-driven completion path. We'll clear this back to 0 below
+     * if anything goes wrong, before returning. */
+    p->in_use = 1;
 
     port_start(p->regs);
 
@@ -396,6 +551,7 @@ static int port_init(int idx) {
     p->n_sectors = ahci_identify(p);
     if (p->n_sectors == 0) {
         kprintf("ahci: port %d IDENTIFY failed\n", idx);
+        p->in_use = 0;
         return -1;
     }
 
@@ -416,9 +572,9 @@ static int port_init(int idx) {
     int slot = blkdev_register(&p->bdev);
     if (slot < 0) {
         kprintf("ahci: blkdev table full registering %s\n", p->bdev.name);
+        p->in_use = 0;
         return -1;
     }
-    p->in_use = 1;
     g_ahci.n_attached++;
 
     kprintf("ahci: port %d -> blkdev slot %d (%s)  %u sectors  (%u MiB)\n",
@@ -494,8 +650,20 @@ void ahci_init(void) {
 
     uint32_t cap = hr32(HBA_CAP);
     uint32_t pi  = hr32(HBA_PI);
-    kprintf("ahci: HBA @ 0x%x  CAP=0x%x  PI=0x%x  ports=%d\n",
-            (unsigned)mmio, cap, pi, (cap & 0x1F) + 1);
+    kprintf("ahci: HBA @ 0x%x  CAP=0x%x  PI=0x%x  ports=%d slots=%d\n",
+            (unsigned)mmio, cap, pi, (cap & 0x1F) + 1,
+            ((cap >> 8) & 0x1F) + 1);
+
+    /* Wire IRQ BEFORE port_init so the per-port sanity probe (which
+     * runs inside port_init) can use the IRQ-driven completion path.
+     * Plays nicely with virtio + e1000 on the same shared PCI line
+     * via the isr.c handler chain (session 124). */
+    g_ahci.in_use = 1;
+    isr_register_irq(g_ahci.pci.irq_line, ahci_irq);
+    pic_clear_mask((uint8_t)g_ahci.pci.irq_line);
+    /* HBA-level interrupt enable. Without GHC.IE the per-port IS bits
+     * still set but the controller won't drive the PCI INTx line. */
+    hw32(HBA_GHC, hr32(HBA_GHC) | GHC_IE);
 
     /* Bring up every implemented port that has a SATA disk. */
     for (int i = 0; i < AHCI_MAX_PORTS; i++) {
@@ -503,7 +671,6 @@ void ahci_init(void) {
         port_init(i);
     }
 
-    g_ahci.in_use = 1;
     if (g_ahci.n_attached == 0) {
         kprintf("ahci: no SATA disks attached on any implemented port\n");
     }
