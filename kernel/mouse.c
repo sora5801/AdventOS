@@ -155,8 +155,24 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
 
 /* Session 141 — USB tablet absolute-positioning entry point.
  * Called from kernel/usb_hid.c's tablet polling task.  No PS/2
- * packet bookkeeping — just overwrite the position. */
+ * packet bookkeeping — just overwrite the position.
+ *
+ * Session 144 — observed (~3 px) NE drift between the visible
+ * host cursor and the guest's click position with this scaling
+ * alone.  Likely a combination of:
+ *   - integer-division truncation in the host→tablet→guest
+ *     round-trip (raw_x * (fb_w-1) / 32767 floors toward zero)
+ *   - host cursor hotspot vs. image-centre mismatch in the
+ *     display backend's rendering (GTK / WSLg / etc)
+ * A small constant SW offset compensates closely enough that
+ * the click lands where the user perceives the cursor.  Adjust
+ * MOUSE_HOTSPOT_DX / DY here if your display backend differs. */
+#define MOUSE_HOTSPOT_DX  (-3)
+#define MOUSE_HOTSPOT_DY  (+3)
+
 void mouse_set_absolute(int x, int y, int buttons) {
+    x += MOUSE_HOTSPOT_DX;
+    y += MOUSE_HOTSPOT_DY;
     const struct vbe_state *v = vbe_state();
     int max_x = (v && v->enabled) ? (int)v->width  - 1 : 1023;
     int max_y = (v && v->enabled) ? (int)v->height - 1 : 767;
