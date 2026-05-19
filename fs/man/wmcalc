@@ -1,38 +1,60 @@
 NAME
-    wmcalc - calculator WM client (Path C phase 32)
+    wmcalc - calculator WM client (Path C phase 32, extended 156)
 
 SYNOPSIS
     wmcalc [SECONDS]
 
 DESCRIPTION
-    Open a 220x320 calculator window.  SECONDS is the lifetime
-    cap (default 600 = 10 minutes); Ctrl-Q exits early.
+    Open a 220x368 fixed-point calculator window.  SECONDS is
+    the lifetime cap (default 600 = 10 minutes); Ctrl-Q exits.
 
-    Four-function integer calculator using two-register
-    evaluation (pending op + accumulator).  Sequence "12 + 34 ="
-    yields 46; chained ops fold left-to-right.
+    Four-function calculator using two-register evaluation
+    (pending op + accumulator).  Sequence "12.5 + 3.25 =" yields
+    15.75; chained ops fold left-to-right.
+
+    Values are stored as (mantissa, decimals) — fixed-point
+    rather than integer (session 156).  '.' enters decimal-input
+    mode; subsequent digits append to the fractional side.
+    Trailing zeros are trimmed after every operation (so
+    "1.50 + 0.50 =" displays as "2", not "2.00").
 
     Keys (delivered when the window has keyboard focus):
       0-9             digit
+      .               start decimal-input mode
       + - * /         operator
       = or Enter      evaluate
-      c or C          clear all
-      Backspace       drop last digit of current entry
+      c or C          clear all (including memory)
+      Backspace       drop the last digit of current entry
       _               toggle sign of current entry
-      .               (no-op; integer-only build)
+      m               M+ (add current to memory)
+      n               M- (subtract current from memory)
+      r               MR (recall memory to current display)
+      k               MC (clear memory)
       Ctrl-Q          quit
 
-    Mouse: click any button.  Buttons briefly highlight (one
-    frame burst) when pressed.
+    Mouse: click any button.  Buttons briefly highlight when
+    pressed.
 
-    The pending operator is shown in the top-left of the display
-    panel ('+', '-', '*', '/') while a chain is in progress.
+    Indicators on the display panel:
+      top-left "+/-/*//"     pending operator while chaining
+      bottom-left "M"        non-zero memory register
+
+    Memory row is the bottom row of the button grid (M+, M-,
+    MR, MC).  M+ and M- update the memory register by adding
+    or subtracting the current entry; MR replaces the current
+    entry with the memory value; MC zeros the memory.
 
 LIMITATIONS
-    Integer-only — libuser has no ftoa yet, so the '.' button is
-    a placeholder.  Division truncates (e.g. 7 / 2 = 3).  Range:
-    signed 64-bit, but digit entry caps at 11 digits to fit the
-    display.  Division by zero shows "ERR" in red; clear with C.
+    Range is signed int32: mantissa max 99999999 with one more
+    multiply against another 9-digit operand still in range.
+    Beyond that the display shows "ERR" in red.  Division
+    keeps up to 4 extra decimal places of precision then
+    truncates trailing zeros.  No scientific notation, no
+    parentheses, no operator precedence — strictly two-
+    register left-to-right (same as a pocket calculator).
+    No M+= chaining buttons (M+= done by M+ then +/-).  The
+    '.' button placeholder from the integer-only build
+    (session 139) is now active.
 
 SEE ALSO
     wmterm(1), wmedit(1), wmd(1)
