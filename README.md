@@ -34,7 +34,7 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
 | In-guest httpd, httpsd, sshd, ircd | ✅ |
 | In-guest clients: nc, wget, telnet, irc, ssh, httpsget | ✅ |
 | Unix coreutils — ls, cat, cp, mv, rm, mkdir, rmdir, chmod, touch, find, head, tail, grep, sort, uniq, wc, tee, tr, seq, echo, date, ps, kill, pwd, id, man | ✅ |
-| Shells — interactive `sh.elf` with pipes/redirection/jobs/history/tab-completion/env vars/mid-line editing | ✅ |
+| Shells — `sh.elf` bash-compatible: pipes, `;`/`&&`/`||`/`>>`/`<`, glob, brace expansion `{a,b}`/`{1..N}`, `~` tilde, `$VAR`/`$?`/`$#`/`$@`/`$0..$9`, parameter forms `${var:-x}`/`${#var}`/`${var%suf}`/`${var/old/new}`, arithmetic `$((..))`/`((..))`, control flow (`if`/`for`/`while`), functions, builtins `[`/`test`/`read`/`shift`/`break`/`continue`/`return`, `!!`/`!N` history recall, Ctrl-R reverse search, command/var/file tab completion, dynamic `advent<cwd>$ ` prompt | ✅ |
 | Modal editor — `vi.elf` (undo, count prefixes, search/replace, motions, modes) | ✅ |
 | Man pages — 27 pages under `/man/`, `man <topic>` + `man -k WORD` | ✅ |
 | Scripting — `lua` (Lua-syntax subset, int32 numbers, tree-walking interpreter) | ✅ |
@@ -163,11 +163,29 @@ The full session index is in `docs/`. Highlights:
 
 AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BIOS that ships with it. Real-hardware boot has worked in the past but isn't continuously tested. The OS is single-architecture (i386), single-FS (AdventFS), single-machine — no clustering, no live migration, no certifications.
 
-**Path A — Usable Unix is complete** as of session 86:
+**Path A — Usable Unix is complete** as of session 140. The shell is bash-compatible for everything except job control, `case`/`esac`, and here-docs. Real `.sh` scripts work — control flow, functions, arithmetic, parameter expansion all functional.
+
+Original Usable Unix run (sessions 83–86):
 - Phase 1 ✅ — coreutils gap-fill (cp/mv/rm/mkdir/rmdir/chmod/touch/find)
 - Phase 2 ✅ — shell mid-line editing (left/right arrows, Ctrl-A/E/W/U/K)
 - Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
 - Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
+
+Bash-compat extension (sessions 136–140):
+- Phase 5 ✅ (session 136) — operators `;`, `&&`, `||`, `>>`, `<`, glob `*`/`?`, `$?` last-exit, Ctrl-R reverse history search, dynamic `advent<cwd>$ ` prompt, in-shell `[`/`test` builtin precursors.
+- Phase 6 ✅ (session 137) — scripting fundamentals: `if`/`then`/`elif`/`else`/`fi`, `for VAR in WORDS; do ... done`, `while CMD; do ... done`, shell functions `name() { ... }`, positional args `$0..$9`/`$@`/`$*`/`$#`, builtins `[`/`test`/`read`/`shift`, multi-line script accumulator in `run_script`, single-quote no-expand semantics. Variable expansion deferred from line-level to per-segment so loop bodies see fresh `$x` each iteration.
+- Phase 7 ✅ (session 138) — `cd .` / `cd ..` / mixed paths via a userspace `normalize_path` pass against cwd (`/etc/../mnt` works, `..` walks the actual parent, etc.). Kernel `sys_chdir` only knows single names; the resolver lives entirely in `cmd_cd`.
+- Phase 8 ✅ (session 139) — scripting power-ups: arithmetic `$((expr))` substitution + `((expr))` command form (recursive-descent eval, `+ - * / % == != < <= > >= && || !` plus var assignment), parameter expansion `${var}`/`${var:-x}`/`${var:=x}`/`${#var}`/`${var#pre}`/`${var%suf}`/`${var/old/new}`/`${var//old/new}`, `break [N]`/`continue [N]`/`return [N]` with proper function-boundary save-restore, bare `NAME=value` assignments.
+- Phase 9 ✅ (session 140) — REPL polish: exec-failure no longer hangs (pre-flight `sys_open` probe before fork), tab completion for command names + env var names (not just files), tilde expansion `~` and `~/foo`, `!!`/`!N` history recall, brace expansion `{a,b,c}` and `{N..M}` with cartesian-product fan-out across sequential groups.
+
+Deep-dive commits:
+- [Session 136 — Path A polish: bash-compat operators](https://github.com/sora5801/AdventOS/commit/ba50514)
+- [Session 137 — scripting fundamentals: control flow + functions](https://github.com/sora5801/AdventOS/commit/70d128a)
+- [Session 138 — cd `.` / `..` path normalization](https://github.com/sora5801/AdventOS/commit/54f8559)
+- [Session 139 — scripting power-ups: arithmetic, ${expansion}, break/continue/return](https://github.com/sora5801/AdventOS/commit/d4e076f)
+- [Session 140 — REPL polish: papercut fixes + interactive ergonomics](https://github.com/sora5801/AdventOS/commit/7c7fbfb)
+
+Smoke harness for the bash-compat work: `smoke_pathA_polish.py`, `smoke_pathA_scripting.py`, `smoke_pathA_arith.py`, `smoke_pathA_repl.py`, `smoke_cd_parent.py`, `smoke_prompt_cwd.py` — 60+ checks total.
 
 **Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
 
