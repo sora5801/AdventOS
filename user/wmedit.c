@@ -155,6 +155,8 @@ static int load_file(void) {
     g_len = n;
     g_cur = 0;
     g_dirty = 0;
+    /* Session 153 — load_file runs at startup before any edits,
+     * so g_undo_count is already 0 by BSS init. */
     return 0;
 }
 
@@ -194,6 +196,121 @@ static void sel_delete(void) {
     g_cur = lo;
     g_sel_anchor = -1;
     g_dirty = 1;
+}
+
+/* Session 153 — undo stack.  One entry per edit, with light
+ * coalescing: consecutive forward-typing or contiguous-backspace
+ * runs collapse into a single Ctrl-Z step.  Per-entry text cap is
+ * 40 bytes, so very large sel_delete()s only partially restore
+ * (cursor still lands at the right offset; missing bytes lost).
+ *
+ * No redo (Ctrl-Y) yet — once you type after undoing, the popped
+ * history is gone.  Same convention as a typical first-pass
+ * editor undo. */
+#define UNDO_MAX 64
+#define UNDO_PIECE_MAX 40
+
+struct undo_entry {
+    int  kind;     /* 1 = insert (delete to undo), 2 = delete (re-insert to undo) */
+    int  offset;
+    int  len;
+    char text[UNDO_PIECE_MAX];
+};
+static struct undo_entry g_undo[UNDO_MAX];
+static int g_undo_count;
+
+static void undo_push(int kind, int offset, int len, const char *text) {
+    if (g_undo_count > 0) {
+        struct undo_entry *prev = &g_undo[g_undo_count - 1];
+        /* Type-forward coalesce: prev was insert ending exactly at
+         * the current offset, and there's room. */
+        if (kind == 1 && prev->kind == 1
+            && offset == prev->offset + prev->len
+            && prev->len + len <= UNDO_PIECE_MAX) {
+            prev->len += len;
+            return;
+        }
+        /* Backspace coalesce: prev was a delete whose offset is one
+         * past our deletion's offset (so we're erasing leftward into
+         * the same run). */
+        if (kind == 2 && prev->kind == 2 && len == 1 && text
+            && offset + 1 == prev->offset
+            && prev->len + 1 <= UNDO_PIECE_MAX) {
+            for (int i = prev->len - 1; i >= 0; i--)
+                prev->text[i + 1] = prev->text[i];
+            prev->text[0] = text[0];
+            prev->offset = offset;
+            prev->len++;
+            return;
+        }
+    }
+    /* Push a fresh entry; drop oldest if at cap. */
+    if (g_undo_count >= UNDO_MAX) {
+        for (int i = 0; i < UNDO_MAX - 1; i++)
+            g_undo[i] = g_undo[i + 1];
+        g_undo_count = UNDO_MAX - 1;
+    }
+    struct undo_entry *e = &g_undo[g_undo_count++];
+    e->kind = kind;
+    e->offset = offset;
+    e->len = len;
+    if (kind == 2 && text) {
+        int n = len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : len;
+        for (int i = 0; i < n; i++) e->text[i] = text[i];
+    }
+}
+
+static void undo_pop(void) {
+    if (g_undo_count == 0) return;
+    struct undo_entry *e = &g_undo[--g_undo_count];
+    if (e->kind == 1) {
+        /* Insert was: bytes added at [offset, offset+len).  Remove
+         * them; place cursor at offset. */
+        for (int i = e->offset; i + e->len < g_len; i++)
+            g_buf[i] = g_buf[i + e->len];
+        g_len -= e->len;
+        g_cur = e->offset;
+    } else if (e->kind == 2) {
+        /* Delete removed e->text from offset.  Re-insert and place
+         * cursor after the restored block. */
+        int len = e->len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : e->len;
+        if (g_len + len < BUF_MAX) {
+            for (int i = g_len + len - 1; i >= e->offset + len; i--)
+                g_buf[i] = g_buf[i - len];
+            for (int i = 0; i < len; i++)
+                g_buf[e->offset + i] = e->text[i];
+            g_len += len;
+            g_cur = e->offset + len;
+        }
+    }
+    sel_clear();
+    g_dirty = 1;
+}
+
+/* Undoable wrappers around the bare buf_/sel_delete helpers.
+ * These record the inverse operation BEFORE mutating g_buf so an
+ * Ctrl-Z replays the original state exactly. */
+static void buf_insert_record(char c) {
+    if (g_len >= BUF_MAX - 1) return;
+    undo_push(1, g_cur, 1, NULL);
+    buf_insert(c);
+}
+static void buf_delete_record(void) {
+    if (g_cur == 0) return;
+    char snap = g_buf[g_cur - 1];
+    undo_push(2, g_cur - 1, 1, &snap);
+    buf_delete();
+}
+static void sel_delete_record(void) {
+    if (!sel_active()) return;
+    int lo = sel_lo();
+    int hi = sel_hi();
+    int len = hi - lo;
+    int snap_len = len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : len;
+    char snap[UNDO_PIECE_MAX];
+    for (int i = 0; i < snap_len; i++) snap[i] = g_buf[lo + i];
+    undo_push(2, lo, snap_len, snap);
+    sel_delete();
 }
 
 /* Compute the byte offset at the on-surface coordinates (ex, ey).
@@ -372,6 +489,10 @@ int main(int argc, char **argv) {
                         sel_clear();
                         break;
                     }
+                    if (k == 0x1A) {                  /* Ctrl-Z — undo */
+                        undo_pop();
+                        break;
+                    }
                     if (k == 0x13) {              /* Ctrl+S — save */
                         int rc = save_file();
                         /* Session 143 — toast feedback. */
@@ -415,28 +536,28 @@ int main(int argc, char **argv) {
                         if (sel_active()) {
                             wm_clipboard_set(g_buf + sel_lo(),
                                              sel_hi() - sel_lo());
-                            sel_delete();
+                            sel_delete_record();
                         }
                     } else if (k == 0x16) {       /* Ctrl+V — paste */
-                        if (sel_active()) sel_delete();
+                        if (sel_active()) sel_delete_record();
                         char pb[BUF_MAX];
                         int pn = wm_clipboard_get(pb, (int)sizeof(pb));
                         if (pn > 0) {
                             if (pn > BUF_MAX - g_len - 1) pn = BUF_MAX - g_len - 1;
-                            for (int i = 0; i < pn; i++) buf_insert(pb[i]);
+                            for (int i = 0; i < pn; i++) buf_insert_record(pb[i]);
                         }
                     } else if (k == 0x08 || k == 0x7F) {
-                        if (sel_active()) sel_delete();
-                        else              buf_delete();
+                        if (sel_active()) sel_delete_record();
+                        else              buf_delete_record();
                     } else if (k == '\r' || k == '\n') {
-                        if (sel_active()) sel_delete();
-                        buf_insert('\n');
+                        if (sel_active()) sel_delete_record();
+                        buf_insert_record('\n');
                     } else if (k == '\t') {
-                        if (sel_active()) sel_delete();
-                        for (int i = 0; i < 4; i++) buf_insert(' ');
+                        if (sel_active()) sel_delete_record();
+                        for (int i = 0; i < 4; i++) buf_insert_record(' ');
                     } else if (k >= 0x20 && k <= 0x7E) {
-                        if (sel_active()) sel_delete();
-                        buf_insert((char)k);
+                        if (sel_active()) sel_delete_record();
+                        buf_insert_record((char)k);
                     }
                     break;
                 }
