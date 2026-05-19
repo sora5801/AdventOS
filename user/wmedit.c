@@ -62,6 +62,60 @@ static int   g_len;
 static int   g_cur;          /* byte offset into g_buf */
 static int   g_dirty;        /* 1 if buffer modified since load/save */
 static char  g_path[64];
+/* Session 140 — drag selection.  g_sel_anchor is the byte offset
+ * where the most recent mouse-press landed (or -1 if no selection
+ * is in progress).  The selection range is [min(anchor, cur),
+ * max(anchor, cur)); empty when anchor == cur.  g_drag is 1 while
+ * the left mouse button is held down (between PRESS and RELEASE)
+ * so MOUSE_MOVE knows whether to extend the selection. */
+static int   g_sel_anchor = -1;
+static int   g_drag;
+static int   g_scroll_row;   /* hoisted out of main() so byte_at_xy
+                              * can use it from event handlers */
+
+/* Session 152 — incremental search.  Ctrl-F opens a search bar
+ * at the bottom; typing builds g_search_pat; matches in the
+ * viewport are highlighted yellow.  Enter jumps the cursor to
+ * the next match (wrapping); Esc closes search.  We keep the
+ * pattern + match-state across frames so the highlight survives
+ * scrolling. */
+#define SEARCH_PAT_MAX 48
+static int  g_search_mode;
+static char g_search_pat[SEARCH_PAT_MAX];
+static int  g_search_len;
+/* Find the next match at or after `from`, wrapping to 0 if no
+ * match in [from, len].  Returns the byte offset of the match
+ * or -1 if g_search_pat doesn't occur in g_buf. */
+static int find_match(int from) {
+    if (g_search_len <= 0 || g_search_len > g_len) return -1;
+    int last = g_len - g_search_len;
+    for (int i = from; i <= last; i++) {
+        int ok = 1;
+        for (int j = 0; j < g_search_len; j++) {
+            if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+        }
+        if (ok) return i;
+    }
+    for (int i = 0; i < from && i <= last; i++) {
+        int ok = 1;
+        for (int j = 0; j < g_search_len; j++) {
+            if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+        }
+        if (ok) return i;
+    }
+    return -1;
+}
+
+static int sel_lo(void) {
+    return g_sel_anchor < g_cur ? g_sel_anchor : g_cur;
+}
+static int sel_hi(void) {
+    return g_sel_anchor < g_cur ? g_cur : g_sel_anchor;
+}
+static int sel_active(void) {
+    return g_sel_anchor >= 0 && g_sel_anchor != g_cur;
+}
+static void sel_clear(void) { g_sel_anchor = -1; }
 
 /* Compute (row, col) for a given byte offset. */
 static void cursor_rowcol(int off, int *row, int *col) {
@@ -101,6 +155,8 @@ static int load_file(void) {
     g_len = n;
     g_cur = 0;
     g_dirty = 0;
+    /* Session 153 — load_file runs at startup before any edits,
+     * so g_undo_count is already 0 by BSS init. */
     return 0;
 }
 
@@ -126,6 +182,204 @@ static void buf_delete(void) {
     g_len--;
     g_cur--;
     g_dirty = 1;
+}
+
+/* Session 140 — drop the active selection from the buffer.  Cursor
+ * lands at the deleted range's lower bound; selection collapses. */
+static void sel_delete(void) {
+    if (!sel_active()) return;
+    int lo = sel_lo();
+    int hi = sel_hi();
+    int n  = hi - lo;
+    for (int i = lo; i < g_len - n; i++) g_buf[i] = g_buf[i + n];
+    g_len -= n;
+    g_cur = lo;
+    g_sel_anchor = -1;
+    g_dirty = 1;
+}
+
+/* Session 153/154 — undo + redo stacks.  Each edit pushes onto
+ * the undo stack with light coalescing (forward-typing bursts and
+ * contiguous backspaces collapse into one Ctrl-Z step).  Ctrl-Z
+ * (undo) and Ctrl-Y (redo) shuffle entries between the two
+ * stacks.  Per-entry text cap is 40 bytes; very large sel_deletes
+ * still restore cursor position but truncate text past 40.
+ *
+ * Convention: any FRESH edit (via the _record wrappers) clears
+ * the redo stack — once you start editing again the popped redo
+ * history is gone, matching how every other editor behaves. */
+#define UNDO_MAX 64
+#define UNDO_PIECE_MAX 40
+
+struct undo_entry {
+    int  kind;     /* 1 = insert (delete to undo), 2 = delete (re-insert to undo) */
+    int  offset;
+    int  len;
+    char text[UNDO_PIECE_MAX];
+};
+static struct undo_entry g_undo[UNDO_MAX];
+static int g_undo_count;
+static struct undo_entry g_redo[UNDO_MAX];
+static int g_redo_count;
+
+/* Push an entry onto a generic undo/redo stack with FIFO eviction
+ * at cap.  No coalescing here — coalesce only happens on the undo
+ * stack via undo_push() below. */
+static void stack_push(struct undo_entry *stk, int *cnt,
+                       const struct undo_entry *e) {
+    if (*cnt >= UNDO_MAX) {
+        for (int i = 0; i < UNDO_MAX - 1; i++) stk[i] = stk[i + 1];
+        (*cnt) = UNDO_MAX - 1;
+    }
+    stk[(*cnt)++] = *e;
+}
+
+static void undo_push(int kind, int offset, int len, const char *text) {
+    /* Session 154 — any fresh edit invalidates the redo history.
+     * Caller is the _record() wrapper, which means a user-initiated
+     * edit just happened, not an undo or redo replay. */
+    g_redo_count = 0;
+
+    if (g_undo_count > 0) {
+        struct undo_entry *prev = &g_undo[g_undo_count - 1];
+        /* Type-forward coalesce: prev was insert ending exactly at
+         * the current offset, and there's room. */
+        if (kind == 1 && prev->kind == 1
+            && offset == prev->offset + prev->len
+            && prev->len + len <= UNDO_PIECE_MAX) {
+            /* Session 154 — append the inserted byte(s) to text[]
+             * too so redo can re-insert without reading g_buf. */
+            if (text) {
+                for (int i = 0; i < len && prev->len + i < UNDO_PIECE_MAX; i++)
+                    prev->text[prev->len + i] = text[i];
+            }
+            prev->len += len;
+            return;
+        }
+        /* Backspace coalesce: prev was a delete whose offset is one
+         * past our deletion's offset (so we're erasing leftward into
+         * the same run). */
+        if (kind == 2 && prev->kind == 2 && len == 1 && text
+            && offset + 1 == prev->offset
+            && prev->len + 1 <= UNDO_PIECE_MAX) {
+            for (int i = prev->len - 1; i >= 0; i--)
+                prev->text[i + 1] = prev->text[i];
+            prev->text[0] = text[0];
+            prev->offset = offset;
+            prev->len++;
+            return;
+        }
+    }
+    /* Push a fresh entry; drop oldest if at cap. */
+    if (g_undo_count >= UNDO_MAX) {
+        for (int i = 0; i < UNDO_MAX - 1; i++)
+            g_undo[i] = g_undo[i + 1];
+        g_undo_count = UNDO_MAX - 1;
+    }
+    struct undo_entry *e = &g_undo[g_undo_count++];
+    e->kind = kind;
+    e->offset = offset;
+    e->len = len;
+    /* Session 154 — store text for both kinds: kind=1 needs it so
+     * redo can re-insert; kind=2 already needed it for undo. */
+    if (text) {
+        int n = len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : len;
+        for (int i = 0; i < n; i++) e->text[i] = text[i];
+    }
+}
+
+/* Apply the inverse of `e` to g_buf, returning an entry suitable
+ * for pushing on the opposite stack so the action can be replayed
+ * in the other direction.  Used by both undo_pop and redo_pop. */
+static struct undo_entry apply_inverse(const struct undo_entry *e) {
+    struct undo_entry inv = *e;
+    if (e->kind == 1) {
+        /* Insert was at [offset, offset+len).  Capture the bytes
+         * before deletion in case the existing entry's text[] is
+         * stale (e.g. for old pre-session-154 entries; defensive). */
+        int n = e->len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : e->len;
+        for (int i = 0; i < n; i++) inv.text[i] = g_buf[e->offset + i];
+        for (int i = e->offset; i + e->len < g_len; i++)
+            g_buf[i] = g_buf[i + e->len];
+        g_len -= e->len;
+        g_cur = e->offset;
+        inv.kind = 2;   /* opposite stack will undo "this delete" */
+    } else if (e->kind == 2) {
+        int len = e->len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : e->len;
+        if (g_len + len < BUF_MAX) {
+            for (int i = g_len + len - 1; i >= e->offset + len; i--)
+                g_buf[i] = g_buf[i - len];
+            for (int i = 0; i < len; i++)
+                g_buf[e->offset + i] = e->text[i];
+            g_len += len;
+            g_cur = e->offset + len;
+        }
+        inv.kind = 1;   /* opposite stack will undo "this insert" */
+    }
+    return inv;
+}
+
+static void undo_pop(void) {
+    if (g_undo_count == 0) return;
+    struct undo_entry e = g_undo[--g_undo_count];
+    struct undo_entry inv = apply_inverse(&e);
+    stack_push(g_redo, &g_redo_count, &inv);
+    sel_clear();
+    g_dirty = 1;
+}
+
+static void redo_pop(void) {
+    if (g_redo_count == 0) return;
+    struct undo_entry e = g_redo[--g_redo_count];
+    struct undo_entry inv = apply_inverse(&e);
+    stack_push(g_undo, &g_undo_count, &inv);
+    sel_clear();
+    g_dirty = 1;
+}
+
+/* Undoable wrappers around the bare buf_/sel_delete helpers.
+ * These record the inverse operation BEFORE mutating g_buf so an
+ * Ctrl-Z replays the original state exactly. */
+static void buf_insert_record(char c) {
+    if (g_len >= BUF_MAX - 1) return;
+    /* Session 154 — pass the inserted byte so redo can re-insert
+     * without scanning g_buf later. */
+    undo_push(1, g_cur, 1, &c);
+    buf_insert(c);
+}
+static void buf_delete_record(void) {
+    if (g_cur == 0) return;
+    char snap = g_buf[g_cur - 1];
+    undo_push(2, g_cur - 1, 1, &snap);
+    buf_delete();
+}
+static void sel_delete_record(void) {
+    if (!sel_active()) return;
+    int lo = sel_lo();
+    int hi = sel_hi();
+    int len = hi - lo;
+    int snap_len = len > UNDO_PIECE_MAX ? UNDO_PIECE_MAX : len;
+    char snap[UNDO_PIECE_MAX];
+    for (int i = 0; i < snap_len; i++) snap[i] = g_buf[lo + i];
+    undo_push(2, lo, snap_len, snap);
+    sel_delete();
+}
+
+/* Compute the byte offset at the on-surface coordinates (ex, ey).
+ * Used by both MOUSE_PRESS (cursor place) and MOUSE_MOVE (extend
+ * selection during drag). */
+static int byte_at_xy(int ex, int ey) {
+    int rel_y = ey - HDR_H - 4;
+    int rel_x = ex - GRID_X;
+    if (rel_y < 0) rel_y = 0;
+    if (rel_x < 0) rel_x = 0;
+    int row = g_scroll_row + rel_y / LINE_H;
+    int col = rel_x / CELL_W;
+    int start = row_start_off(row);
+    int end   = row_start_off(row + 1);
+    if (end > start && g_buf[end - 1] == '\n') end--;
+    if (col > end - start) col = end - start;
+    return start + col;
 }
 
 /* Move cursor by direction.  d=='A' up, 'B' down, 'C' right, 'D' left. */
@@ -219,7 +473,7 @@ int main(int argc, char **argv) {
 
     const int max_rows = (WIN_H - HDR_H - FOOTER_H - 8) / LINE_H;
     const int max_cols = (WIN_W - 2 * GRID_X) / CELL_W;
-    int scroll_row = 0;
+    g_scroll_row = 0;
 
     for (int tick = 0; tick < total_ticks && !closed; tick++) {
         struct wm_event ev;
@@ -230,6 +484,41 @@ int main(int argc, char **argv) {
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
                     unsigned int k = ev.keycode;
+                    /* Session 152 — search-mode key dispatch.  When
+                     * Ctrl-F has opened the search bar, all keystrokes
+                     * go into g_search_pat instead of g_buf.  Esc
+                     * closes the bar; Enter jumps to the next match;
+                     * Backspace shortens the pattern.  Cursor + buffer
+                     * are untouched (search is read-only navigation). */
+                    if (g_search_mode) {
+                        if (k == 27) {              /* Esc — close */
+                            g_search_mode = 0;
+                            break;
+                        }
+                        if (k == '\r' || k == '\n') {
+                            int m = find_match(g_cur + 1);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        if (k == 0x08 || k == 0x7F) {
+                            if (g_search_len > 0) g_search_len--;
+                            g_search_pat[g_search_len] = 0;
+                            /* Re-find from current cursor (or start). */
+                            int m = find_match(g_cur);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        if (k >= 0x20 && k <= 0x7E
+                            && g_search_len < SEARCH_PAT_MAX - 1) {
+                            g_search_pat[g_search_len++] = (char)k;
+                            g_search_pat[g_search_len] = 0;
+                            int m = find_match(g_cur);
+                            if (m >= 0) g_cur = m;
+                            break;
+                        }
+                        /* Anything else ignored while searching. */
+                        break;
+                    }
                     /* ANSI CSI: ESC '[' <final>. */
                     if (esc_state == 1) {
                         if (k == '[') { esc_state = 2; break; }
@@ -238,49 +527,117 @@ int main(int argc, char **argv) {
                     }
                     if (esc_state == 2) {
                         esc_state = 0;
-                        if (k == 'A' || k == 'B' || k == 'C' || k == 'D')
+                        if (k == 'A' || k == 'B' || k == 'C' || k == 'D') {
                             cursor_move((char)k);
+                            sel_clear();
+                        }
                         break;
                     }
                     if (k == 27) { esc_state = 1; break; }
+                    if (k == 0x06) {                  /* Ctrl-F — open search */
+                        g_search_mode = 1;
+                        g_search_len = 0;
+                        g_search_pat[0] = 0;
+                        sel_clear();
+                        break;
+                    }
+                    if (k == 0x1A) {                  /* Ctrl-Z — undo */
+                        undo_pop();
+                        break;
+                    }
+                    if (k == 0x19) {                  /* Ctrl-Y — redo */
+                        redo_pop();
+                        break;
+                    }
                     if (k == 0x13) {              /* Ctrl+S — save */
-                        save_file();
+                        int rc = save_file();
+                        /* Session 143 — toast feedback. */
+                        char tn[80];
+                        int p = 0;
+                        const char *m = (rc == 0) ? "saved " : "save failed: ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        for (int i = 0; g_path[i] && p < (int)sizeof(tn) - 1; i++)
+                            tn[p++] = g_path[i];
+                        if (rc == 0) {
+                            const char *q = " (";
+                            while (*q && p < (int)sizeof(tn) - 1) tn[p++] = *q++;
+                            p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)g_len);
+                            const char *r = " B)";
+                            while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        }
+                        tn[p] = 0;
+                        wm_notify(tn);
                     } else if (k == 0x11) {       /* Ctrl+Q — quit */
                         closed = 1;
                     } else if (k == 0x03) {       /* Ctrl+C — copy */
-                        wm_clipboard_set(g_buf, g_len);
+                        int copied;
+                        if (sel_active()) {
+                            copied = sel_hi() - sel_lo();
+                            wm_clipboard_set(g_buf + sel_lo(), copied);
+                        } else {
+                            copied = g_len;
+                            wm_clipboard_set(g_buf, g_len);
+                        }
+                        /* Session 143 — toast on copy. */
+                        char tn[64];
+                        int p = 0;
+                        const char *m = "copied ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)copied);
+                        const char *r = " B";
+                        while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        tn[p] = 0;
+                        wm_notify(tn);
+                    } else if (k == 0x18) {       /* Ctrl+X — cut */
+                        if (sel_active()) {
+                            wm_clipboard_set(g_buf + sel_lo(),
+                                             sel_hi() - sel_lo());
+                            sel_delete_record();
+                        }
                     } else if (k == 0x16) {       /* Ctrl+V — paste */
+                        if (sel_active()) sel_delete_record();
                         char pb[BUF_MAX];
                         int pn = wm_clipboard_get(pb, (int)sizeof(pb));
                         if (pn > 0) {
                             if (pn > BUF_MAX - g_len - 1) pn = BUF_MAX - g_len - 1;
-                            for (int i = 0; i < pn; i++) buf_insert(pb[i]);
+                            for (int i = 0; i < pn; i++) buf_insert_record(pb[i]);
                         }
                     } else if (k == 0x08 || k == 0x7F) {
-                        buf_delete();
+                        if (sel_active()) sel_delete_record();
+                        else              buf_delete_record();
                     } else if (k == '\r' || k == '\n') {
-                        buf_insert('\n');
+                        if (sel_active()) sel_delete_record();
+                        buf_insert_record('\n');
                     } else if (k == '\t') {
-                        for (int i = 0; i < 4; i++) buf_insert(' ');
+                        if (sel_active()) sel_delete_record();
+                        for (int i = 0; i < 4; i++) buf_insert_record(' ');
                     } else if (k >= 0x20 && k <= 0x7E) {
-                        buf_insert((char)k);
+                        if (sel_active()) sel_delete_record();
+                        buf_insert_record((char)k);
                     }
                     break;
                 }
                 case WM_EV_MOUSE_PRESS: {
-                    /* Click in the text region: position cursor by
-                     * mapping pixel (x,y) to a (row, col) within the
-                     * current viewport. */
-                    int rel_y = ev.y - HDR_H - 4;
-                    int rel_x = ev.x - GRID_X;
-                    if (rel_y < 0 || rel_x < 0) break;
-                    int row = scroll_row + rel_y / LINE_H;
-                    int col = rel_x / CELL_W;
-                    int start = row_start_off(row);
-                    int end   = row_start_off(row + 1);
-                    if (end > start && g_buf[end - 1] == '\n') end--;
-                    if (col > end - start) col = end - start;
-                    g_cur = start + col;
+                    /* Click in the text region: position cursor and
+                     * start a (potential) drag selection.  Anchor =
+                     * cursor; if the user drags, MOUSE_MOVE extends
+                     * the selection.  On RELEASE with no movement
+                     * the selection collapses (anchor cleared). */
+                    int off = byte_at_xy(ev.x, ev.y);
+                    g_cur = off;
+                    g_sel_anchor = off;
+                    g_drag = 1;
+                    break;
+                }
+                case WM_EV_MOUSE_MOVE: {
+                    if (g_drag) {
+                        g_cur = byte_at_xy(ev.x, ev.y);
+                    }
+                    break;
+                }
+                case WM_EV_MOUSE_RELEASE: {
+                    g_drag = 0;
+                    if (g_cur == g_sel_anchor) g_sel_anchor = -1;
                     break;
                 }
                 default: break;
@@ -290,10 +647,10 @@ int main(int argc, char **argv) {
         /* Scroll so the cursor stays in view. */
         int cur_row, cur_col;
         cursor_rowcol(g_cur, &cur_row, &cur_col);
-        if (cur_row < scroll_row) scroll_row = cur_row;
-        if (cur_row >= scroll_row + max_rows)
-            scroll_row = cur_row - max_rows + 1;
-        if (scroll_row < 0) scroll_row = 0;
+        if (cur_row < g_scroll_row) g_scroll_row = cur_row;
+        if (cur_row >= g_scroll_row + max_rows)
+            g_scroll_row = cur_row - max_rows + 1;
+        if (g_scroll_row < 0) g_scroll_row = 0;
 
         /* Repaint. */
         wm_clear(&win, has_focus ? 0x0A0A14u : 0x141414u);
@@ -306,54 +663,121 @@ int main(int argc, char **argv) {
                            : "wmedit  (click to focus)",
                  GFX_WHITE, GFX_TRANSPARENT);
 
+        /* Session 152 — find all visible matches before painting so
+         * the body loop can yellow-highlight each match span. */
+        int matches[64];
+        int n_matches = 0;
+        if (g_search_mode && g_search_len > 0
+            && g_search_len <= g_len) {
+            int last = g_len - g_search_len;
+            int i = 0;
+            while (i <= last && n_matches < 64) {
+                int ok = 1;
+                for (int j = 0; j < g_search_len; j++) {
+                    if (g_buf[i + j] != g_search_pat[j]) { ok = 0; break; }
+                }
+                if (ok) {
+                    matches[n_matches++] = i;
+                    i += g_search_len;
+                } else {
+                    i++;
+                }
+            }
+        }
+
         /* Text body. */
         int text_y0 = HDR_H + 4;
-        int byte = row_start_off(scroll_row);
+        int byte = row_start_off(g_scroll_row);
+        /* Session 140 — selection bounds (one byte half-open). */
+        int slo = sel_active() ? sel_lo() : -1;
+        int shi = sel_active() ? sel_hi() : -1;
         for (int r = 0; r < max_rows; r++) {
             int y = text_y0 + r * LINE_H;
             int col = 0;
             while (byte < g_len && g_buf[byte] != '\n') {
                 if (col < max_cols) {
+                    /* Selection highlight behind the glyph. */
+                    if (byte >= slo && byte < shi) {
+                        wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                     CELL_W, LINE_H, 0x305078u);
+                    }
+                    /* Session 152 — search-match highlight (mustard
+                     * yellow), painted under glyph + over selection. */
+                    for (int m = 0; m < n_matches; m++) {
+                        if (byte >= matches[m]
+                            && byte < matches[m] + g_search_len) {
+                            wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                         CELL_W, LINE_H, 0x807030u);
+                            break;
+                        }
+                    }
                     gfx_glyph(&sctx, GRID_X + col * CELL_W, y,
                               g_buf[byte], 0xC0E0C0u, GFX_TRANSPARENT);
                 }
                 col++;
                 byte++;
             }
-            if (byte < g_len && g_buf[byte] == '\n') byte++;
-            if (byte >= g_len && col == 0 && r > cur_row - scroll_row) break;
+            /* Newline included in the selection range gets a one-
+             * cell highlight at end-of-line so cross-row drags read
+             * as continuous. */
+            if (byte < g_len && g_buf[byte] == '\n') {
+                if (col < max_cols && byte >= slo && byte < shi) {
+                    wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                 CELL_W, LINE_H, 0x305078u);
+                }
+                byte++;
+            }
+            if (byte >= g_len && col == 0 && r > cur_row - g_scroll_row) break;
         }
 
-        /* Blinking caret. */
-        if (has_focus && ((caret_phase / 12) & 1) == 0) {
-            int cy = text_y0 + (cur_row - scroll_row) * LINE_H;
+        /* Blinking caret — 2-pixel vertical line at the cursor.  No
+         * caret while the selection is non-empty (the highlight
+         * already shows where the cursor end is). */
+        if (has_focus && !sel_active() && ((caret_phase / 12) & 1) == 0) {
+            int cy = text_y0 + (cur_row - g_scroll_row) * LINE_H;
             int cx = GRID_X + cur_col * CELL_W;
-            if (cur_row >= scroll_row && cur_row < scroll_row + max_rows
+            if (cur_row >= g_scroll_row && cur_row < g_scroll_row + max_rows
                 && cur_col <= max_cols) {
-                wm_fill_rect(&win, cx, cy, CELL_W, LINE_H - 2, 0xFFFFFFu);
+                wm_fill_rect(&win, cx, cy, 2, LINE_H - 1, 0xFFFFFFu);
             }
         }
         caret_phase++;
 
-        /* Footer status bar. */
+        /* Footer status bar.  Session 152 — in search mode the
+         * footer becomes "Find: <pat>_  Esc:close  Enter:next" with
+         * a distinct yellow-tinted background so the mode is
+         * unmistakable. */
         int fy = WIN_H - FOOTER_H + 2;
-        wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
-                     0x202830u);
-        int fx = draw_str(&sctx, 6, fy, g_path, 0xE0E0E0u);
-        fx += 4;
-        if (g_dirty) fx = draw_str(&sctx, fx, fy, "[*]", 0xE0E030u);
-        fx += 8;
-        char info[40];
-        int n = 0;
-        const char *p = "L"; while (*p && n < 39) info[n++] = *p++;
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_row + 1);
-        if (n < 39) info[n++] = ':';
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_col + 1);
-        if (n < 39) info[n++] = ' ';
-        if (n < 39) info[n++] = 'B';
-        n += dec(info + n, (int)sizeof(info) - n, (unsigned)g_len);
-        info[n] = 0;
-        draw_str(&sctx, fx, fy, info, 0x80C080u);
+        if (g_search_mode) {
+            wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
+                         0x403820u);   /* dark mustard */
+            int fx = draw_str(&sctx, 6, fy, "Find: ", 0xFFFFFFu);
+            fx = draw_str(&sctx, fx, fy, g_search_pat, 0xFFE080u);
+            /* Blinking '_' cursor at end of pattern. */
+            if (((caret_phase / 12) & 1) == 0) {
+                draw_str(&sctx, fx, fy, "_", 0xFFFFFFu);
+            }
+            draw_str(&sctx, WIN_W - 200, fy,
+                     "Esc:close  Enter:next", 0xC0C0A0u);
+        } else {
+            wm_fill_rect(&win, 0, WIN_H - FOOTER_H, WIN_W, FOOTER_H,
+                         0x202830u);
+            int fx = draw_str(&sctx, 6, fy, g_path, 0xE0E0E0u);
+            fx += 4;
+            if (g_dirty) fx = draw_str(&sctx, fx, fy, "[*]", 0xE0E030u);
+            fx += 8;
+            char info[40];
+            int n = 0;
+            const char *p = "L"; while (*p && n < 39) info[n++] = *p++;
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_row + 1);
+            if (n < 39) info[n++] = ':';
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)cur_col + 1);
+            if (n < 39) info[n++] = ' ';
+            if (n < 39) info[n++] = 'B';
+            n += dec(info + n, (int)sizeof(info) - n, (unsigned)g_len);
+            info[n] = 0;
+            draw_str(&sctx, fx, fy, info, 0x80C080u);
+        }
 
         wm_present(&win);
         sys_sleep_ms(33);

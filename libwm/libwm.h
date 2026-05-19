@@ -74,4 +74,9 @@ int wm_poll_event(struct wm_window *w, struct wm_event *out);
 int wm_clipboard_set(const void *buf, int len);
 int wm_clipboard_get(void *buf, int cap);
 
+/* Session 143 — post a toast notification.  Short status text
+ * (e.g. "saved /tmp/foo") appears as a fading box in the bottom-
+ * right of the screen for a few seconds.  Returns 0 / -1. */
+int wm_notify(const char *text);
+
 #endif

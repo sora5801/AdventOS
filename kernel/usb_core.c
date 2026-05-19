@@ -24,7 +24,9 @@
  */
 #include "usb_core.h"
 #include "uhci.h"
+#include "ehci.h"
 #include "usb.h"
+#include "usb_hc.h"
 #include "kprintf.h"
 #include "string.h"
 #include "kmalloc.h"
@@ -41,6 +43,11 @@ void usb_msc_attach(struct usb_device *d,
 void usb_hub_attach(struct usb_device *d);
 void usb_cdc_acm_attach(struct usb_device *d, int data_iface,
                         int comm_iface, int ep_in, int ep_out, int ep_max);
+void usb_cdc_ecm_attach(struct usb_device *d,
+                        int comm_iface, int data_iface,
+                        int data_iface_alt1,
+                        int ep_in, int ep_out, int ep_max,
+                        int imac_str_idx);
 
 /* Up to 4 simultaneous USB devices total (2 ports × possible
  * future hubs). Plenty for the demo. */
@@ -61,8 +68,8 @@ int usb_get_descriptor(struct usb_device *d,
         .wIndex        = lang,
         .wLength       = (uint16_t)max_len,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, out, max_len, /*data_in=*/1);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, out, max_len, /*data_in=*/1);
 }
 
 static int usb_set_address(struct usb_device *d, uint8_t new_addr) {
@@ -73,8 +80,8 @@ static int usb_set_address(struct usb_device *d, uint8_t new_addr) {
         .wIndex        = 0,
         .wLength       = 0,
     };
-    int rc = uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                   &s, 0, 0, /*data_in=*/0);
+    int rc = d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                     &s, 0, 0, /*data_in=*/0);
     if (rc == USB_OK) d->addr = new_addr;
     /* USB 1.1 §9.2.6.3: device has 2 ms to start using new address. */
     pit_sleep(2);
@@ -89,8 +96,8 @@ int usb_set_configuration(struct usb_device *d, uint8_t value) {
         .wIndex        = 0,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 int usb_hid_set_protocol(struct usb_device *d, int interface, int protocol) {
@@ -101,8 +108,8 @@ int usb_hid_set_protocol(struct usb_device *d, int interface, int protocol) {
         .wIndex        = (uint16_t)interface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 int usb_hid_set_idle(struct usb_device *d, int interface, int duration_4ms) {
@@ -115,8 +122,8 @@ int usb_hid_set_idle(struct usb_device *d, int interface, int duration_4ms) {
         .wIndex        = (uint16_t)interface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
-                                 &s, 0, 0, /*data_in=*/0);
+    return d->hc->control_transfer(d->addr, d->low_speed, d->ep0_max_packet,
+                                   &s, 0, 0, /*data_in=*/0);
 }
 
 /* ---- Configuration descriptor walker --------------------------- */
@@ -192,8 +199,15 @@ static int find_cdc_acm_interface(const uint8_t *cfg, int cfg_len,
         if (btype == USB_DT_INTERFACE && blen >= 9) {
             const struct usb_interface_descriptor *id =
                 (const struct usb_interface_descriptor *)(cfg + o);
+            /* Skip RNDIS devices (Microsoft's USB-Ethernet protocol):
+             * they advertise CDC_COMM / ACM with protocol 0xFF
+             * (vendor-specific). The CDC-ACM spec uses 0x00 (none),
+             * 0x01 (AT V.25ter), or 0x02..0x06 (modem command sets).
+             * Without this guard we try to SET_LINE_CODING an RNDIS
+             * device and it STALLs. */
             if (id->bInterfaceClass == USB_CLASS_CDC_COMM &&
-                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ACM)
+                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ACM &&
+                id->bInterfaceProtocol < 0x07)
             {
                 saw_comm = 1;
                 cur_comm = id->bInterfaceNumber;
@@ -229,6 +243,122 @@ static int find_cdc_acm_interface(const uint8_t *cfg, int cfg_len,
         *ep_out     = found_out;
         *ep_max     = max_in < max_out ? max_in : max_out;
         if (*ep_max == 0) *ep_max = 64;
+        return 1;
+    }
+    return 0;
+}
+
+/* Find a CDC-ECM device: Comm interface class 0x02 / subclass 0x06,
+ * an Ethernet Networking functional descriptor (btype 0x24,
+ * subtype 0x0F) that tells us iMACAddress, and a Data interface
+ * (class 0x0A) with an alternate setting that carries the bulk-IN/OUT
+ * pair. ECM convention: alt 0 has zero endpoints ("link down"), alt 1
+ * has the active endpoints. We track each interface's *active* alt
+ * (the last one we saw with non-zero endpoints) and use that.
+ *
+ * Returns 1 on success and fills out the params. */
+static int find_cdc_ecm_interface(const uint8_t *cfg, int cfg_len,
+                                  int *comm_iface, int *data_iface,
+                                  int *data_alt,
+                                  int *ep_in, int *ep_out, int *ep_max,
+                                  int *imac_str_idx)
+{
+    int o = 0;
+    int saw_comm = 0;
+    int cur_comm = -1;
+    int cur_imac = 0;
+
+    int in_data        = 0;       /* currently parsing an ECM data iface */
+    int cur_data       = -1;
+    int cur_data_alt   = 0;
+    int found_in = 0, found_out = 0, max_in = 0, max_out = 0;
+
+    /* Best (= first complete-with-endpoints) data alt we've seen. */
+    int best_data      = -1;
+    int best_alt       = 0;
+    int best_in        = 0;
+    int best_out       = 0;
+    int best_max       = 0;
+
+    while (o + 2 <= cfg_len) {
+        uint8_t blen  = cfg[o];
+        uint8_t btype = cfg[o + 1];
+        if (blen == 0 || o + blen > cfg_len) return 0;
+
+        if (btype == USB_DT_INTERFACE && blen >= 9) {
+            /* Close out the alt we were just parsing, if it had a
+             * bulk pair. */
+            if (in_data && found_in && found_out && best_data < 0) {
+                best_data = cur_data;
+                best_alt  = cur_data_alt;
+                best_in   = found_in;
+                best_out  = found_out;
+                best_max  = max_in < max_out ? max_in : max_out;
+            }
+
+            const struct usb_interface_descriptor *id =
+                (const struct usb_interface_descriptor *)(cfg + o);
+            if (id->bInterfaceClass == USB_CLASS_CDC_COMM &&
+                id->bInterfaceSubClass == USB_CDC_SUBCLASS_ECM)
+            {
+                saw_comm = 1;
+                cur_comm = id->bInterfaceNumber;
+                in_data  = 0;
+            } else if (id->bInterfaceClass == USB_CLASS_CDC_DATA) {
+                in_data       = 1;
+                cur_data      = id->bInterfaceNumber;
+                cur_data_alt  = id->bAlternateSetting;
+                found_in = found_out = 0;
+                max_in   = max_out   = 0;
+            } else {
+                in_data = 0;
+            }
+        } else if (btype == 0x24 /* CS_INTERFACE */ && blen >= 3 &&
+                   saw_comm && in_data == 0)
+        {
+            /* Functional descriptor inside the comm interface. We
+             * only care about subtype 0x0F (Ethernet Networking):
+             *   [0] blen
+             *   [1] btype = 0x24
+             *   [2] bDescSubtype = 0x0F
+             *   [3] iMACAddress  <-- string descriptor index */
+            uint8_t sub = cfg[o + 2];
+            if (sub == USB_CDC_FUNC_ETHERNET && blen >= 4) {
+                cur_imac = cfg[o + 3];
+            }
+        } else if (btype == USB_DT_ENDPOINT && blen >= 7 && in_data) {
+            const struct usb_endpoint_descriptor *ed =
+                (const struct usb_endpoint_descriptor *)(cfg + o);
+            if ((ed->bmAttributes & USB_EP_TYPE_MASK) == USB_EP_TYPE_BULK) {
+                if (ed->bEndpointAddress & USB_EP_DIR_MASK) {
+                    found_in = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_in   = ed->wMaxPacketSize;
+                } else {
+                    found_out = ed->bEndpointAddress & USB_EP_NUM_MASK;
+                    max_out   = ed->wMaxPacketSize;
+                }
+            }
+        }
+        o += blen;
+    }
+    /* Tail case: last interface descriptor in the blob was a complete
+     * ECM data alt. */
+    if (in_data && found_in && found_out && best_data < 0) {
+        best_data = cur_data;
+        best_alt  = cur_data_alt;
+        best_in   = found_in;
+        best_out  = found_out;
+        best_max  = max_in < max_out ? max_in : max_out;
+    }
+
+    if (saw_comm && best_data >= 0) {
+        *comm_iface   = cur_comm;
+        *data_iface   = best_data;
+        *data_alt     = best_alt;
+        *ep_in        = best_in;
+        *ep_out       = best_out;
+        *ep_max       = best_max == 0 ? 64 : best_max;
+        *imac_str_idx = cur_imac;
         return 1;
     }
     return 0;
@@ -300,7 +430,8 @@ static int find_msc_interface(const uint8_t *cfg, int cfg_len,
 
 /* ---- Per-device enumeration ------------------------------------ */
 
-static struct usb_device *alloc_device(int low_speed) {
+static struct usb_device *alloc_device(int low_speed,
+                                       const struct usb_hc_ops *hc) {
     for (int i = 0; i < USB_MAX_DEVICES; i++) {
         if (!g_devices[i].in_use) {
             memset(&g_devices[i], 0, sizeof(g_devices[i]));
@@ -308,14 +439,17 @@ static struct usb_device *alloc_device(int low_speed) {
             g_devices[i].addr          = 0;
             g_devices[i].low_speed     = low_speed;
             g_devices[i].ep0_max_packet = 8;     /* USB 1.1 default */
+            g_devices[i].hc            = hc;
             return &g_devices[i];
         }
     }
     return 0;
 }
 
-void usb_enumerate_default(int low_speed, const char *origin) {
-    struct usb_device *d = alloc_device(low_speed);
+void usb_enumerate_default(int low_speed, const char *origin,
+                           const struct usb_hc_ops *hc) {
+    if (!hc) hc = &g_uhci_hc_ops;       /* legacy callers default to UHCI */
+    struct usb_device *d = alloc_device(low_speed, hc);
     if (!d) {
         kprintf("[usb] no free device slot for %s\n", origin);
         return;
@@ -411,7 +545,7 @@ void usb_enumerate_default(int low_speed, const char *origin) {
 
     int iface, proto, ep, ep_max, ep_int;
     int ep_in, ep_out;
-    int comm_iface, data_iface;
+    int comm_iface, data_iface, data_alt, imac_idx;
 
     if (find_hid_interface(full_cfg, total_len,
                            &iface, &proto, &ep, &ep_max, &ep_int)) {
@@ -424,6 +558,24 @@ void usb_enumerate_default(int low_speed, const char *origin) {
         kprintf("[usb] addr %d: MSC iface=%d  ep_in=IN%d  ep_out=OUT%d  max=%d\n",
                 d->addr, iface, ep_in, ep_out, ep_max);
         usb_msc_attach(d, iface, ep_in, ep_out, ep_max);
+        kfree(full_cfg);
+    } else if (find_cdc_ecm_interface(full_cfg, total_len,
+                                      &comm_iface, &data_iface,
+                                      &data_alt,
+                                      &ep_in, &ep_out, &ep_max,
+                                      &imac_idx))
+    {
+        /* CDC-ECM check goes BEFORE CDC-ACM because the comm
+         * interface bInterfaceClass matches for both (0x02); the
+         * subclass differentiator (0x06 ECM vs 0x02 ACM) makes the
+         * two scans independent, but we still prefer the more
+         * specific one. */
+        kprintf("[usb] addr %d: CDC-ECM comm=%d data=%d(alt%d) "
+                "ep_in=IN%d ep_out=OUT%d max=%d imac_str=%d\n",
+                d->addr, comm_iface, data_iface, data_alt,
+                ep_in, ep_out, ep_max, imac_idx);
+        usb_cdc_ecm_attach(d, comm_iface, data_iface, data_alt,
+                           ep_in, ep_out, ep_max, imac_idx);
         kfree(full_cfg);
     } else if (find_cdc_acm_interface(full_cfg, total_len,
                                       &comm_iface, &data_iface,
@@ -444,24 +596,57 @@ void usb_enumerate_default(int low_speed, const char *origin) {
 /* ---- Top-level init -------------------------------------------- */
 
 void usb_init(void) {
-    if (uhci_init() != 0) {
-        kprintf("[usb] no UHCI controller — USB stack disabled\n");
-        return;
+    int any_hc = 0;
+
+    /* EHCI first — it grabs ports from companions (CONFIGFLAG=1 in
+     * ehci_init). High-speed devices go through here at 480 Mbps;
+     * low/full-speed devices on the same physical ports get released
+     * to the UHCI companion below, which probes them next. */
+    if (ehci_present()) {
+        any_hc = 1;
+        int ehci_connected[16];
+        int ehci_n = 16;
+        ehci_probe_ports(ehci_connected, &ehci_n);
+        for (int i = 0; i < ehci_n; i++) {
+            if (!ehci_connected[i]) continue;
+            kprintf("[usb] ehci port %d: high-speed device attached\n", i);
+            char tag[24];
+            int o = 0;
+            tag[o++] = 'e'; tag[o++] = 'h'; tag[o++] = 'c'; tag[o++] = 'i';
+            tag[o++] = ' '; tag[o++] = 'p'; tag[o++] = 'o'; tag[o++] = 'r';
+            tag[o++] = 't'; tag[o++] = ' ';
+            if (i >= 10) tag[o++] = (char)('0' + i / 10);
+            tag[o++] = (char)('0' + i % 10);
+            tag[o] = 0;
+            usb_enumerate_default(/*low_speed=*/0, tag, &g_ehci_hc_ops);
+        }
     }
 
-    int connected[2], low_speed[2], n_ports = 2;
-    uhci_probe_ports(connected, low_speed, &n_ports);
-
-    for (int i = 0; i < n_ports; i++) {
-        if (connected[i]) {
-            kprintf("[usb] port %d: %s-speed device attached\n",
-                    i + 1, low_speed[i] ? "low" : "full");
-            char tag[16];
-            tag[0] = 'p'; tag[1] = 'o'; tag[2] = 'r'; tag[3] = 't';
-            tag[4] = ' '; tag[5] = (char)('0' + i + 1); tag[6] = 0;
-            usb_enumerate_default(low_speed[i], tag);
-        } else {
-            kprintf("[usb] port %d: no device\n", i + 1);
+    /* UHCI: low/full-speed devices left over after EHCI release.
+     * Existing PIIX3 setups put their ports here. */
+    if (uhci_init() == 0) {
+        any_hc = 1;
+        int connected[2], low_speed[2], n_ports = 2;
+        uhci_probe_ports(connected, low_speed, &n_ports);
+        for (int i = 0; i < n_ports; i++) {
+            if (connected[i]) {
+                kprintf("[usb] uhci port %d: %s-speed device attached\n",
+                        i + 1, low_speed[i] ? "low" : "full");
+                char tag[24];
+                int o = 0;
+                tag[o++] = 'u'; tag[o++] = 'h'; tag[o++] = 'c'; tag[o++] = 'i';
+                tag[o++] = ' '; tag[o++] = 'p'; tag[o++] = 'o'; tag[o++] = 'r';
+                tag[o++] = 't'; tag[o++] = ' ';
+                tag[o++] = (char)('0' + i + 1);
+                tag[o] = 0;
+                usb_enumerate_default(low_speed[i], tag, &g_uhci_hc_ops);
+            } else {
+                kprintf("[usb] uhci port %d: no device\n", i + 1);
+            }
         }
+    }
+
+    if (!any_hc) {
+        kprintf("[usb] no UHCI/EHCI controller — USB stack disabled\n");
     }
 }

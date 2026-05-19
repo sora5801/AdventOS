@@ -19,9 +19,17 @@ DESCRIPTION
       1..7    select color (white/red/yellow/green/cyan/blue/magenta)
       + / -   bigger / smaller brush
       c       clear canvas
+      Ctrl-S  save canvas to /tmp/paint.ppm (P6 PPM, 400x256)
       q       quit
 
     Exit after SECONDS (default 60) or 'q' or window close.
 
+    Save (session 150): pressing Ctrl-S writes the canvas area
+    (everything below the 24-px toolbar) to /tmp/paint.ppm as
+    a binary P6 PPM.  A toast notification confirms the save
+    with the byte count.  Re-open the result via:
+
+        wmview /tmp/paint.ppm
+
 SEE ALSO
-    wmd(1), wmtype(1), wmclock(1)
+    wmd(1), wmview(1), wmtype(1)

@@ -34,6 +34,13 @@ int  tmpfs_open(const char *name);
  * out-of-table. Used by sys_open_w (the `>` redirect target). */
 int  tmpfs_create(const char *name);
 
+/* Open existing tmpfile for append, or create empty one if missing.
+ * Bumps refs; returns idx. -1 on out-of-table. Used by sys_open_a
+ * (the `>>` redirect target). Unlike tmpfs_create, an existing file
+ * keeps its content — tmpfs_write always tacks bytes onto f->size,
+ * so any subsequent writes land at end-of-file. */
+int  tmpfs_create_append(const char *name);
+
 /* Drop one fd reference. The data stays — only when "unlinked" (we
  * don't have unlink yet) AND refs==0 would the buffer get freed. */
 void tmpfs_close(int idx);

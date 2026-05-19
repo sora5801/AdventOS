@@ -105,12 +105,22 @@ int main(int argc, char **argv) {
         /* Status strip. */
         wm_fill_rect(&win, 0, 0, WIN_W, 18,
                      has_focus ? 0x4080E0u : 0x303030u);
-        const char *label = mode_12h ? "Clock (12h - space toggles)"
-                                     : "Clock (24h - space toggles)";
+        const char *label = mode_12h ? "Clock PST (12h - space toggles)"
+                                     : "Clock PST (24h - space toggles)";
         gfx_text(&sctx, 6, 5, label, GFX_WHITE, GFX_TRANSPARENT);
 
-        /* Big time display, centered-ish. */
-        unsigned int ts = sys_time();
+        /* Big time display, centered-ish.
+         *
+         * Session 142 — sys_time() returns UTC epoch seconds (RTC
+         * + ntp_sync, see kernel/syscall.c:SYS_TIME).  Subtract a
+         * fixed 8-hour offset so the displayed wall-clock is
+         * Pacific Standard Time.  No DST handling: PST is
+         * year-round UTC-8; in summer (Pacific Daylight) this will
+         * read one hour behind local clocks.  Adjust the literal
+         * below to taste — eventually we'll plumb a TZ env var. */
+        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        unsigned int raw = sys_time();
+        unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         char tbuf[16];
         int len = format_time(tbuf, ts, mode_12h);
         int text_w = len * 16;
@@ -118,10 +128,10 @@ int main(int argc, char **argv) {
         int y = 32;
         gfx_text_n(&sctx, x, y, tbuf, 2, GFX_GREEN, GFX_TRANSPARENT);
 
-        /* Footer with the raw timestamp. */
+        /* Footer with the raw UTC epoch (untranslated). */
         char foot[40]; int n = 0;
-        const char *p = "ts="; while (*p && n < 39) foot[n++] = *p++;
-        unsigned int v = ts;
+        const char *p = "utc="; while (*p && n < 39) foot[n++] = *p++;
+        unsigned int v = raw;
         char d[12]; int dn = 0;
         if (v == 0) d[dn++] = '0';
         else while (v) { d[dn++] = '0' + (char)(v % 10); v /= 10; }

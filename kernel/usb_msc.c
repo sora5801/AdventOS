@@ -40,6 +40,7 @@
 #include "usb.h"
 #include "usb_core.h"
 #include "uhci.h"
+#include "usb_hc.h"
 #include "blkdev.h"
 #include "kmalloc.h"
 #include "kprintf.h"
@@ -81,9 +82,9 @@ static int msc_bulk_reset(struct msc_device *m, int iface) {
         .wIndex        = (uint16_t)iface,
         .wLength       = 0,
     };
-    return uhci_control_transfer(m->dev->addr, m->dev->low_speed,
-                                 m->dev->ep0_max_packet,
-                                 &s, 0, 0, 0);
+    return m->dev->hc->control_transfer(m->dev->addr, m->dev->low_speed,
+                                        m->dev->ep0_max_packet,
+                                        &s, 0, 0, 0);
 }
 
 /* ---- BOT command driver ---------------------------------------- */
@@ -125,8 +126,8 @@ static int bot_command(struct msc_device *m,
     for (int i = 0; i < cb_len && i < 16; i++) cbw[15 + i] = cb[i];
 
     /* Send CBW. */
-    int rc = uhci_bulk_out(m->dev->addr, m->ep_max, m->ep_out,
-                           cbw, 31, &m->out_toggle);
+    int rc = m->dev->hc->bulk_out(m->dev->addr, m->ep_max, m->ep_out,
+                                  cbw, 31, &m->out_toggle);
     if (rc != 31) {
         kprintf("[msc] CBW send rc=%d (expected 31)\n", rc);
         return -1;
@@ -135,11 +136,11 @@ static int bot_command(struct msc_device *m,
     /* Data phase. */
     if (data_len > 0) {
         if (data_in) {
-            rc = uhci_bulk_in(m->dev->addr, m->ep_max, m->ep_in,
-                              data, data_len, &m->in_toggle);
+            rc = m->dev->hc->bulk_in(m->dev->addr, m->ep_max, m->ep_in,
+                                     data, data_len, &m->in_toggle);
         } else {
-            rc = uhci_bulk_out(m->dev->addr, m->ep_max, m->ep_out,
-                               data, data_len, &m->out_toggle);
+            rc = m->dev->hc->bulk_out(m->dev->addr, m->ep_max, m->ep_out,
+                                      data, data_len, &m->out_toggle);
         }
         if (rc < 0) {
             kprintf("[msc] data phase rc=%d (wanted %d)\n", rc, data_len);
@@ -150,8 +151,8 @@ static int bot_command(struct msc_device *m,
 
     /* CSW. */
     uint8_t csw[13];
-    rc = uhci_bulk_in(m->dev->addr, m->ep_max, m->ep_in,
-                      csw, 13, &m->in_toggle);
+    rc = m->dev->hc->bulk_in(m->dev->addr, m->ep_max, m->ep_in,
+                             csw, 13, &m->in_toggle);
     if (rc != 13) {
         kprintf("[msc] CSW recv rc=%d\n", rc);
         return -1;

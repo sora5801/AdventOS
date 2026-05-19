@@ -45,7 +45,12 @@ int usb_hid_set_idle    (struct usb_device *d, int interface, int duration_4ms);
  *
  * `low_speed` is the speed of the freshly-reset device (1 for 1.5 Mbps
  * low-speed, 0 for 12 Mbps full-speed). `origin` is a human-readable
- * tag for logging — "port 1" or "hub 2 port 3", etc. */
-void usb_enumerate_default(int low_speed, const char *origin);
+ * tag for logging — "port 1" or "hub 2 port 3", etc.
+ *
+ * `hc` selects the host controller this device lives on; every
+ * subsequent transfer for the device dispatches through hc->* fnptrs. */
+struct usb_hc_ops;
+void usb_enumerate_default(int low_speed, const char *origin,
+                           const struct usb_hc_ops *hc);
 
 #endif

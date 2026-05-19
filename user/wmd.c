@@ -78,11 +78,18 @@ struct window {
     int  minimized;
     int  maximized;
     int  saved_x, saved_y, saved_w, saved_h;
+
+    /* Session 147 — virtual desktop / workspace assignment.  Each
+     * window lives on exactly one of NUM_WORKSPACES (4) desktops.
+     * Paint + hit-test skip windows whose workspace != current. */
+    int  workspace;
 };
 
+#define NUM_WORKSPACES 4
 static struct window g_windows[MAX_WINDOWS];
 static int g_window_count;
 static int g_z_counter = 1;
+static int g_current_workspace = 0;
 
 /* Drag state. window_idx == -1 means no drag. */
 /* Session 119 — app launcher catalog.  Keep paths in lockstep with
@@ -103,6 +110,9 @@ static const struct launch_entry g_launch_items[] = {
     { "wmterm",  "/wmterm.elf"   },
     { "wmedit",  "/wmedit.elf"   },
     { "wmcalc",  "/wmcalc.elf"   },
+    { "wmview",  "/wmview.elf"   },   /* session 149 — image viewer */
+    /* Session 145 — Shell entry removed; user noted it was a
+     * redundant alias for wmterm which already does the same thing. */
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -118,19 +128,47 @@ struct ctx_menu_state {
 };
 static struct ctx_menu_state g_ctx_menu;
 
-#define CTXMENU_W       100
+#define CTXMENU_W       128
 #define CTXMENU_ITEM_H  18
-#define CTXMENU_N_ITEMS 2
+/* Session 148 — extend context menu with "Move to WS N" entries
+ * for each of the 4 workspaces.  Total = 2 (Raise / Close) +
+ * NUM_WORKSPACES = 6 items.  Selecting "Move to WS <current>" is a
+ * no-op (window stays put); keeping the entry there gives a fixed
+ * menu layout so muscle memory works. */
+#define CTXMENU_N_ITEMS (2 + NUM_WORKSPACES)
 
 static const char *g_ctx_labels[CTXMENU_N_ITEMS] = {
     "Raise",
     "Close",
+    "Move to WS 1",
+    "Move to WS 2",
+    "Move to WS 3",
+    "Move to WS 4",
 };
 
 static int g_drag_idx = -1;
 static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
 static int g_prev_right;       /* session 124 — right-button edge */
+
+/* Session 143 — toast notifications.  Up to 4 stacked in the
+ * bottom-right; each lives ~3 s (180 frames @ 60fps) with a 0.5 s
+ * fade tail.  Drained from the kernel notify ring once per frame. */
+#define TOAST_MAX           4
+#define TOAST_TEXT_MAX     64
+#define TOAST_LIFE_FRAMES 180
+#define TOAST_FADE_FRAMES  30
+#define TOAST_W           240
+#define TOAST_H            36
+#define TOAST_GAP           6
+#define TOAST_MARGIN       12
+struct toast_slot {
+    int            in_use;
+    char           text[TOAST_TEXT_MAX];
+    int            len;
+    unsigned int   spawn_frame;
+};
+static struct toast_slot g_toasts[TOAST_MAX];
 
 /* Session 131 — window resize.  When the user drags the 12x12 grip
  * in the bottom-right corner of a CLIENT window, we set
@@ -145,7 +183,25 @@ static int g_prev_right;       /* session 124 — right-button edge */
 #define RESIZE_GRIP 12
 #define WIN_MIN_W   80
 #define WIN_MIN_H   60
+/* Session 146 — resize from any edge / corner.  In addition to the
+ * session-131 SE grip we now hit-test a 6-pixel border on the W / E /
+ * S edges and 12x12 corner zones on SW / SE.  N edge + NW / NE corners
+ * deliberately don't resize because the top of the window is the title
+ * bar (drag-to-move + close/min/max buttons live there); making the
+ * top edge a resize zone would clash. */
+#define RESIZE_BORDER  6
+#define RESIZE_CORNER 12
+
+#define RES_NONE  0
+#define RES_S     1
+#define RES_W     2
+#define RES_E     3
+#define RES_SW    4
+#define RES_SE    5
+
 static int g_resize_idx = -1;
+static int g_resize_dir = RES_NONE;
+static int g_resize_anchor_x, g_resize_anchor_y;
 static int g_resize_anchor_w, g_resize_anchor_h;
 static int g_resize_anchor_mx, g_resize_anchor_my;
 
@@ -163,10 +219,12 @@ static int fmt_u(char *buf, int cap, unsigned int v) {
     return out;
 }
 
-static void draw_cursor(struct gfx_ctx *ctx, int cx, int cy, unsigned int rgb) {
-    gfx_line(ctx, cx - CURSOR_R, cy, cx + CURSOR_R, cy, rgb);
-    gfx_line(ctx, cx, cy - CURSOR_R, cx, cy + CURSOR_R, rgb);
-}
+/* Session 142 — draw_cursor removed.  The wmd-drawn crosshair was
+ * redundant once session 141's usb-tablet locked QEMU's host
+ * pointer to the guest cursor coordinates.  The host cursor (the
+ * OS arrow) is now the only visible pointer; ms.x / ms.y still
+ * drive every click + drag handler below, just without a glyph
+ * painted over them. */
 
 /* Window content painters. */
 static void paint_clock(struct gfx_ctx *ctx, struct window *w,
@@ -375,6 +433,9 @@ static int hit_test(int px, int py) {
         struct window *w = &g_windows[order[i]];
         /* Session 133 — minimized windows don't accept input. */
         if (w->minimized) continue;
+        /* Session 147 — windows on other workspaces are invisible
+         * AND don't receive clicks. */
+        if (w->workspace != g_current_workspace) continue;
         if (px >= w->x && px < w->x + w->w &&
             py >= w->y && py < w->y + w->h) {
             return order[i];
@@ -497,7 +558,12 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     int clock_w = 132;
     int clock_x = fb_w - clock_w;
     {
-        unsigned int ts = sys_time();
+        /* Session 145 — display Pacific Standard Time (UTC-8) so
+         * the taskbar clock matches wmclock's PST output instead
+         * of staying on raw UTC.  Same fixed offset, no DST. */
+        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        unsigned int raw = sys_time();
+        unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         unsigned int min = (ts / 60u) % 60u;
         unsigned int hr  = (ts / 3600u) % 24u;
         char buf[6];
@@ -551,8 +617,16 @@ static void paint_ctx_menu(struct gfx_ctx *ctx) {
         int iy = y + i * CTXMENU_ITEM_H;
         if (i > 0) gfx_line(ctx, x + 1, iy, x + CTXMENU_W - 2, iy,
                             0x404850u);
+        /* Session 148 — dim the "Move to WS <current>" row so the
+         * user knows it's a no-op (the window is already on this
+         * workspace).  Items 2..5 correspond to workspaces 0..3. */
+        unsigned int fg = GFX_WHITE;
+        if (i >= 2 && i < 2 + NUM_WORKSPACES
+            && (i - 2) == g_current_workspace) {
+            fg = 0x707880u;     /* dimmed */
+        }
         gfx_text(ctx, x + 8, iy + 5, g_ctx_labels[i],
-                 GFX_WHITE, GFX_TRANSPARENT);
+                 fg, GFX_TRANSPARENT);
     }
 }
 
@@ -594,14 +668,121 @@ static int in_titlebar(struct window *w, int px, int py) {
            py >= w->y && py < w->y + TITLE_H;
 }
 
-/* Session 131 — is (px,py) inside the bottom-right resize grip?
- * Only CLIENT windows get a grip; demo windows ignore resize. */
+/* Session 143 — drain pending notifications from the kernel ring
+ * into our toast slot array.  Called once per frame; up to TOAST_MAX
+ * fresh toasts can arrive per tick before older ones must retire. */
+static void drain_toasts(unsigned int frame_no) {
+    for (int safety = 0; safety < TOAST_MAX; safety++) {
+        char buf[TOAST_TEXT_MAX];
+        int n = sys_wm_poll_notify(buf, (int)sizeof(buf));
+        if (n <= 0) return;
+        /* Find a free slot (or the oldest, if all are in use). */
+        int slot = -1;
+        unsigned int oldest_frame = (unsigned int)-1;
+        int oldest = 0;
+        for (int i = 0; i < TOAST_MAX; i++) {
+            if (!g_toasts[i].in_use) { slot = i; break; }
+            if (g_toasts[i].spawn_frame < oldest_frame) {
+                oldest_frame = g_toasts[i].spawn_frame;
+                oldest = i;
+            }
+        }
+        if (slot < 0) slot = oldest;
+        if (n > TOAST_TEXT_MAX - 1) n = TOAST_TEXT_MAX - 1;
+        for (int i = 0; i < n; i++) g_toasts[slot].text[i] = buf[i];
+        g_toasts[slot].text[n] = 0;
+        g_toasts[slot].len    = n;
+        g_toasts[slot].in_use = 1;
+        g_toasts[slot].spawn_frame = frame_no;
+    }
+}
+
+/* Lerp from c1 to c2 by alpha/255 (0 = c1, 255 = c2). */
+static unsigned int lerp_color(unsigned int c1, unsigned int c2, int a) {
+    if (a <= 0)   return c1;
+    if (a >= 255) return c2;
+    int r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+    int r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+    int r = r1 + ((r2 - r1) * a) / 255;
+    int g = g1 + ((g2 - g1) * a) / 255;
+    int b = b1 + ((b2 - b1) * a) / 255;
+    return ((unsigned int)r << 16) | ((unsigned int)g << 8) | (unsigned int)b;
+}
+
+/* Session 143 — paint toast notifications.  Stack bottom-up in the
+ * lower-right corner, above the taskbar.  Each toast fades by
+ * lerping its bg / fg toward the wallpaper darkness during the
+ * last TOAST_FADE_FRAMES of its life. */
+static void paint_toasts(struct gfx_ctx *ctx, unsigned int frame_no) {
+    int fb_w = (int)ctx->width;
+    int fb_h = (int)ctx->height;
+    int stack_y = fb_h - TASKBAR_H - TOAST_MARGIN - TOAST_H;
+    for (int i = 0; i < TOAST_MAX; i++) {
+        struct toast_slot *t = &g_toasts[i];
+        if (!t->in_use) continue;
+        unsigned int age = frame_no - t->spawn_frame;
+        if (age >= TOAST_LIFE_FRAMES) { t->in_use = 0; continue; }
+        /* Fade alpha 0..255 going DOWN as age approaches life. */
+        int alpha = 255;
+        if (age > TOAST_LIFE_FRAMES - TOAST_FADE_FRAMES) {
+            int into = (int)age - (TOAST_LIFE_FRAMES - TOAST_FADE_FRAMES);
+            alpha = 255 - (into * 255) / TOAST_FADE_FRAMES;
+            if (alpha < 0) alpha = 0;
+        }
+        unsigned int bg     = lerp_color(0x0A0A14u, 0x202830u, alpha);
+        unsigned int border = lerp_color(0x0A0A14u, 0x4080E0u, alpha);
+        unsigned int text   = lerp_color(0x0A0A14u, 0xE0F0FFu, alpha);
+
+        int tx = fb_w - TOAST_W - TOAST_MARGIN;
+        int ty = stack_y;
+        gfx_fill_rect(ctx, tx, ty, TOAST_W, TOAST_H, bg);
+        gfx_rect    (ctx, tx, ty, TOAST_W, TOAST_H, border);
+        /* Soft 2-px shadow on right + bottom for depth. */
+        gfx_fill_rect(ctx, tx + TOAST_W, ty + 2, 2, TOAST_H,
+                      lerp_color(0x0A0A14u, 0x050508u, alpha));
+        gfx_fill_rect(ctx, tx + 2, ty + TOAST_H, TOAST_W, 2,
+                      lerp_color(0x0A0A14u, 0x050508u, alpha));
+        gfx_text(ctx, tx + 10, ty + (TOAST_H - 8) / 2,
+                 t->text, text, GFX_TRANSPARENT);
+        stack_y -= TOAST_H + TOAST_GAP;
+        if (stack_y < 0) break;     /* off-screen; later toasts hidden */
+    }
+}
+
+/* Session 146 — multi-zone resize hit-test.  Returns RES_NONE if the
+ * click isn't on a resize zone, or one of RES_S / RES_W / RES_E / RES_SW
+ * / RES_SE for which edge/corner was hit.  Corner zones (12x12) take
+ * priority over edge zones (6 px wide).  Top edge / NW / NE corners
+ * deliberately don't resize — title-bar drag + buttons own that strip. */
+static int in_resize_zone(struct window *w, int px, int py) {
+    if (w->kind != KIND_CLIENT) return RES_NONE;
+    int rx = px - w->x;
+    int ry = py - w->y;
+    if (rx < 0 || ry < 0 || rx >= w->w || ry >= w->h) return RES_NONE;
+
+    int near_l = rx < RESIZE_BORDER;
+    int near_r = rx >= w->w - RESIZE_BORDER;
+    int near_b = ry >= w->h - RESIZE_BORDER;
+    int in_corner_l = rx < RESIZE_CORNER;
+    int in_corner_r = rx >= w->w - RESIZE_CORNER;
+    int in_corner_b = ry >= w->h - RESIZE_CORNER;
+
+    /* Bottom corners take priority over edges. */
+    if (in_corner_b && near_l) return RES_SW;
+    if (in_corner_b && (in_corner_r || near_r)) return RES_SE;
+    if (near_b)               return RES_S;
+    /* Edge zones must skip the title-bar height so left/right drags
+     * up there don't conflict with the title-bar's own click handlers. */
+    if (ry < TITLE_H)         return RES_NONE;
+    if (near_l)               return RES_W;
+    if (near_r)               return RES_E;
+    return RES_NONE;
+}
+
+/* Compatibility wrapper for code paths that just want "is this still
+ * the old SE grip?".  Returns 1 if the zone is SE, 0 otherwise. */
 static int in_resize_grip(struct window *w, int px, int py) {
-    if (w->kind != KIND_CLIENT) return 0;
-    int gx = w->x + w->w - RESIZE_GRIP;
-    int gy = w->y + w->h - RESIZE_GRIP;
-    return px >= gx && px < gx + RESIZE_GRIP &&
-           py >= gy && py < gy + RESIZE_GRIP;
+    return in_resize_zone(w, px, py) == RES_SE;
 }
 
 static void init_demo_windows(unsigned int fb_w, unsigned int fb_h) {
@@ -691,6 +872,10 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
             w->client_pixels = (unsigned int *)(uintptr_t)m.wmd_va;
             w->surface_w     = m.w;
             w->surface_h     = m.h;
+            /* Session 147 — new clients open on the current
+             * workspace.  No way for the client to specify yet;
+             * future: argv flag or window-hint syscall. */
+            w->workspace     = g_current_workspace;
         } else if (m.op == 2) {
             /* Destroy. Compact the array. */
             struct window *w = find_window_by_client_id(m.id);
@@ -702,6 +887,73 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
         }
     }
     return n;
+}
+
+/* Session 151 — serialise the whole framebuffer to a P6 PPM at
+ * /tmp/screen.ppm.  Reads ctx->fb directly; handles 24-bpp BGR
+ * (the AdventOS VBE default) and 32-bpp BGRA.  Streams one row at
+ * a time so we never need a 2 MB scratch buffer in wmd.bin. */
+static void itoa_app_wmd(char *buf, int *pos, int v) {
+    char t[12]; int n = 0;
+    if (v == 0) { t[n++] = '0'; }
+    else { while (v) { t[n++] = '0' + (v % 10); v /= 10; } }
+    while (n-- > 0) buf[(*pos)++] = t[n];
+}
+
+static void save_screenshot(struct gfx_ctx *ctx) {
+    int fd = sys_open_w("/tmp/screen.ppm");
+    if (fd < 0) {
+        const char *m = "screenshot: save failed";
+        int ml = 0; while (m[ml]) ml++;
+        sys_wm_notify(m, ml);
+        return;
+    }
+    int w = (int)ctx->width;
+    int h = (int)ctx->height;
+
+    /* Header. */
+    char hdr[40]; int hn = 0;
+    hdr[hn++] = 'P'; hdr[hn++] = '6'; hdr[hn++] = '\n';
+    itoa_app_wmd(hdr, &hn, w);
+    hdr[hn++] = ' ';
+    itoa_app_wmd(hdr, &hn, h);
+    hdr[hn++] = '\n';
+    hdr[hn++] = '2'; hdr[hn++] = '5'; hdr[hn++] = '5'; hdr[hn++] = '\n';
+    sys_write(fd, hdr, hn);
+
+    /* Per-row buffer.  1024 max width × 3 bytes = 3072.  Allocate
+     * generously on the stack so we cover up to 1280-wide modes. */
+    unsigned char row[1280 * 3];
+    int bytes_per_px = (int)ctx->bpp / 8;
+    int pitch = (int)ctx->pitch;
+    int total = hn;
+    for (int y = 0; y < h; y++) {
+        unsigned char *fb_row = (unsigned char *)ctx->fb_real + y * pitch;
+        for (int x = 0; x < w; x++) {
+            /* AdventOS FB is little-endian BGR in memory for both
+             * 24-bpp and 32-bpp paths (see libgfx/libgfx.c
+             * put_packed).  Byte 0 = B, byte 1 = G, byte 2 = R. */
+            unsigned char *p = fb_row + x * bytes_per_px;
+            row[x*3 + 0] = p[2];   /* R */
+            row[x*3 + 1] = p[1];   /* G */
+            row[x*3 + 2] = p[0];   /* B */
+        }
+        sys_write(fd, row, w * 3);
+        total += w * 3;
+    }
+    sys_close(fd);
+
+    /* Toast: "screenshot: /tmp/screen.ppm (NNN B)" */
+    char tn[64]; int tnn = 0;
+    const char *m = "screenshot: /tmp/screen.ppm (";
+    while (*m && tnn < (int)sizeof(tn) - 1) tn[tnn++] = *m++;
+    itoa_app_wmd(tn, &tnn, total);
+    if (tnn < (int)sizeof(tn) - 3) {
+        tn[tnn++] = ' '; tn[tnn++] = 'B'; tn[tnn++] = ')';
+    }
+    tn[tnn] = 0;
+    int tlen = 0; while (tn[tlen]) tlen++;
+    sys_wm_notify(tn, tlen);
 }
 
 int main(int argc, char **argv) {
@@ -758,6 +1010,27 @@ int main(int argc, char **argv) {
         /* Session 112 — drain WM client events first so newly-
          * registered windows appear on this frame. */
         drain_wm_messages(ctx.width, ctx.height);
+        /* Session 143 — drain pending toast notifications. */
+        drain_toasts((unsigned int)tick);
+        /* Session 147 — drain pending workspace switch request. */
+        {
+            int ws = sys_wm_poll_workspace();
+            if (ws >= 0 && ws < NUM_WORKSPACES &&
+                ws != g_current_workspace) {
+                g_current_workspace = ws;
+                /* Drop focus when switching; the focused window is
+                 * almost certainly on the previous workspace and
+                 * would otherwise be invisible-but-receiving-keys. */
+                focused = -1;
+            }
+        }
+        /* Session 151 — drain pending Alt+P screenshot request.
+         * Save BEFORE the rest of this frame's paint so the saved
+         * image reflects last frame's content (not the in-flight
+         * frame which only has the wallpaper painted so far). */
+        if (sys_wm_poll_screenshot()) {
+            save_screenshot(&ctx);
+        }
 
         struct sys_mouse_state ms;
         if (sys_mouse_poll(&ms) < 0) break;
@@ -796,6 +1069,23 @@ int main(int argc, char **argv) {
         }
 
         if (pressed) {
+            /* Session 147 — top-bar workspace switcher.  Buttons live
+             * at y=2..15, x=44..139 (four 22-wide buttons at +24).
+             * Clicking switches workspace without dropping focus
+             * tracking through the rest of the click handlers. */
+            if (ms.y >= 2 && ms.y < 16 &&
+                ms.x >= 44 && ms.x < 44 + NUM_WORKSPACES * 24) {
+                int ws = (ms.x - 44) / 24;
+                /* Reject clicks in the gap between buttons (22 wide +
+                 * 2 gap = 24 cell). */
+                if ((ms.x - 44) % 24 < 22 && ws < NUM_WORKSPACES) {
+                    if (ws != g_current_workspace) {
+                        g_current_workspace = ws;
+                        focused = -1;
+                    }
+                    goto after_press_hit;
+                }
+            }
             /* Session 124 — context-menu item click intercept. */
             if (g_ctx_menu.open) {
                 int item = ctx_menu_hit(ms.x, ms.y);
@@ -817,6 +1107,21 @@ int main(int argc, char **argv) {
                     struct sys_wm_event ev = {0};
                     ev.type = WM_EV_CLOSE;
                     sys_wm_event_push(g_ctx_menu.target_id, &ev);
+                } else if (item >= 2 && item < 2 + NUM_WORKSPACES
+                           && target_idx >= 0) {
+                    /* Session 148 — Move to WS <item-2>.  If the
+                     * destination is the current workspace, this is
+                     * a no-op.  Otherwise the window's `workspace`
+                     * field changes; on the next frame paint + hit-
+                     * test on the current workspace skip it (gone
+                     * from view), and selecting that workspace via
+                     * the top-bar or Alt+N reveals it again. */
+                    int dst = item - 2;
+                    g_windows[target_idx].workspace = dst;
+                    if (dst != g_current_workspace
+                        && focused == target_idx) {
+                        focused = -1;
+                    }
                 }
                 g_ctx_menu.open = 0;
                 goto after_press_hit;
@@ -923,9 +1228,18 @@ int main(int argc, char **argv) {
                     /* Session 131 — resize grip wins over title-bar
                      * drag because the grip can lie behind/inside
                      * a title bar's bbox on tiny windows.  We test
-                     * the grip first. */
-                    if (in_resize_grip(&g_windows[hit], ms.x, ms.y)) {
+                     * the grip first.
+                     *
+                     * Session 146 — generalised: hit-test all 5
+                     * resize zones (S / W / E / SW / SE).  Any match
+                     * starts a directional resize; the motion handler
+                     * uses g_resize_dir to know which sides to move. */
+                    int zone = in_resize_zone(&g_windows[hit], ms.x, ms.y);
+                    if (zone != RES_NONE) {
                         g_resize_idx       = hit;
+                        g_resize_dir       = zone;
+                        g_resize_anchor_x  = g_windows[hit].x;
+                        g_resize_anchor_y  = g_windows[hit].y;
                         g_resize_anchor_w  = g_windows[hit].w;
                         g_resize_anchor_h  = g_windows[hit].h;
                         g_resize_anchor_mx = ms.x;
@@ -1040,6 +1354,7 @@ int main(int argc, char **argv) {
             }
             g_drag_idx   = -1;
             g_resize_idx = -1;
+            g_resize_dir = RES_NONE;
         }
         if (g_drag_idx >= 0) {
             struct window *w = &g_windows[g_drag_idx];
@@ -1053,19 +1368,64 @@ int main(int argc, char **argv) {
             w->x = nx;
             w->y = ny;
         }
-        /* Session 131 — resize-in-progress.  Outer (w, h) tracks
-         * the cursor delta from the anchor; clamp to a sane min
-         * and to the FB bounds. */
+        /* Session 131 / 146 — resize-in-progress.  Geometry update
+         * depends on g_resize_dir: S/E grow/shrink only on the edge
+         * being dragged; W shrinks/grows from the left (also moves
+         * x); SW combines W + S; SE = original 131 behaviour.  Top
+         * edge resizing isn't supported (the title bar owns the top
+         * 18 px). */
         if (g_resize_idx >= 0) {
             struct window *w = &g_windows[g_resize_idx];
-            int nw = g_resize_anchor_w + (ms.x - g_resize_anchor_mx);
-            int nh = g_resize_anchor_h + (ms.y - g_resize_anchor_my);
-            if (nw < WIN_MIN_W) nw = WIN_MIN_W;
-            if (nh < WIN_MIN_H) nh = WIN_MIN_H;
-            if (w->x + nw > (int)ctx.width  - 2)  nw = (int)ctx.width  - 2 - w->x;
-            if (w->y + nh > (int)ctx.height - 2)  nh = (int)ctx.height - 2 - w->y;
-            w->w = nw;
-            w->h = nh;
+            int dx = ms.x - g_resize_anchor_mx;
+            int dy = ms.y - g_resize_anchor_my;
+            int new_x = g_resize_anchor_x;
+            int new_y = g_resize_anchor_y;
+            int new_w = g_resize_anchor_w;
+            int new_h = g_resize_anchor_h;
+
+            int do_w = 0, do_e = 0, do_s = 0;
+            switch (g_resize_dir) {
+                case RES_S:  do_s = 1; break;
+                case RES_W:  do_w = 1; break;
+                case RES_E:  do_e = 1; break;
+                case RES_SW: do_w = 1; do_s = 1; break;
+                case RES_SE: do_e = 1; do_s = 1; break;
+                default: break;
+            }
+
+            if (do_e) new_w = g_resize_anchor_w + dx;
+            if (do_w) {
+                new_x = g_resize_anchor_x + dx;
+                new_w = g_resize_anchor_w - dx;
+            }
+            if (do_s) new_h = g_resize_anchor_h + dy;
+
+            /* Min-size clamps respect which side is anchored: when
+             * dragging W, shrinking past the min should clamp from
+             * the LEFT side, not from new_w directly (otherwise x
+             * runs past where the user expects). */
+            if (new_w < WIN_MIN_W) {
+                if (do_w) new_x = g_resize_anchor_x + g_resize_anchor_w - WIN_MIN_W;
+                new_w = WIN_MIN_W;
+            }
+            if (new_h < WIN_MIN_H) new_h = WIN_MIN_H;
+
+            /* FB-edge clamps. */
+            if (new_x < 0) {
+                if (do_w) new_w += new_x;     /* shrink to fit */
+                new_x = 0;
+            }
+            if (new_x + new_w > (int)ctx.width  - 2)
+                new_w = (int)ctx.width  - 2 - new_x;
+            if (new_y + new_h > (int)ctx.height - 2)
+                new_h = (int)ctx.height - 2 - new_y;
+            if (new_w < WIN_MIN_W) new_w = WIN_MIN_W;
+            if (new_h < WIN_MIN_H) new_h = WIN_MIN_H;
+
+            w->x = new_x;
+            w->y = new_y;
+            w->w = new_w;
+            w->h = new_h;
         }
         g_prev_left = left;
 
@@ -1198,8 +1558,24 @@ int main(int argc, char **argv) {
 
         /* Top status bar across the screen. */
         gfx_fill_rect(&ctx, 0, 0, (int)ctx.width, 18, GFX_DARK_GREY);
-        gfx_text(&ctx, 8, 5, "wmd - AdventOS Path C session 111",
+        gfx_text(&ctx, 8, 5, "wmd",
                  GFX_WHITE, GFX_TRANSPARENT);
+
+        /* Session 147 — workspace indicator + clickable switcher.
+         * Four 22x14 buttons starting at x=44, y=2 ("1" "2" "3" "4").
+         * Current workspace is filled in cyan; others in slate. */
+        for (int ws = 0; ws < NUM_WORKSPACES; ws++) {
+            int bx = 44 + ws * 24;
+            int by = 2;
+            unsigned int fill = (ws == g_current_workspace)
+                                ? GFX_CYAN : 0x303848u;
+            gfx_fill_rect(&ctx, bx, by, 22, 14, fill);
+            gfx_rect    (&ctx, bx, by, 22, 14, GFX_WHITE);
+            char dig[2] = { (char)('1' + ws), 0 };
+            gfx_text(&ctx, bx + 8, by + 3, dig,
+                     (ws == g_current_workspace) ? GFX_BLACK : GFX_WHITE,
+                     GFX_TRANSPARENT);
+        }
         /* Session 124 — show the focused window's title on the
          * right side of the top bar (when there is one).  Aligned
          * to roughly column = fb_w/2 so it doesn't overlap the
@@ -1224,6 +1600,10 @@ int main(int argc, char **argv) {
             /* Session 133 — minimized windows aren't drawn (taskbar
              * button is still drawn; click it to restore). */
             if (g_windows[idx].minimized) continue;
+            /* Session 147 — windows on other workspaces are
+             * invisible.  They keep their geometry + state, just
+             * skip painting. */
+            if (g_windows[idx].workspace != g_current_workspace) continue;
             paint_window(&ctx, &g_windows[idx],
                          idx == focused, t_sec, (unsigned int)tick);
         }
@@ -1239,11 +1619,16 @@ int main(int argc, char **argv) {
         /* Session 124 — right-click context menu on top of
          * everything (last paint wins). */
         paint_ctx_menu(&ctx);
+        /* Session 143 — toasts above context menu so they always
+         * stay readable even if a menu happens to pop near the
+         * notification stack. */
+        paint_toasts(&ctx, (unsigned int)tick);
 
-        /* Cursor: red if dragging, otherwise white. */
-        unsigned int cursor_rgb = (g_drag_idx >= 0) ? GFX_RED : GFX_WHITE;
-        if (left && g_drag_idx < 0) cursor_rgb = GFX_YELLOW; /* click on bg */
-        draw_cursor(&ctx, ms.x, ms.y, cursor_rgb);
+        /* Session 142 — cursor glyph removed; QEMU's host pointer
+         * (synced to ms.x / ms.y via usb-tablet, session 141) is
+         * the visible pointer.  Calibration marker from session
+         * 144 also removed now that PS/2 drift is silenced and
+         * the kernel pointer tracks the host pointer 1:1. */
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
