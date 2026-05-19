@@ -62,6 +62,27 @@ static int   g_len;
 static int   g_cur;          /* byte offset into g_buf */
 static int   g_dirty;        /* 1 if buffer modified since load/save */
 static char  g_path[64];
+/* Session 140 — drag selection.  g_sel_anchor is the byte offset
+ * where the most recent mouse-press landed (or -1 if no selection
+ * is in progress).  The selection range is [min(anchor, cur),
+ * max(anchor, cur)); empty when anchor == cur.  g_drag is 1 while
+ * the left mouse button is held down (between PRESS and RELEASE)
+ * so MOUSE_MOVE knows whether to extend the selection. */
+static int   g_sel_anchor = -1;
+static int   g_drag;
+static int   g_scroll_row;   /* hoisted out of main() so byte_at_xy
+                              * can use it from event handlers */
+
+static int sel_lo(void) {
+    return g_sel_anchor < g_cur ? g_sel_anchor : g_cur;
+}
+static int sel_hi(void) {
+    return g_sel_anchor < g_cur ? g_cur : g_sel_anchor;
+}
+static int sel_active(void) {
+    return g_sel_anchor >= 0 && g_sel_anchor != g_cur;
+}
+static void sel_clear(void) { g_sel_anchor = -1; }
 
 /* Compute (row, col) for a given byte offset. */
 static void cursor_rowcol(int off, int *row, int *col) {
@@ -126,6 +147,37 @@ static void buf_delete(void) {
     g_len--;
     g_cur--;
     g_dirty = 1;
+}
+
+/* Session 140 — drop the active selection from the buffer.  Cursor
+ * lands at the deleted range's lower bound; selection collapses. */
+static void sel_delete(void) {
+    if (!sel_active()) return;
+    int lo = sel_lo();
+    int hi = sel_hi();
+    int n  = hi - lo;
+    for (int i = lo; i < g_len - n; i++) g_buf[i] = g_buf[i + n];
+    g_len -= n;
+    g_cur = lo;
+    g_sel_anchor = -1;
+    g_dirty = 1;
+}
+
+/* Compute the byte offset at the on-surface coordinates (ex, ey).
+ * Used by both MOUSE_PRESS (cursor place) and MOUSE_MOVE (extend
+ * selection during drag). */
+static int byte_at_xy(int ex, int ey) {
+    int rel_y = ey - HDR_H - 4;
+    int rel_x = ex - GRID_X;
+    if (rel_y < 0) rel_y = 0;
+    if (rel_x < 0) rel_x = 0;
+    int row = g_scroll_row + rel_y / LINE_H;
+    int col = rel_x / CELL_W;
+    int start = row_start_off(row);
+    int end   = row_start_off(row + 1);
+    if (end > start && g_buf[end - 1] == '\n') end--;
+    if (col > end - start) col = end - start;
+    return start + col;
 }
 
 /* Move cursor by direction.  d=='A' up, 'B' down, 'C' right, 'D' left. */
@@ -219,7 +271,7 @@ int main(int argc, char **argv) {
 
     const int max_rows = (WIN_H - HDR_H - FOOTER_H - 8) / LINE_H;
     const int max_cols = (WIN_W - 2 * GRID_X) / CELL_W;
-    int scroll_row = 0;
+    g_scroll_row = 0;
 
     for (int tick = 0; tick < total_ticks && !closed; tick++) {
         struct wm_event ev;
@@ -238,18 +290,60 @@ int main(int argc, char **argv) {
                     }
                     if (esc_state == 2) {
                         esc_state = 0;
-                        if (k == 'A' || k == 'B' || k == 'C' || k == 'D')
+                        if (k == 'A' || k == 'B' || k == 'C' || k == 'D') {
                             cursor_move((char)k);
+                            sel_clear();
+                        }
                         break;
                     }
                     if (k == 27) { esc_state = 1; break; }
                     if (k == 0x13) {              /* Ctrl+S — save */
-                        save_file();
+                        int rc = save_file();
+                        /* Session 143 — toast feedback. */
+                        char tn[80];
+                        int p = 0;
+                        const char *m = (rc == 0) ? "saved " : "save failed: ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        for (int i = 0; g_path[i] && p < (int)sizeof(tn) - 1; i++)
+                            tn[p++] = g_path[i];
+                        if (rc == 0) {
+                            const char *q = " (";
+                            while (*q && p < (int)sizeof(tn) - 1) tn[p++] = *q++;
+                            p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)g_len);
+                            const char *r = " B)";
+                            while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        }
+                        tn[p] = 0;
+                        wm_notify(tn);
                     } else if (k == 0x11) {       /* Ctrl+Q — quit */
                         closed = 1;
                     } else if (k == 0x03) {       /* Ctrl+C — copy */
-                        wm_clipboard_set(g_buf, g_len);
+                        int copied;
+                        if (sel_active()) {
+                            copied = sel_hi() - sel_lo();
+                            wm_clipboard_set(g_buf + sel_lo(), copied);
+                        } else {
+                            copied = g_len;
+                            wm_clipboard_set(g_buf, g_len);
+                        }
+                        /* Session 143 — toast on copy. */
+                        char tn[64];
+                        int p = 0;
+                        const char *m = "copied ";
+                        while (*m && p < (int)sizeof(tn) - 1) tn[p++] = *m++;
+                        p += dec(tn + p, (int)sizeof(tn) - p, (unsigned)copied);
+                        const char *r = " B";
+                        while (*r && p < (int)sizeof(tn) - 1) tn[p++] = *r++;
+                        tn[p] = 0;
+                        wm_notify(tn);
+                    } else if (k == 0x18) {       /* Ctrl+X — cut */
+                        if (sel_active()) {
+                            wm_clipboard_set(g_buf + sel_lo(),
+                                             sel_hi() - sel_lo());
+                            sel_delete();
+                        }
                     } else if (k == 0x16) {       /* Ctrl+V — paste */
+                        if (sel_active()) sel_delete();
                         char pb[BUF_MAX];
                         int pn = wm_clipboard_get(pb, (int)sizeof(pb));
                         if (pn > 0) {
@@ -257,30 +351,41 @@ int main(int argc, char **argv) {
                             for (int i = 0; i < pn; i++) buf_insert(pb[i]);
                         }
                     } else if (k == 0x08 || k == 0x7F) {
-                        buf_delete();
+                        if (sel_active()) sel_delete();
+                        else              buf_delete();
                     } else if (k == '\r' || k == '\n') {
+                        if (sel_active()) sel_delete();
                         buf_insert('\n');
                     } else if (k == '\t') {
+                        if (sel_active()) sel_delete();
                         for (int i = 0; i < 4; i++) buf_insert(' ');
                     } else if (k >= 0x20 && k <= 0x7E) {
+                        if (sel_active()) sel_delete();
                         buf_insert((char)k);
                     }
                     break;
                 }
                 case WM_EV_MOUSE_PRESS: {
-                    /* Click in the text region: position cursor by
-                     * mapping pixel (x,y) to a (row, col) within the
-                     * current viewport. */
-                    int rel_y = ev.y - HDR_H - 4;
-                    int rel_x = ev.x - GRID_X;
-                    if (rel_y < 0 || rel_x < 0) break;
-                    int row = scroll_row + rel_y / LINE_H;
-                    int col = rel_x / CELL_W;
-                    int start = row_start_off(row);
-                    int end   = row_start_off(row + 1);
-                    if (end > start && g_buf[end - 1] == '\n') end--;
-                    if (col > end - start) col = end - start;
-                    g_cur = start + col;
+                    /* Click in the text region: position cursor and
+                     * start a (potential) drag selection.  Anchor =
+                     * cursor; if the user drags, MOUSE_MOVE extends
+                     * the selection.  On RELEASE with no movement
+                     * the selection collapses (anchor cleared). */
+                    int off = byte_at_xy(ev.x, ev.y);
+                    g_cur = off;
+                    g_sel_anchor = off;
+                    g_drag = 1;
+                    break;
+                }
+                case WM_EV_MOUSE_MOVE: {
+                    if (g_drag) {
+                        g_cur = byte_at_xy(ev.x, ev.y);
+                    }
+                    break;
+                }
+                case WM_EV_MOUSE_RELEASE: {
+                    g_drag = 0;
+                    if (g_cur == g_sel_anchor) g_sel_anchor = -1;
                     break;
                 }
                 default: break;
@@ -290,10 +395,10 @@ int main(int argc, char **argv) {
         /* Scroll so the cursor stays in view. */
         int cur_row, cur_col;
         cursor_rowcol(g_cur, &cur_row, &cur_col);
-        if (cur_row < scroll_row) scroll_row = cur_row;
-        if (cur_row >= scroll_row + max_rows)
-            scroll_row = cur_row - max_rows + 1;
-        if (scroll_row < 0) scroll_row = 0;
+        if (cur_row < g_scroll_row) g_scroll_row = cur_row;
+        if (cur_row >= g_scroll_row + max_rows)
+            g_scroll_row = cur_row - max_rows + 1;
+        if (g_scroll_row < 0) g_scroll_row = 0;
 
         /* Repaint. */
         wm_clear(&win, has_focus ? 0x0A0A14u : 0x141414u);
@@ -308,29 +413,48 @@ int main(int argc, char **argv) {
 
         /* Text body. */
         int text_y0 = HDR_H + 4;
-        int byte = row_start_off(scroll_row);
+        int byte = row_start_off(g_scroll_row);
+        /* Session 140 — selection bounds (one byte half-open). */
+        int slo = sel_active() ? sel_lo() : -1;
+        int shi = sel_active() ? sel_hi() : -1;
         for (int r = 0; r < max_rows; r++) {
             int y = text_y0 + r * LINE_H;
             int col = 0;
             while (byte < g_len && g_buf[byte] != '\n') {
                 if (col < max_cols) {
+                    /* Selection highlight behind the glyph. */
+                    if (byte >= slo && byte < shi) {
+                        wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                     CELL_W, LINE_H, 0x305078u);
+                    }
                     gfx_glyph(&sctx, GRID_X + col * CELL_W, y,
                               g_buf[byte], 0xC0E0C0u, GFX_TRANSPARENT);
                 }
                 col++;
                 byte++;
             }
-            if (byte < g_len && g_buf[byte] == '\n') byte++;
-            if (byte >= g_len && col == 0 && r > cur_row - scroll_row) break;
+            /* Newline included in the selection range gets a one-
+             * cell highlight at end-of-line so cross-row drags read
+             * as continuous. */
+            if (byte < g_len && g_buf[byte] == '\n') {
+                if (col < max_cols && byte >= slo && byte < shi) {
+                    wm_fill_rect(&win, GRID_X + col * CELL_W, y,
+                                 CELL_W, LINE_H, 0x305078u);
+                }
+                byte++;
+            }
+            if (byte >= g_len && col == 0 && r > cur_row - g_scroll_row) break;
         }
 
-        /* Blinking caret. */
-        if (has_focus && ((caret_phase / 12) & 1) == 0) {
-            int cy = text_y0 + (cur_row - scroll_row) * LINE_H;
+        /* Blinking caret — 2-pixel vertical line at the cursor.  No
+         * caret while the selection is non-empty (the highlight
+         * already shows where the cursor end is). */
+        if (has_focus && !sel_active() && ((caret_phase / 12) & 1) == 0) {
+            int cy = text_y0 + (cur_row - g_scroll_row) * LINE_H;
             int cx = GRID_X + cur_col * CELL_W;
-            if (cur_row >= scroll_row && cur_row < scroll_row + max_rows
+            if (cur_row >= g_scroll_row && cur_row < g_scroll_row + max_rows
                 && cur_col <= max_cols) {
-                wm_fill_rect(&win, cx, cy, CELL_W, LINE_H - 2, 0xFFFFFFu);
+                wm_fill_rect(&win, cx, cy, 2, LINE_H - 1, 0xFFFFFFu);
             }
         }
         caret_phase++;

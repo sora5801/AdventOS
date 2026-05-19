@@ -13,18 +13,23 @@ DESCRIPTION
 
     Keys (only delivered when the window has keyboard focus —
     click into the window first):
-      printable ASCII   insert at cursor
-      Enter             insert newline
-      Backspace / DEL   delete char before cursor
-      Tab               insert 4 spaces
-      Arrow keys        move cursor up/down/left/right
+      printable ASCII   insert at cursor (replaces selection)
+      Enter             insert newline (replaces selection)
+      Backspace / DEL   delete selection if any, else char before
+      Tab               insert 4 spaces (replaces selection)
+      Arrow keys        move cursor; clears any active selection
       Ctrl+S            save buffer to PATH
       Ctrl+Q            quit
-      Ctrl+C            copy entire buffer to the global clipboard
+      Ctrl+C            copy selection (or whole buffer if none)
+      Ctrl+X            cut selection to clipboard
       Ctrl+V            paste clipboard contents at the cursor
+                        (replaces selection if any)
 
-    Mouse: clicking in the text region positions the cursor on
-    the row/col under the click.
+    Mouse: clicking places the cursor.  Click-and-drag selects a
+    range; the highlighted bytes have a blue background.  Drag
+    across rows for multi-line selection.  Caret is a 2-pixel
+    vertical line that blinks while focused and no selection is
+    active.
 
     The window title shows "wmedit  Ctrl-S save  Ctrl-Q quit"
     when focused.  The bottom status bar shows the path, a
