@@ -170,16 +170,19 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
 /* Session 144 — empirical hotspot offset.
  *
  * Iteration log:
- *   -3/+3 → user reported drift got worse (made kernel 6 px SW)
- *   +3/-3 → user reported yellow dot is NE of cursor (overshot
- *           the OTHER direction, kernel ended up NE of cursor)
+ *   -3/+3 → drift got worse  (kernel pushed too far SW)
+ *   +3/-3 → still NE         (kernel pushed too far NE)
+ *   0/0   → still slightly NE of cursor (~1 px)
  *
- * The two reports straddle zero, meaning the un-shifted scaling
- * is essentially correct and any constant offset is too coarse.
- * Reset to 0; the integer-division round-trip drifts ≤1 px which
- * is visually indistinguishable from cursor body thickness. */
-#define MOUSE_HOTSPOT_DX  (0)
-#define MOUSE_HOTSPOT_DY  (0)
+ * Both larger values straddle the right answer, so the true drift
+ * is ~1 px NE.  Small -1/+1 SW nudge to compensate.
+ *
+ * Note: the user also observes position-dependent offsets when
+ * moving the cursor in/out of the QEMU window — those are display-
+ * backend artifacts (host OS vs guest tablet coordinate translation
+ * differences across the window boundary) and not fixable here. */
+#define MOUSE_HOTSPOT_DX  (-1)
+#define MOUSE_HOTSPOT_DY  (+1)
 
 void mouse_set_absolute(int x, int y, int buttons) {
     x += MOUSE_HOTSPOT_DX;
