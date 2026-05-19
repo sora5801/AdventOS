@@ -40,4 +40,12 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out);
  * absolute positions on each tick.  Buttons is a 3-bit mask. */
 void mouse_set_absolute(int x, int y, int buttons);
 
+/* Session 144 — called by usb_hid when a tablet is enumerated.
+ * Silences PS/2 mouse delta processing from then on so the tablet
+ * is the sole authoritative pointer.  Both devices receive events
+ * from QEMU; letting them both update the same g_mouse_x/y caused
+ * drift between the visible host cursor and the kernel-tracked
+ * click position. */
+void mouse_set_tablet_active(void);
+
 #endif

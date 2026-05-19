@@ -49,6 +49,14 @@ static int     g_buttons;     /* low 3 bits = L|R|M */
 static uint8_t g_pkt[3];
 static int     g_pkt_idx;
 
+/* Session 144 — set the first time the USB tablet reports an
+ * absolute position.  Once a tablet is alive we ignore PS/2 mouse
+ * deltas because QEMU routes in-window movement to PS/2 (relative)
+ * AND boundary events to the tablet (absolute); both updating the
+ * same g_mouse_x/y leaves the cursor desynchronised from the host
+ * pointer until the user exits and re-enters the window. */
+static int     g_tablet_active;
+
 static void wait_input_empty(void) {
     for (int i = 0; i < 100000; i++) {
         if (!(inb(KBD_STATUS) & STATUS_IBF)) return;
@@ -130,6 +138,16 @@ void mouse_process_byte(uint8_t b) {
     if (g_pkt_idx < 3) return;
     g_pkt_idx = 0;
 
+    /* Session 144 — if usb-tablet has ever reported, ignore PS/2
+     * deltas entirely.  QEMU emits BOTH PS/2 deltas (for in-window
+     * movement) AND tablet absolutes (for boundary crossings) when
+     * both devices are attached; letting PS/2 update position drifts
+     * the kernel pos away from where the host cursor visually is
+     * until the user exits + re-enters the window, which triggers
+     * a tablet abs report that resyncs.  Tablet is the authoritative
+     * pointer; drop PS/2 to silence the drift. */
+    if (g_tablet_active) return;
+
     /* Decode 9-bit deltas. byte0 X_SIGN → 0x100 bit of dx; similarly Y. */
     int dx = (int)g_pkt[1] - ((g_pkt[0] << 4) & 0x100);
     int dy = (int)g_pkt[2] - ((g_pkt[0] << 3) & 0x100);
@@ -197,4 +215,12 @@ void mouse_set_absolute(int x, int y, int buttons) {
     g_mouse_x = x;
     g_mouse_y = y;
     g_buttons = buttons & 0x07;
+}
+
+/* Session 144 — called from usb_hid_attach the moment a tablet
+ * is enumerated.  Pre-emptively silences PS/2 deltas so even the
+ * first in-window movement after boot lands at the tablet's
+ * absolute position rather than drifting via PS/2. */
+void mouse_set_tablet_active(void) {
+    g_tablet_active = 1;
 }
