@@ -341,6 +341,10 @@ void usb_hid_attach(struct usb_device *d,
         kprintf("[usb] HID tablet registered "
                 "(vid=%x pid=%x, polling starts late)\n",
                 d->vendor_id, d->product_id);
+        /* Session 144 — silence PS/2 deltas now so the cursor never
+         * drifts via the PS/2 path while waiting for the first
+         * tablet abs report. */
+        mouse_set_tablet_active();
         return;
     }
 

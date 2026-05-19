@@ -103,12 +103,8 @@ static const struct launch_entry g_launch_items[] = {
     { "wmterm",  "/wmterm.elf"   },
     { "wmedit",  "/wmedit.elf"   },
     { "wmcalc",  "/wmcalc.elf"   },
-    /* Session 142 — explicit user-facing "Shell" label that launches
-     * the terminal emulator (wmterm) holding a sh.elf instance.  The
-     * wmterm entry above stays so the technical name is still
-     * accessible; "Shell" is the friendly label that says what it
-     * does at a glance. */
-    { "Shell",   "/wmterm.elf"   },
+    /* Session 145 — Shell entry removed; user noted it was a
+     * redundant alias for wmterm which already does the same thing. */
 };
 #define N_LAUNCH_ITEMS  ((int)(sizeof(g_launch_items) / sizeof(g_launch_items[0])))
 static int g_launcher_open;
@@ -170,7 +166,25 @@ static struct toast_slot g_toasts[TOAST_MAX];
 #define RESIZE_GRIP 12
 #define WIN_MIN_W   80
 #define WIN_MIN_H   60
+/* Session 146 — resize from any edge / corner.  In addition to the
+ * session-131 SE grip we now hit-test a 6-pixel border on the W / E /
+ * S edges and 12x12 corner zones on SW / SE.  N edge + NW / NE corners
+ * deliberately don't resize because the top of the window is the title
+ * bar (drag-to-move + close/min/max buttons live there); making the
+ * top edge a resize zone would clash. */
+#define RESIZE_BORDER  6
+#define RESIZE_CORNER 12
+
+#define RES_NONE  0
+#define RES_S     1
+#define RES_W     2
+#define RES_E     3
+#define RES_SW    4
+#define RES_SE    5
+
 static int g_resize_idx = -1;
+static int g_resize_dir = RES_NONE;
+static int g_resize_anchor_x, g_resize_anchor_y;
 static int g_resize_anchor_w, g_resize_anchor_h;
 static int g_resize_anchor_mx, g_resize_anchor_my;
 
@@ -524,7 +538,12 @@ static void paint_taskbar(struct gfx_ctx *ctx, int focused_idx) {
     int clock_w = 132;
     int clock_x = fb_w - clock_w;
     {
-        unsigned int ts = sys_time();
+        /* Session 145 — display Pacific Standard Time (UTC-8) so
+         * the taskbar clock matches wmclock's PST output instead
+         * of staying on raw UTC.  Same fixed offset, no DST. */
+        const unsigned int PST_OFFSET_SEC = 8u * 3600u;
+        unsigned int raw = sys_time();
+        unsigned int ts  = (raw >= PST_OFFSET_SEC) ? (raw - PST_OFFSET_SEC) : 0u;
         unsigned int min = (ts / 60u) % 60u;
         unsigned int hr  = (ts / 3600u) % 24u;
         char buf[6];
@@ -702,14 +721,40 @@ static void paint_toasts(struct gfx_ctx *ctx, unsigned int frame_no) {
     }
 }
 
-/* Session 131 — is (px,py) inside the bottom-right resize grip?
- * Only CLIENT windows get a grip; demo windows ignore resize. */
+/* Session 146 — multi-zone resize hit-test.  Returns RES_NONE if the
+ * click isn't on a resize zone, or one of RES_S / RES_W / RES_E / RES_SW
+ * / RES_SE for which edge/corner was hit.  Corner zones (12x12) take
+ * priority over edge zones (6 px wide).  Top edge / NW / NE corners
+ * deliberately don't resize — title-bar drag + buttons own that strip. */
+static int in_resize_zone(struct window *w, int px, int py) {
+    if (w->kind != KIND_CLIENT) return RES_NONE;
+    int rx = px - w->x;
+    int ry = py - w->y;
+    if (rx < 0 || ry < 0 || rx >= w->w || ry >= w->h) return RES_NONE;
+
+    int near_l = rx < RESIZE_BORDER;
+    int near_r = rx >= w->w - RESIZE_BORDER;
+    int near_b = ry >= w->h - RESIZE_BORDER;
+    int in_corner_l = rx < RESIZE_CORNER;
+    int in_corner_r = rx >= w->w - RESIZE_CORNER;
+    int in_corner_b = ry >= w->h - RESIZE_CORNER;
+
+    /* Bottom corners take priority over edges. */
+    if (in_corner_b && near_l) return RES_SW;
+    if (in_corner_b && (in_corner_r || near_r)) return RES_SE;
+    if (near_b)               return RES_S;
+    /* Edge zones must skip the title-bar height so left/right drags
+     * up there don't conflict with the title-bar's own click handlers. */
+    if (ry < TITLE_H)         return RES_NONE;
+    if (near_l)               return RES_W;
+    if (near_r)               return RES_E;
+    return RES_NONE;
+}
+
+/* Compatibility wrapper for code paths that just want "is this still
+ * the old SE grip?".  Returns 1 if the zone is SE, 0 otherwise. */
 static int in_resize_grip(struct window *w, int px, int py) {
-    if (w->kind != KIND_CLIENT) return 0;
-    int gx = w->x + w->w - RESIZE_GRIP;
-    int gy = w->y + w->h - RESIZE_GRIP;
-    return px >= gx && px < gx + RESIZE_GRIP &&
-           py >= gy && py < gy + RESIZE_GRIP;
+    return in_resize_zone(w, px, py) == RES_SE;
 }
 
 static void init_demo_windows(unsigned int fb_w, unsigned int fb_h) {
@@ -1033,9 +1078,18 @@ int main(int argc, char **argv) {
                     /* Session 131 — resize grip wins over title-bar
                      * drag because the grip can lie behind/inside
                      * a title bar's bbox on tiny windows.  We test
-                     * the grip first. */
-                    if (in_resize_grip(&g_windows[hit], ms.x, ms.y)) {
+                     * the grip first.
+                     *
+                     * Session 146 — generalised: hit-test all 5
+                     * resize zones (S / W / E / SW / SE).  Any match
+                     * starts a directional resize; the motion handler
+                     * uses g_resize_dir to know which sides to move. */
+                    int zone = in_resize_zone(&g_windows[hit], ms.x, ms.y);
+                    if (zone != RES_NONE) {
                         g_resize_idx       = hit;
+                        g_resize_dir       = zone;
+                        g_resize_anchor_x  = g_windows[hit].x;
+                        g_resize_anchor_y  = g_windows[hit].y;
                         g_resize_anchor_w  = g_windows[hit].w;
                         g_resize_anchor_h  = g_windows[hit].h;
                         g_resize_anchor_mx = ms.x;
@@ -1150,6 +1204,7 @@ int main(int argc, char **argv) {
             }
             g_drag_idx   = -1;
             g_resize_idx = -1;
+            g_resize_dir = RES_NONE;
         }
         if (g_drag_idx >= 0) {
             struct window *w = &g_windows[g_drag_idx];
@@ -1163,19 +1218,64 @@ int main(int argc, char **argv) {
             w->x = nx;
             w->y = ny;
         }
-        /* Session 131 — resize-in-progress.  Outer (w, h) tracks
-         * the cursor delta from the anchor; clamp to a sane min
-         * and to the FB bounds. */
+        /* Session 131 / 146 — resize-in-progress.  Geometry update
+         * depends on g_resize_dir: S/E grow/shrink only on the edge
+         * being dragged; W shrinks/grows from the left (also moves
+         * x); SW combines W + S; SE = original 131 behaviour.  Top
+         * edge resizing isn't supported (the title bar owns the top
+         * 18 px). */
         if (g_resize_idx >= 0) {
             struct window *w = &g_windows[g_resize_idx];
-            int nw = g_resize_anchor_w + (ms.x - g_resize_anchor_mx);
-            int nh = g_resize_anchor_h + (ms.y - g_resize_anchor_my);
-            if (nw < WIN_MIN_W) nw = WIN_MIN_W;
-            if (nh < WIN_MIN_H) nh = WIN_MIN_H;
-            if (w->x + nw > (int)ctx.width  - 2)  nw = (int)ctx.width  - 2 - w->x;
-            if (w->y + nh > (int)ctx.height - 2)  nh = (int)ctx.height - 2 - w->y;
-            w->w = nw;
-            w->h = nh;
+            int dx = ms.x - g_resize_anchor_mx;
+            int dy = ms.y - g_resize_anchor_my;
+            int new_x = g_resize_anchor_x;
+            int new_y = g_resize_anchor_y;
+            int new_w = g_resize_anchor_w;
+            int new_h = g_resize_anchor_h;
+
+            int do_w = 0, do_e = 0, do_s = 0;
+            switch (g_resize_dir) {
+                case RES_S:  do_s = 1; break;
+                case RES_W:  do_w = 1; break;
+                case RES_E:  do_e = 1; break;
+                case RES_SW: do_w = 1; do_s = 1; break;
+                case RES_SE: do_e = 1; do_s = 1; break;
+                default: break;
+            }
+
+            if (do_e) new_w = g_resize_anchor_w + dx;
+            if (do_w) {
+                new_x = g_resize_anchor_x + dx;
+                new_w = g_resize_anchor_w - dx;
+            }
+            if (do_s) new_h = g_resize_anchor_h + dy;
+
+            /* Min-size clamps respect which side is anchored: when
+             * dragging W, shrinking past the min should clamp from
+             * the LEFT side, not from new_w directly (otherwise x
+             * runs past where the user expects). */
+            if (new_w < WIN_MIN_W) {
+                if (do_w) new_x = g_resize_anchor_x + g_resize_anchor_w - WIN_MIN_W;
+                new_w = WIN_MIN_W;
+            }
+            if (new_h < WIN_MIN_H) new_h = WIN_MIN_H;
+
+            /* FB-edge clamps. */
+            if (new_x < 0) {
+                if (do_w) new_w += new_x;     /* shrink to fit */
+                new_x = 0;
+            }
+            if (new_x + new_w > (int)ctx.width  - 2)
+                new_w = (int)ctx.width  - 2 - new_x;
+            if (new_y + new_h > (int)ctx.height - 2)
+                new_h = (int)ctx.height - 2 - new_y;
+            if (new_w < WIN_MIN_W) new_w = WIN_MIN_W;
+            if (new_h < WIN_MIN_H) new_h = WIN_MIN_H;
+
+            w->x = new_x;
+            w->y = new_y;
+            w->w = new_w;
+            w->h = new_h;
         }
         g_prev_left = left;
 
@@ -1356,7 +1456,9 @@ int main(int argc, char **argv) {
 
         /* Session 142 — cursor glyph removed; QEMU's host pointer
          * (synced to ms.x / ms.y via usb-tablet, session 141) is
-         * the visible pointer. */
+         * the visible pointer.  Calibration marker from session
+         * 144 also removed now that PS/2 drift is silenced and
+         * the kernel pointer tracks the host pointer 1:1. */
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
