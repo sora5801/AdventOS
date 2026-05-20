@@ -49,5 +49,9 @@ serial.log
 s*.log
 audit*.log
 miniaudit*.log
+*_audit.log
+*_sample.log
+reaudit*.log
+verify*.log
 *_serial.log
 tcc/_obj/
