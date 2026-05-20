@@ -176,7 +176,7 @@ The v1.0 readiness rubric is in
 
 ## License
 
-(Not yet specified. Treat as all-rights-reserved until a license file lands.)
+[MIT](LICENSE).  Copy it, fork it, ship it, learn from it.
 
 ## Acknowledgements
 
