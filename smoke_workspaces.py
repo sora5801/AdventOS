@@ -81,14 +81,40 @@ def abs_send(q, qbuf, x, y, fb_w=1024, fb_h=768):
 
 
 def click(q, qbuf, x, y):
-    abs_send(q, qbuf, x, y)
+    """ Session 171 — for small targets the click can race wmd's
+    hover-state update.  Move cursor to an *off-target* position
+    first, settle, then move to target, settle, then click.  The
+    distinct position change between two close-in-time events
+    forces wmd to register the new hover before the button arrives. """
+    fb_w, fb_h = 1024, 768
+    # Off-target park position (well below the title bar)
+    park_x, park_y = 500, 400
+    pax = 32767 * park_x // (fb_w - 1)
+    pay = 32767 * park_y // (fb_h - 1)
+    qmp_cmd(q, qbuf, "input-send-event", {"events": [
+        {"type": "abs", "data": {"axis": "x", "value": pax}},
+        {"type": "abs", "data": {"axis": "y", "value": pay}},
+    ]})
+    time.sleep(0.4)
+    # Now move to target.
+    ax = 32767 * x // (fb_w - 1)
+    ay = 32767 * y // (fb_h - 1)
+    qmp_cmd(q, qbuf, "input-send-event", {"events": [
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+    ]})
+    time.sleep(0.5)
+    # Click — abs + btn-down bundled.
+    qmp_cmd(q, qbuf, "input-send-event", {"events": [
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": True, "button": "left"}},
+    ]})
     time.sleep(0.5)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": True, "button": "left"}}
-    ]})
-    time.sleep(0.3)
-    qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": False, "button": "left"}}
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": False, "button": "left"}},
     ]})
     time.sleep(1.2)
 

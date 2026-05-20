@@ -13,6 +13,7 @@ import os, subprocess, sys, time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 SMOKES = [
+    # Session 169 — original Path C / wmterm flake-hunt set.
     "smoke_wmterm_polish_168.py",   # session 168
     "smoke_wmterm_color.py",        # session 166/167
     "smoke_wmterm_geom_cursor.py",  # session 162
@@ -24,6 +25,11 @@ SMOKES = [
     "smoke_wmterm_bg.py",           # session 160
     "smoke_wmterm_sighup.py",       # session 158
     "smoke_wmterm_fix.py",          # session 157
+    # Session 171 — extended set: non-wmterm Path C smokes confirmed
+    # flaky in the broader audit pass.  Both pass ~1/3 fresh-QEMU
+    # runs; the retry mechanism is what catches them reliably.
+    "smoke_wmedit.py",              # session 137 — startup paint race
+    "smoke_workspaces.py",          # session 147 — small-target click flake
 ]
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 3
