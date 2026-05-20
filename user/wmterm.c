@@ -35,7 +35,14 @@
 #include "../libgfx/libgfx.h"
 
 #define WIN_W        540    /* 540 = 60 * 8 + 60 px margin/decoration */
-#define WIN_H        240    /* 240 = 24 * 10 (line h) + 4 px margin */
+/* Session 162 — WIN_H was 240 with the comment "= 24*10 + 4 px
+ * margin", but the math forgot the HDR_H+4 = 24 px taken up by the
+ * internal title strip above the grid.  With WIN_H=240 only the
+ * top 21 grid rows fit on screen; rows 21-23 (including the row
+ * sh.elf renders the new prompt on after `ls /` scrolls everything
+ * up) were clipped off the bottom of the surface.  Correct:
+ * GRID_Y(24) + ROWS(24)*LINE_H(10) + bottom margin = 264..270. */
+#define WIN_H        270    /* 270 = 24 (header) + 24*10 (rows) + 6 margin */
 #define HDR_H        20
 #define COLS         60
 #define ROWS         24

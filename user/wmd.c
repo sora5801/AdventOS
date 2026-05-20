@@ -219,12 +219,50 @@ static int fmt_u(char *buf, int cap, unsigned int v) {
     return out;
 }
 
-/* Session 142 — draw_cursor removed.  The wmd-drawn crosshair was
- * redundant once session 141's usb-tablet locked QEMU's host
- * pointer to the guest cursor coordinates.  The host cursor (the
- * OS arrow) is now the only visible pointer; ms.x / ms.y still
- * drive every click + drag handler below, just without a glyph
- * painted over them. */
+/* Session 142 — draw_cursor was removed because the wmd-drawn
+ * crosshair was redundant when QEMU's host pointer matched the
+ * guest cursor coordinates.  Session 162 — restored, because the
+ * host pointer's *shape* isn't stable: re-entering the QEMU
+ * window from an edge leaves Windows' resize-arrow cursor visible
+ * until the host issues a fresh SetCursor.  With no guest-drawn
+ * overlay the user just sees that stale resize arrow inside the
+ * QEMU window, with no way to recover short of clicking somewhere
+ * to force the host to redraw.
+ *
+ * The drawn arrow is a 12x16 black-outline, white-fill bitmap;
+ * the hot-spot (the byte the click registers under) is at (0, 0)
+ * — the very top-left tip of the arrow — so the click point
+ * matches the most-pointy pixel.  Painted last in the frame so
+ * it sits above every window. */
+static const char * const g_cursor_art[16] = {
+    "#           ",
+    "##          ",
+    "#.#         ",
+    "#..#        ",
+    "#...#       ",
+    "#....#      ",
+    "#.....#     ",
+    "#......#    ",
+    "#.......#   ",
+    "#........#  ",
+    "#####.....# ",
+    "    #..#    ",
+    "    #..#    ",
+    "     #..#   ",
+    "     #..#   ",
+    "      ##    ",
+};
+
+static void draw_cursor(struct gfx_ctx *ctx, int cx, int cy) {
+    for (int dy = 0; dy < 16; dy++) {
+        const char *row = g_cursor_art[dy];
+        for (int dx = 0; row[dx]; dx++) {
+            char p = row[dx];
+            if      (p == '#') gfx_put_pixel(ctx, cx + dx, cy + dy, GFX_BLACK);
+            else if (p == '.') gfx_put_pixel(ctx, cx + dx, cy + dy, GFX_WHITE);
+        }
+    }
+}
 
 /* Window content painters. */
 static void paint_clock(struct gfx_ctx *ctx, struct window *w,
@@ -1677,11 +1715,14 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Session 142 — cursor glyph removed; QEMU's host pointer
-         * (synced to ms.x / ms.y via usb-tablet, session 141) is
-         * the visible pointer.  Calibration marker from session
-         * 144 also removed now that PS/2 drift is silenced and
-         * the kernel pointer tracks the host pointer 1:1. */
+        /* Session 162 — paint a guest-side cursor sprite on top of
+         * everything else.  Necessary because the host pointer's
+         * shape isn't stable across QEMU-window enter/leave; without
+         * a guest overlay the user sees whatever the host left
+         * behind (often a resize arrow when re-entering at an
+         * edge).  Hot-spot is the top-left tip of the arrow, which
+         * is what ms.x / ms.y point at. */
+        draw_cursor(&ctx, ms.x, ms.y);
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
