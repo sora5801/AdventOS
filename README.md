@@ -177,7 +177,3 @@ The v1.0 readiness rubric is in
 ## License
 
 [MIT](LICENSE).  Copy it, fork it, ship it, learn from it.
-
-## Acknowledgements
-
-Built with help from Claude (claude.com/claude-code) acting as the engineering pair. The session deep-dives in `docs/` are the audit trail of that collaboration.
