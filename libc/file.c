@@ -49,14 +49,6 @@ static int sys_open_r(const char *path) {
                       : "memory");
     return ret;
 }
-static int sys_open_w_(const char *path) {
-    int ret;
-    __asm__ volatile ("int $0x80"
-                      : "=a"(ret)
-                      : "a"(LIBC_SYS_OPEN_W), "b"(path)
-                      : "memory");
-    return ret;
-}
 static int sys_read_(int fd, void *buf, int n) {
     int ret;
     __asm__ volatile ("int $0x80"

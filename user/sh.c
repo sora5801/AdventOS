@@ -1635,7 +1635,7 @@ static const char *g_builtin_names[] = {
 };
 
 /* Tab completion. Three flavors picked by the cursor's word:
- *   - first word on the line  → builtins + defined functions + /*.elf
+ *   - first word on the line  → builtins + defined functions + "/<name>.elf"
  *   - word starts with `$`    → env var names from g_env_buf
  *   - everything else         → filenames in cwd
  * On exactly one match the tail is spliced in + trailing space; on
@@ -2776,7 +2776,6 @@ static int  chain_kind             (const char *t);
 static char g_dollar_q_pool[DOLLAR_Q_POOL_LEN];
 static int  g_dollar_q_off;
 static void expand_vars_segment    (char **toks, int lo, int hi);
-static void expand_dollar_q_segment(char **toks, int lo, int hi);
 
 /* ---- line dispatcher + script runner (session 49) ------------------ */
 
@@ -3578,12 +3577,6 @@ static void expand_vars_segment(char **toks, int lo, int hi) {
         toks[i] = out;
         g_dollar_q_off += o + 1;
     }
-}
-
-/* Compat shim: the old name is now an alias to make the rename land
- * cleanly with the rest of the codebase intact. */
-static void expand_dollar_q_segment(char **toks, int lo, int hi) {
-    expand_vars_segment(toks, lo, hi);
 }
 
 /* Classify a token: returns +1 if it's `&&`, -1 if `||`, 2 if `;`,

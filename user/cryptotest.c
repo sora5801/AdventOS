@@ -14,11 +14,6 @@ static int hexbyte(const char *s) {
     return (hi << 4) | lo;
 }
 
-static void hexdump(const unsigned char *p, int n) {
-    static const char *d = "0123456789abcdef";
-    for (int i = 0; i < n; i++) { putchar(d[p[i] >> 4]); putchar(d[p[i] & 0xF]); }
-}
-
 static int hex_eq(const unsigned char *got, const char *expect, int n) {
     for (int i = 0; i < n; i++) {
         if (got[i] != hexbyte(expect + 2*i)) return 0;

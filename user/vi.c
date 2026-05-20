@@ -150,13 +150,6 @@ static void out_str(const char *s) {
     sys_write(1, s, n);
 }
 static void out_char(char c) { sys_write(1, &c, 1); }
-static void out_int(int v) {
-    char b[12]; int n = 0;
-    if (v < 0) { out_char('-'); v = -v; }
-    if (v == 0) b[n++] = '0';
-    else while (v) { b[n++] = (char)('0' + v % 10); v /= 10; }
-    while (n--) out_char(b[n]);
-}
 
 /* ---- Line storage --------------------------------------------- */
 

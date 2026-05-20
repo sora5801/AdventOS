@@ -47,10 +47,6 @@ static char         g_filename[64];
 
 /* ---- helpers ------------------------------------------------------- */
 
-static int my_strlen(const char *s) {
-    int n = 0; while (s[n]) n++; return n;
-}
-
 static int parse_int(const char **pp) {
     const char *p = *pp;
     int n = 0, saw = 0;

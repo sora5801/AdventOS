@@ -981,11 +981,13 @@ static int in_resize_zone(struct window *w, int px, int py) {
     int near_l = rx < RESIZE_BORDER;
     int near_r = rx >= w->w - RESIZE_BORDER;
     int near_b = ry >= w->h - RESIZE_BORDER;
-    int in_corner_l = rx < RESIZE_CORNER;
     int in_corner_r = rx >= w->w - RESIZE_CORNER;
     int in_corner_b = ry >= w->h - RESIZE_CORNER;
 
-    /* Bottom corners take priority over edges. */
+    /* Bottom corners take priority over edges.  (The SW corner only
+     * needs `near_l` — the left RESIZE_BORDER strip is narrower than
+     * RESIZE_CORNER would be, and the bottom-strip test already gates
+     * us into the corner region.) */
     if (in_corner_b && near_l) return RES_SW;
     if (in_corner_b && (in_corner_r || near_r)) return RES_SE;
     if (near_b)               return RES_S;
@@ -995,12 +997,6 @@ static int in_resize_zone(struct window *w, int px, int py) {
     if (near_l)               return RES_W;
     if (near_r)               return RES_E;
     return RES_NONE;
-}
-
-/* Compatibility wrapper for code paths that just want "is this still
- * the old SE grip?".  Returns 1 if the zone is SE, 0 otherwise. */
-static int in_resize_grip(struct window *w, int px, int py) {
-    return in_resize_zone(w, px, py) == RES_SE;
 }
 
 static void init_demo_windows(unsigned int fb_w, unsigned int fb_h) {

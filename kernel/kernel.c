@@ -66,23 +66,6 @@
  * default until we add cross-CPU TLB shootdowns; see docs/38. */
 int g_ap_runs_user = 0;
 
-/* Two demo tasks that emit a tag to the serial port at different rates,
- * so you can see the scheduler interleaving them in real time without
- * fighting the shell's VGA cursor. */
-static void demo_task_a(void) {
-    for (uint32_t i = 0; ; i++) {
-        serial_write("[A]");
-        pit_sleep(150);
-    }
-}
-
-static void demo_task_b(void) {
-    for (uint32_t i = 0; ; i++) {
-        serial_write("[B]");
-        pit_sleep(250);
-    }
-}
-
 static void banner(void) {
     vga_set_color(VGA_LIGHT_CYAN, VGA_BLACK);
     kputs(
@@ -387,10 +370,8 @@ void kmain(uint32_t boot_drive) {
     /* Sanity beep: short delay, prove the timer is ticking */
     pit_sleep(50);
 
-    kputs("[boot] spawning reaper + demo tasks A, B\n");
+    kputs("[boot] spawning reaper\n");
     task_reaper_start();
-    /*task_make_runnable(task_create(demo_task_a, "demo_a"));*/
-    /*task_make_runnable(task_create(demo_task_b, "demo_b"));*/
 
     /* The bcache syncer needs the task system + interrupts up so its
      * pit_sleep() loop can actually be scheduled. */
