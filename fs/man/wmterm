@@ -28,11 +28,14 @@ DESCRIPTION
 
     Special key handling (kernel keyboard layer):
       Enter           sends '\r' / '\n' (depending on TTY mode)
-      Backspace       sends 0x7F (DEL)
+      Backspace       deletes char-before-cursor + redraws line
+                      (sh.elf emits CSI K which wmterm acts on)
       Arrow keys      come through as ESC '[' 'A'/'B'/'C'/'D'
       PageUp          intercepted: scroll view 12 rows into history
       PageDown        intercepted: scroll view 12 rows toward live
                       (snaps fully to live tail on any shell output)
+      Both PS/2 and USB-HID keyboards emit the same byte sequences
+      for all of the above (session 161).
 
     Mouse interactions happen at the WM level (drag title bar,
     resize from corner, close X) and don't reach the shell.
@@ -56,6 +59,15 @@ HISTORY
     Session 159 added a 500-row scrollback ring + PgUp/PgDn keys.
     The header switches to a "history" indicator when scrolled
     back; any new shell output snaps the view back to live tail.
+
+    Session 161 fixed three interactive complaints: backspace
+    didn't visibly erase characters (sh's redraw_line called the
+    global-console syscall sys_tty_clear_eol which didn't propagate
+    through the PTY — fixed by also emitting CSI K, which wmterm's
+    vt_feed now interprets); and PageUp / PageDown did nothing on
+    real PS/2 keyboards (the PS/2 scancode-set-1 driver only
+    handled arrows — extended to emit ESC [ 5 ~ / ESC [ 6 ~ for
+    PgUp / PgDn, matching the USB-HID path from session 159).
 
 SEE ALSO
     sh(1), wmd(1), wmtype(1)

@@ -154,17 +154,83 @@ static void grid_newline(void) {
     }
 }
 
-/* Feed one byte through the VT-100ish state machine. */
+/* Feed one byte through the VT-100ish state machine.
+ *
+ * Session 161 — handles a small set of CSI sequences instead of
+ * silently stripping them all, so e.g. sh.elf's `redraw_line` can
+ * emit `ESC [ K` to clear from cursor to end-of-line when the user
+ * backspaces.  Without that handling, redraw_line wrote the
+ * shortened buffer over the longer one but the trailing characters
+ * stayed visible, and the user saw backspace as "doing nothing".
+ *
+ * Still strips: everything else (colour codes, scroll-region setup,
+ * full clear-screen — wmterm doesn't render colours and doesn't
+ * track a viewport offset distinct from g_view_offset). */
+static char    g_csi_param[8];
+static int     g_csi_param_len;
+
+static int csi_get_param(int dflt) {
+    /* Parse the buffered numeric parameter (possibly empty).  We
+     * only care about the first parameter; semicolon-separated
+     * multi-param sequences fall back to dflt. */
+    int v = 0, any = 0;
+    for (int i = 0; i < g_csi_param_len; i++) {
+        char c = g_csi_param[i];
+        if (c < '0' || c > '9') break;
+        v = v * 10 + (c - '0');
+        any = 1;
+    }
+    return any ? v : dflt;
+}
+
+static void csi_dispatch(char final) {
+    switch (final) {
+        case 'K': {
+            /* Erase in Line — parameter selects mode:
+             *   0 (default) : clear from cursor to end of line
+             *   1           : clear from beginning of line to cursor
+             *   2           : clear entire line
+             * sh.elf's redraw_line only ever emits the no-param form
+             * (mode 0), but the other modes are cheap. */
+            int mode = csi_get_param(0);
+            if (mode == 0) {
+                for (int c = g_cur_col; c < COLS; c++)
+                    g_grid[g_cur_row][c] = 0;
+            } else if (mode == 1) {
+                for (int c = 0; c <= g_cur_col && c < COLS; c++)
+                    g_grid[g_cur_row][c] = 0;
+            } else if (mode == 2) {
+                for (int c = 0; c < COLS; c++)
+                    g_grid[g_cur_row][c] = 0;
+            }
+            return;
+        }
+        /* Other CSI: silently strip (colour `m`, cursor save/restore,
+         * scroll region setup, ...).  No grid mutation. */
+        default: return;
+    }
+}
+
 static void vt_feed(unsigned char b) {
     if (g_vt_state == 1) {
-        if (b == '[') { g_vt_state = 2; return; }
+        if (b == '[') { g_vt_state = 2; g_csi_param_len = 0; return; }
         g_vt_state = 0;
         return;
     }
     if (g_vt_state == 2) {
-        /* ESC [ ... <final> — final is in 0x40..0x7E.  Strip the
-         * whole sequence. */
-        if (b >= 0x40 && b <= 0x7E) g_vt_state = 0;
+        /* Parameter / intermediate bytes (0x20..0x3F): buffer up
+         * to 7 so csi_get_param has something to parse. */
+        if (b >= 0x20 && b <= 0x3F) {
+            if (g_csi_param_len < (int)sizeof(g_csi_param))
+                g_csi_param[g_csi_param_len++] = (char)b;
+            return;
+        }
+        /* Final byte (0x40..0x7E) — dispatch + reset. */
+        if (b >= 0x40 && b <= 0x7E) {
+            csi_dispatch((char)b);
+            g_vt_state = 0;
+            g_csi_param_len = 0;
+        }
         return;
     }
     switch (b) {
@@ -336,9 +402,23 @@ int main(int argc, char **argv) {
         char buf[READ_BUF];
         int n = sys_read(master, buf, sizeof(buf));
         if (n > 0) {
-            if (g_verbose)
-                printf("wmterm: rd n=%d first=0x%x\n",
-                       n, (unsigned)(unsigned char)buf[0]);
+            if (g_verbose) {
+                /* Session 161 — dump up to the first 80 chars of the
+                 * read so the polish smoke can grep for the inner
+                 * shell's "command not found: ab" message and verify
+                 * the backspace clear-EOL CSI made it through.  Non-
+                 * printable bytes show as a dot to keep the line
+                 * single-line and the kernel printf simple. */
+                char preview[81];
+                int  plen = n < 80 ? n : 80;
+                for (int i = 0; i < plen; i++) {
+                    unsigned char b = (unsigned char)buf[i];
+                    preview[i] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                }
+                preview[plen] = 0;
+                printf("wmterm: rd n=%d first=0x%x [%s]\n",
+                       n, (unsigned)(unsigned char)buf[0], preview);
+            }
             /* Session 159 — snap back to live tail whenever new shell
              * output arrives.  Without this, the user could be looking
              * at history and the cursor would move "below" the viewport,

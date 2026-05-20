@@ -1575,7 +1575,17 @@ static void redraw_line(const char *buf, int len) {
     putchar('\r');
     puts(current_prompt());
     for (int i = 0; i < len; i++) putchar(buf[i]);
+    /* Session 161 — clear from cursor to end of line.  We emit BOTH:
+     *   sys_tty_clear_eol() — the kernel-console framebuffer call, no-op
+     *                         when stdin is a PTY slave (the syscall
+     *                         touches the global console grid not the PTY).
+     *   ESC [ K              — the ANSI CSI sequence, which wmterm's
+     *                         vt_feed interprets in-grid.  Doing both
+     *                         keeps the kernel-console shell pixel-perfect
+     *                         AND fixes backspace + line edits inside
+     *                         wmterm where the syscall was invisible. */
     sys_tty_clear_eol();
+    putchar(27); putchar('['); putchar('K');
 }
 
 /* Session 84: compute the printable length of the current prompt.
