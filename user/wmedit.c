@@ -72,6 +72,12 @@ static int   g_sel_anchor = -1;
 static int   g_drag;
 static int   g_scroll_row;   /* hoisted out of main() so byte_at_xy
                               * can use it from event handlers */
+/* Session 168 — set when the mouse wheel moves the viewport.
+ * While true, the auto-scroll-to-cursor clamp at the end of
+ * every frame is skipped; the next KEY event re-couples the
+ * view to the cursor.  Lets the user wheel-scroll without
+ * the editor immediately snapping back. */
+static int   g_view_manual;
 
 /* Session 152 — incremental search.  Ctrl-F opens a search bar
  * at the bottom; typing builds g_search_pat; matches in the
@@ -484,6 +490,9 @@ int main(int argc, char **argv) {
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
                     unsigned int k = ev.keycode;
+                    /* Session 168 — any keystroke re-couples the
+                     * view to the cursor.  See WM_EV_MOUSE_WHEEL. */
+                    g_view_manual = 0;
                     /* Session 152 — search-mode key dispatch.  When
                      * Ctrl-F has opened the search bar, all keystrokes
                      * go into g_search_pat instead of g_buf.  Esc
@@ -640,16 +649,36 @@ int main(int argc, char **argv) {
                     if (g_cur == g_sel_anchor) g_sel_anchor = -1;
                     break;
                 }
+                case WM_EV_MOUSE_WHEEL: {
+                    /* Session 168 — wheel scrolls the viewport
+                     * decoupled from the editor cursor.  Step:
+                     * delta / 4 rows per wheel tick — same scale
+                     * as wmterm's scrollback (session 163).
+                     * Auto-scroll-to-cursor is suppressed until
+                     * the next KEY event so the user can keep
+                     * scrolling without the view snapping back. */
+                    int delta = (int)(int32_t)ev.keycode;
+                    int step = delta / 4;
+                    if (step == 0) step = (delta > 0) ? 1 : -1;
+                    g_scroll_row -= step;
+                    if (g_scroll_row < 0) g_scroll_row = 0;
+                    g_view_manual = 1;
+                    break;
+                }
                 default: break;
             }
         }
 
-        /* Scroll so the cursor stays in view. */
+        /* Scroll so the cursor stays in view — unless the user is
+         * actively wheel-scrolling (session 168), in which case
+         * leave the viewport where they set it. */
         int cur_row, cur_col;
         cursor_rowcol(g_cur, &cur_row, &cur_col);
-        if (cur_row < g_scroll_row) g_scroll_row = cur_row;
-        if (cur_row >= g_scroll_row + max_rows)
-            g_scroll_row = cur_row - max_rows + 1;
+        if (!g_view_manual) {
+            if (cur_row < g_scroll_row) g_scroll_row = cur_row;
+            if (cur_row >= g_scroll_row + max_rows)
+                g_scroll_row = cur_row - max_rows + 1;
+        }
         if (g_scroll_row < 0) g_scroll_row = 0;
 
         /* Repaint. */

@@ -150,6 +150,7 @@ static int g_drag_idx = -1;
 static int g_drag_off_x, g_drag_off_y;
 static int g_prev_left;
 static int g_prev_right;       /* session 124 — right-button edge */
+static int g_prev_middle;      /* session 168 — middle-button edge */
 
 /* Session 143 — toast notifications.  Up to 4 stacked in the
  * bottom-right; each lives ~3 s (180 frames @ 60fps) with a 0.5 s
@@ -1280,6 +1281,14 @@ int main(int argc, char **argv) {
         int right_pressed = right && !g_prev_right;
         g_prev_right = right;
 
+        /* Session 168 — middle-button edge.  We dispatch the press
+         * to the hovered client as WM_EV_MOUSE_PRESS with
+         * ev.button = WM_BUTTON_MIDDLE so e.g. wmterm can wire
+         * X11-style middle-click paste. */
+        int middle = (ms.buttons & 0x04) ? 1 : 0;
+        int middle_pressed = middle && !g_prev_middle;
+        g_prev_middle = middle;
+
         if (right_pressed) {
             /* If the menu is already open, close it. */
             if (g_ctx_menu.open) {
@@ -1723,6 +1732,18 @@ int main(int argc, char **argv) {
                 ev.x      = sx;
                 ev.y      = sy;
                 ev.button = WM_BUTTON_LEFT;
+                sys_wm_event_push(w->client_id, &ev);
+            }
+            /* Session 168 — middle-click press goes through the
+             * same MOUSE_PRESS channel with WM_BUTTON_MIDDLE in
+             * ev.button.  No paired RELEASE for middle: matches
+             * how X11 / Windows handle the middle-click action. */
+            if (middle_pressed) {
+                struct sys_wm_event ev = {0};
+                ev.type   = WM_EV_MOUSE_PRESS;
+                ev.x      = sx;
+                ev.y      = sy;
+                ev.button = WM_BUTTON_MIDDLE;
                 sys_wm_event_push(w->client_id, &ev);
             }
             /* Session 163 — wheel.  Route to the hovered client (not

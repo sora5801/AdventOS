@@ -1608,6 +1608,21 @@ static int prompt_len(void) {
  * window for visual feedback. */
 static void position_cursor(int prompt_row, int want_col_in_buf) {
     sys_tty_cursor(prompt_row, prompt_len() + want_col_in_buf);
+    /* Session 168 — also emit ANSI CSI G (Cursor Horizontal
+     * Absolute) so wmterm (and any other PTY-hosted terminal)
+     * can position the caret without consulting the global
+     * kernel-console cursor.  Column is 1-based per ECMA-48. */
+    int col = prompt_len() + want_col_in_buf + 1;
+    if (col < 1) col = 1;
+    char buf[16]; int n = 0;
+    int v = col;
+    char tmp[8]; int tn = 0;
+    if (v == 0) tmp[tn++] = '0';
+    while (v) { tmp[tn++] = (char)('0' + v % 10); v /= 10; }
+    buf[n++] = 27; buf[n++] = '[';
+    while (tn--) buf[n++] = tmp[tn];
+    buf[n++] = 'G';
+    sys_write(1, buf, n);
 }
 
 /* List of shell builtins for tab completion of the first word. Kept

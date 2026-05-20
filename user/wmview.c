@@ -157,7 +157,6 @@ int main(int argc, char **argv) {
 
     /* One-time: clear background and blit the image centred in
      * the content area (below the title bar). */
-    wm_clear(&win, 0x101010u);
     int content_y0 = HDR_H + 4;
     int content_h  = WIN_H - content_y0 - 4;
     int draw_w = img_w < WIN_W   ? img_w : WIN_W;
@@ -165,24 +164,24 @@ int main(int argc, char **argv) {
     int ox = (WIN_W - draw_w) / 2;
     int oy = content_y0 + (content_h - draw_h) / 2;
 
+    /* Session 168 — vertical pan offset.  Mouse wheel moves the
+     * image up / down within the viewport.  Clamped so the image
+     * can't be panned entirely off-screen. */
+    int g_pan_y = 0;
+    int pan_min = (img_h > content_h)
+                  ? -(img_h - content_h)
+                  : 0;
+    int pan_max = 0;
+
     unsigned int *pix   = win.pixels;
     unsigned int  pitch = win.pitch_px;
-    for (int y = 0; y < draw_h; y++) {
-        for (int x = 0; x < draw_w; x++) {
-            int idx = data_pos + (y * img_w + x) * 3;
-            if (idx + 2 >= n) break;
-            unsigned int r = g_buf[idx + 0];
-            unsigned int g = g_buf[idx + 1];
-            unsigned int b = g_buf[idx + 2];
-            pix[(oy + y) * pitch + (ox + x)] = (r << 16) | (g << 8) | b;
-        }
-    }
 
-    /* Main loop: only repaints title bar + footer each frame; the
-     * image is static and survives across frames. */
+    /* Main loop.  Image re-blits each frame (200 ms tick — tiny
+     * cost for a static image) so the pan offset takes effect
+     * without needing a dirty-flag dance. */
     int has_focus  = 0;
     int closed     = 0;
-    int total_ticks = seconds * 5;     /* 200 ms tick — image is static */
+    int total_ticks = seconds * 5;     /* 200 ms tick */
     for (int tick = 0; tick < total_ticks && !closed; tick++) {
         struct wm_event ev;
         while (wm_poll_event(&win, &ev)) {
@@ -193,14 +192,38 @@ int main(int argc, char **argv) {
                 case WM_EV_KEY:
                     if (ev.keycode == 0x11) closed = 1; /* Ctrl-Q */
                     break;
+                case WM_EV_MOUSE_WHEEL: {
+                    /* Session 168 — vertical pan.  Step is delta * 8
+                     * pixels per tick so a single wheel click moves
+                     * the image a meaningful amount. */
+                    int delta = (int)(int32_t)ev.keycode;
+                    g_pan_y += delta * 8;
+                    if (g_pan_y < pan_min) g_pan_y = pan_min;
+                    if (g_pan_y > pan_max) g_pan_y = pan_max;
+                    break;
+                }
                 default: break;
             }
         }
-        /* Title bar (re-paint every frame so focus-colour tracks). */
+        /* Repaint: wallpaper, then image at pan offset, then title. */
+        wm_clear(&win, 0x101010u);
+        for (int y = 0; y < draw_h; y++) {
+            int src_y = y - g_pan_y;
+            if (src_y < 0 || src_y >= img_h) continue;
+            for (int x = 0; x < draw_w; x++) {
+                int idx = data_pos + (src_y * img_w + x) * 3;
+                if (idx + 2 >= n) break;
+                unsigned int r = g_buf[idx + 0];
+                unsigned int g = g_buf[idx + 1];
+                unsigned int b = g_buf[idx + 2];
+                pix[(oy + y) * pitch + (ox + x)] =
+                    (r << 16) | (g << 8) | b;
+            }
+        }
         wm_fill_rect(&win, 0, 0, WIN_W, HDR_H,
                      has_focus ? 0x4080E0u : 0x404040u);
         gfx_text(&sctx, 6, 5,
-                 has_focus ? "wmview  Ctrl-Q quit"
+                 has_focus ? "wmview  Ctrl-Q quit  wheel=pan"
                            : "wmview  (click to focus)",
                  GFX_WHITE, GFX_TRANSPARENT);
         wm_present(&win);

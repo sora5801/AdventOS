@@ -186,10 +186,21 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
      *   0x52 up    -> CSI A    */
     if (usage >= 0x4F && usage <= 0x52) {
         static const char finals[4] = { 'C', 'D', 'B', 'A' };
-        char esc[3] = { 27, '[', finals[usage - 0x4F] };
-        keyboard_inject(esc, 3);
+        char final = finals[usage - 0x4F];
+        if (shift) {
+            /* Session 168 — Shift+arrow emits xterm's modified
+             * CSI: ESC '[' '1' ';' '2' <final>.  wmterm intercepts
+             * these to extend the text selection; the kernel-
+             * console shell parses them as unknown CSI and drops. */
+            char esc[6] = { 27, '[', '1', ';', '2', final };
+            keyboard_inject(esc, 6);
+        } else {
+            char esc[3] = { 27, '[', final };
+            keyboard_inject(esc, 3);
+        }
 #ifdef USB_HID_TRACE
-        kprintf("[usb-hid] arrow (usage=%x final=%c)\n", usage, esc[2]);
+        kprintf("[usb-hid] %sarrow (usage=%x final=%c)\n",
+                shift ? "shift+" : "", usage, final);
 #endif
         return;
     }
@@ -207,6 +218,31 @@ static void emit_for_usage(uint8_t usage, uint8_t mods) {
     if (usage == 0x4E) {                /* PageDown */
         char esc[4] = { 27, '[', '6', '~' };
         keyboard_inject(esc, 4);
+        return;
+    }
+    /* Session 168 — Home / End.  Plain forms use ESC '[' H / F
+     * (xterm "cursor home" / "cursor to end of line").  Shift
+     * variants use the modified CSI ESC '[' '1' ';' '2' H / F
+     * so wmterm can intercept them for keyboard-driven selection
+     * (extend to start / end of row). */
+    if (usage == 0x4A) {                /* Home */
+        if (shift) {
+            char esc[6] = { 27, '[', '1', ';', '2', 'H' };
+            keyboard_inject(esc, 6);
+        } else {
+            char esc[3] = { 27, '[', 'H' };
+            keyboard_inject(esc, 3);
+        }
+        return;
+    }
+    if (usage == 0x4D) {                /* End */
+        if (shift) {
+            char esc[6] = { 27, '[', '1', ';', '2', 'F' };
+            keyboard_inject(esc, 6);
+        } else {
+            char esc[3] = { 27, '[', 'F' };
+            keyboard_inject(esc, 3);
+        }
         return;
     }
 

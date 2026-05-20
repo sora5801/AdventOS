@@ -94,28 +94,35 @@ static void process_scancode(uint8_t sc) {
 
     if (e0_prefix) {
         e0_prefix = 0;
+        /* Session 168 — modifier-aware arrow + Home / End.  Plain
+         * forms keep the original 3-byte CSI; shifted forms emit
+         * the xterm-style ESC '[' '1' ';' '2' <final> that wmterm
+         * intercepts for keyboard-driven selection. */
+        char final = 0;
         switch (sc) {
-            case 0x48: push_csi('A'); return;                   /* Up */
-            case 0x50: push_csi('B'); return;                   /* Down */
-            case 0x4D: push_csi('C'); return;                   /* Right */
-            case 0x4B: push_csi('D'); return;                   /* Left */
-            /* Session 161 — PageUp / PageDown emit the 4-byte
-             * ANSI sequence ESC '[' 5 / 6 '~'.  wmterm's input-side
-             * CSI parser intercepts these for scrollback; the
-             * kernel console shell parses them as unknown CSI
-             * (session 159 made sh tolerate parameter bytes) and
-             * silently drops them.  This mirrors the same wiring
-             * usb_hid.c does for USB keyboards. */
-            case 0x49:                                          /* PageUp */
+            case 0x48: final = 'A'; break;                       /* Up */
+            case 0x50: final = 'B'; break;                       /* Down */
+            case 0x4D: final = 'C'; break;                       /* Right */
+            case 0x4B: final = 'D'; break;                       /* Left */
+            case 0x47: final = 'H'; break;                       /* Home */
+            case 0x4F: final = 'F'; break;                       /* End */
+            case 0x49:                                           /* PageUp */
                 buf_push(27); buf_push('[');
                 buf_push('5'); buf_push('~');
                 return;
-            case 0x51:                                          /* PageDown */
+            case 0x51:                                           /* PageDown */
                 buf_push(27); buf_push('[');
                 buf_push('6'); buf_push('~');
                 return;
             default: return;
         }
+        if (shift_down) {
+            buf_push(27); buf_push('[');
+            buf_push('1'); buf_push(';'); buf_push('2'); buf_push(final);
+        } else {
+            push_csi(final);
+        }
+        return;
     }
 
     char c = scancode_lower[sc & 0x7F];

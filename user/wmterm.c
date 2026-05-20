@@ -345,6 +345,60 @@ static int sel_copy_text(char *out_buf, int out_cap) {
     return n;
 }
 
+/* Session 168 — Shift+arrow / Shift+Home / Shift+End selection
+ * extender.  If no selection is active, seed the anchor at the
+ * shell's current cursor (rendered as the blinking caret); then
+ * move the head per direction.  Re-copies the resulting selection
+ * to the clipboard each step so the user can paste mid-stride. */
+static void sel_kbd_extend(char direction) {
+    int caret_row = g_sb_count + g_cur_row;
+    if (!sel_active()) {
+        g_sel_anchor_row = caret_row;
+        g_sel_anchor_col = g_cur_col;
+        g_sel_head_row   = caret_row;
+        g_sel_head_col   = g_cur_col;
+        g_sel_dragging   = 0;
+    }
+    switch (direction) {
+        case 'A':                                       /* Up */
+            if (g_sel_head_row > 0) g_sel_head_row--;
+            break;
+        case 'B':                                       /* Down */
+            if (g_sel_head_row < g_sb_count + ROWS - 1)
+                g_sel_head_row++;
+            break;
+        case 'C':                                       /* Right */
+            if (g_sel_head_col < COLS - 1)
+                g_sel_head_col++;
+            else if (g_sel_head_row < g_sb_count + ROWS - 1) {
+                g_sel_head_row++;
+                g_sel_head_col = 0;
+            }
+            break;
+        case 'D':                                       /* Left */
+            if (g_sel_head_col > 0)
+                g_sel_head_col--;
+            else if (g_sel_head_row > 0) {
+                g_sel_head_row--;
+                g_sel_head_col = COLS - 1;
+            }
+            break;
+        case 'H':                                       /* Home — line start */
+            g_sel_head_col = 0;
+            break;
+        case 'F':                                       /* End — line end */
+            g_sel_head_col = COLS - 1;
+            break;
+    }
+    /* Auto-copy the in-progress selection so the user can paste
+     * without an extra gesture. */
+    if (sel_active()) {
+        char cbuf[2048];
+        int n = sel_copy_text(cbuf, sizeof(cbuf));
+        if (n > 0) sys_clipboard_set(cbuf, n);
+    }
+}
+
 /* Convert surface-local pixel (sx, sy) to grid (abs_row, col).
  * Returns 0 if outside the grid (above header / off the bottom). */
 static int xy_to_cell(int sx, int sy, int *out_abs_row, int *out_col) {
@@ -614,6 +668,20 @@ static void csi_dispatch(char final) {
             g_cur_col = 0;          /* default col when only row given */
             return;
         }
+        case 'G': {
+            /* Session 168 — Cursor Horizontal Absolute.  Move the
+             * cursor to column N (1-based) on the current row.
+             * sh.elf's position_cursor emits this for mid-line
+             * edits (backspace, Ctrl-A, history nav).  Before
+             * this, the only thing sh emitted was sys_tty_cursor
+             * (kernel-console-only); the caret in wmterm stayed
+             * at end-of-line through every mid-line edit. */
+            int col = csi_get_param(1);
+            if (col < 1)    col = 1;
+            if (col > COLS) col = COLS;
+            g_cur_col = col - 1;
+            return;
+        }
         case 'm':
             /* Session 166 — Select Graphic Rendition.  Updates the
              * current fg/bg state used by subsequent printable chars. */
@@ -708,13 +776,25 @@ static void key_byte(int master, unsigned char b) {
         return;
     }
     /* Final byte (0x40..0x7E): sequence complete.  Match wmterm
-     * specials (PgUp/PgDn = '5~' / '6~'); flush everything else
-     * through to the PTY so arrows and friends still work. */
+     * specials (PgUp/PgDn, Shift+arrow, Shift+Home/End); flush
+     * everything else through to the PTY so arrows and friends
+     * still work. */
     if (b >= 0x40 && b <= 0x7E) {
         if (g_kbd_esc_len == 4 && g_kbd_esc[2] == '5' && b == '~') {
             scroll_up();
         } else if (g_kbd_esc_len == 4 && g_kbd_esc[2] == '6' && b == '~') {
             scroll_down();
+        } else if (g_kbd_esc_len == 6
+                   && g_kbd_esc[2] == '1'
+                   && g_kbd_esc[3] == ';'
+                   && g_kbd_esc[4] == '2'
+                   && (b == 'A' || b == 'B' || b == 'C' || b == 'D'
+                       || b == 'H' || b == 'F')) {
+            /* Session 168 — keyboard-driven selection.  Shift+arrow
+             * / Shift+Home / Shift+End extend the selection
+             * relative to the shell's current cursor position
+             * (which we render with the blinking caret). */
+            sel_kbd_extend((char)b);
         } else {
             sys_write(master, g_kbd_esc, g_kbd_esc_len);
         }
@@ -829,6 +909,19 @@ int main(int argc, char **argv) {
                     if (g_verbose)
                         printf("wmterm: PRESS x=%u y=%u btn=%u\n",
                                ev.x, ev.y, ev.button);
+                    /* Session 168 — middle-click paste, X11-style.
+                     * Reads the current clipboard and writes it into
+                     * the PTY master.  Same mechanism as Ctrl-V but
+                     * triggered by the mouse so the user can paste
+                     * without leaving the pointer. */
+                    if (ev.button & WM_BUTTON_MIDDLE) {
+                        char pbuf[1024];
+                        int pn = sys_clipboard_get(pbuf, sizeof(pbuf));
+                        if (pn > 0) sys_write(master, pbuf, pn);
+                        if (g_verbose)
+                            printf("wmterm: MPASTE n=%d\n", pn);
+                        break;
+                    }
                     if (ev.button & WM_BUTTON_LEFT) {
                         int r, c;
                         if (xy_to_cell((int)ev.x, (int)ev.y, &r, &c)) {
