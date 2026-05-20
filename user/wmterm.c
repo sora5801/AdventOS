@@ -113,12 +113,51 @@ static const unsigned int g_palette[16] = {
     0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
 };
 
+/* Session 167 — 256-colour resolution.  Index 0..15 returns the
+ * 16-colour palette above.  16..231 is the 6×6×6 RGB cube xterm
+ * defines: index = 16 + 36*r + 6*g + b for r,g,b in [0..5].  Each
+ * channel maps to 0 (when 0) or 55 + 40*n (when n in 1..5).
+ * 232..255 is a 24-step grayscale ramp at v = 8 + 10*(i - 232).
+ *
+ * Index 255 is unreachable through normal SGR because it collides
+ * with our COLOR_DEFAULT sentinel; user gets palette index 254
+ * (almost-white grayscale) or palette index 15 (bright white)
+ * instead.  Acceptable single-cell loss. */
+static unsigned int palette256(int i) {
+    if (i < 0 || i > 255) return 0;
+    if (i < 16) return g_palette[i];
+    if (i < 232) {
+        i -= 16;
+        int r = (i / 36) % 6;
+        int g = (i / 6)  % 6;
+        int b =  i       % 6;
+        int R = r ? r * 40 + 55 : 0;
+        int G = g ? g * 40 + 55 : 0;
+        int B = b ? b * 40 + 55 : 0;
+        return ((unsigned)R << 16) | ((unsigned)G << 8) | (unsigned)B;
+    }
+    int v = 8 + (i - 232) * 10;
+    return ((unsigned)v << 16) | ((unsigned)v << 8) | (unsigned)v;
+}
+
+/* Session 167 — per-cell rendering attributes packed into one byte.
+ * Bit 0 = underline (SGR 4), bit 1 = strikethrough (SGR 9),
+ * bit 2 = italic (SGR 3 — stored but not rendered; the 8x8 bitmap
+ * font has no italic glyphs).  Stays 0 by default. */
+#define ATTR_UNDERLINE 0x01
+#define ATTR_STRIKE    0x02
+#define ATTR_ITALIC    0x04
+static unsigned char g_grid_attr[ROWS][COLS];
+static unsigned char g_sb_attr[SB_ROWS][COLS];
+static unsigned char g_cur_attr = 0;     /* active SGR attribute mask */
+
 static void grid_clear(void) {
     for (int r = 0; r < ROWS; r++)
         for (int c = 0; c < COLS; c++) {
-            g_grid[r][c]    = 0;
-            g_grid_fg[r][c] = COLOR_DEFAULT;
-            g_grid_bg[r][c] = COLOR_DEFAULT;
+            g_grid[r][c]      = 0;
+            g_grid_fg[r][c]   = COLOR_DEFAULT;
+            g_grid_bg[r][c]   = COLOR_DEFAULT;
+            g_grid_attr[r][c] = 0;
         }
     g_cur_col = 0;
     g_cur_row = 0;
@@ -127,6 +166,7 @@ static void grid_clear(void) {
     g_view_offset = 0;
     g_cur_fg = -1;
     g_cur_bg = -1;
+    g_cur_attr = 0;
 }
 
 /* Shift every row up by one; the top row goes into the scrollback
@@ -134,23 +174,26 @@ static void grid_clear(void) {
 static void grid_scroll(void) {
     int slot = (g_sb_head + g_sb_count) % SB_ROWS;
     for (int c = 0; c < COLS; c++) {
-        g_sb[slot][c]    = g_grid[0][c];
-        g_sb_fg[slot][c] = g_grid_fg[0][c];
-        g_sb_bg[slot][c] = g_grid_bg[0][c];
+        g_sb[slot][c]      = g_grid[0][c];
+        g_sb_fg[slot][c]   = g_grid_fg[0][c];
+        g_sb_bg[slot][c]   = g_grid_bg[0][c];
+        g_sb_attr[slot][c] = g_grid_attr[0][c];
     }
     if (g_sb_count < SB_ROWS) g_sb_count++;
     else g_sb_head = (g_sb_head + 1) % SB_ROWS;
 
     for (int r = 0; r < ROWS - 1; r++)
         for (int c = 0; c < COLS; c++) {
-            g_grid[r][c]    = g_grid[r+1][c];
-            g_grid_fg[r][c] = g_grid_fg[r+1][c];
-            g_grid_bg[r][c] = g_grid_bg[r+1][c];
+            g_grid[r][c]      = g_grid[r+1][c];
+            g_grid_fg[r][c]   = g_grid_fg[r+1][c];
+            g_grid_bg[r][c]   = g_grid_bg[r+1][c];
+            g_grid_attr[r][c] = g_grid_attr[r+1][c];
         }
     for (int c = 0; c < COLS; c++) {
-        g_grid[ROWS-1][c]    = 0;
-        g_grid_fg[ROWS-1][c] = COLOR_DEFAULT;
-        g_grid_bg[ROWS-1][c] = COLOR_DEFAULT;
+        g_grid[ROWS-1][c]      = 0;
+        g_grid_fg[ROWS-1][c]   = COLOR_DEFAULT;
+        g_grid_bg[ROWS-1][c]   = COLOR_DEFAULT;
+        g_grid_attr[ROWS-1][c] = 0;
     }
 }
 
@@ -192,6 +235,15 @@ static const unsigned char *visible_bg_row(int r) {
     return (gr < ROWS) ? g_grid_bg[gr] : 0;
 }
 
+static const unsigned char *visible_attr_row(int r) {
+    int abs_row = (g_sb_count - g_view_offset) + r;
+    if (abs_row < 0) return 0;
+    if (abs_row < g_sb_count)
+        return g_sb_attr[(g_sb_head + abs_row) % SB_ROWS];
+    int gr = abs_row - g_sb_count;
+    return (gr < ROWS) ? g_grid_attr[gr] : 0;
+}
+
 /* Session 165 — absolute-row variant of visible_row.  Selection is
  * stored in absolute row indices (across the whole sb+grid stream)
  * so the range stays correct when the user scrolls.  Returns 0 if
@@ -215,6 +267,12 @@ static const char *get_abs_row(int abs_idx) {
 static int g_sel_anchor_row = -1, g_sel_anchor_col = -1;
 static int g_sel_head_row   = -1, g_sel_head_col   = -1;
 static int g_sel_dragging = 0;        /* button held since press */
+/* Session 167 — double-click word-select tracking.  Tick number +
+ * cell coords of the most recent PRESS; a second PRESS within 10
+ * ticks and ±1 column triggers word selection. */
+static int g_last_press_tick = -100;
+static int g_last_press_row  = -1;
+static int g_last_press_col  = -1;
 
 static int sel_active(void) {
     return g_sel_anchor_row >= 0 && g_sel_head_row >= 0
@@ -293,8 +351,10 @@ static int xy_to_cell(int sx, int sy, int *out_abs_row, int *out_col) {
     if (sx < GRID_X || sy < GRID_Y) return 0;
     int c = (sx - GRID_X) / CELL_W;
     int r = (sy - GRID_Y) / LINE_H;
-    if (c < 0) c = 0; if (c >= COLS) c = COLS - 1;
-    if (r < 0) r = 0; if (r >= ROWS) r = ROWS - 1;
+    if (c < 0) c = 0;
+    if (c >= COLS) c = COLS - 1;
+    if (r < 0) r = 0;
+    if (r >= ROWS) r = ROWS - 1;
     *out_col     = c;
     *out_abs_row = (g_sb_count - g_view_offset) + r;
     return 1;
@@ -321,11 +381,12 @@ static void grid_putc_printable(char c) {
             g_cur_row = ROWS - 1;
         }
     }
-    g_grid[g_cur_row][g_cur_col]    = c;
-    g_grid_fg[g_cur_row][g_cur_col] = (g_cur_fg < 0) ? COLOR_DEFAULT
-                                                    : (unsigned char)g_cur_fg;
-    g_grid_bg[g_cur_row][g_cur_col] = (g_cur_bg < 0) ? COLOR_DEFAULT
-                                                    : (unsigned char)g_cur_bg;
+    g_grid[g_cur_row][g_cur_col]      = c;
+    g_grid_fg[g_cur_row][g_cur_col]   = (g_cur_fg < 0) ? COLOR_DEFAULT
+                                                     : (unsigned char)g_cur_fg;
+    g_grid_bg[g_cur_row][g_cur_col]   = (g_cur_bg < 0) ? COLOR_DEFAULT
+                                                     : (unsigned char)g_cur_bg;
+    g_grid_attr[g_cur_row][g_cur_col] = g_cur_attr;
     g_cur_col++;
 }
 
@@ -383,54 +444,96 @@ static int csi_get_param(int dflt) {
  *   90..97  bright foreground (== 8..15)
  *   100..107 bright background
  * Unknown params are ignored. */
+/* Helper: parse one decimal token from g_csi_param starting at *idx,
+ * advancing past digits.  Returns the value (0 if no digits). */
+static int sgr_parse_num(int *idx) {
+    int v = 0;
+    while (*idx < g_csi_param_len
+           && g_csi_param[*idx] >= '0'
+           && g_csi_param[*idx] <= '9') {
+        v = v * 10 + (g_csi_param[*idx] - '0');
+        (*idx)++;
+    }
+    return v;
+}
+
 static void apply_sgr(void) {
     int idx = 0;
     /* Empty sequence (CSI m with no params) is treated as CSI 0 m. */
     if (g_csi_param_len == 0) {
-        g_cur_fg = -1; g_cur_bg = -1;
+        g_cur_fg = -1; g_cur_bg = -1; g_cur_attr = 0;
         return;
     }
     while (idx < g_csi_param_len) {
-        int v = 0, any = 0;
-        while (idx < g_csi_param_len
-               && g_csi_param[idx] >= '0'
-               && g_csi_param[idx] <= '9') {
-            v = v * 10 + (g_csi_param[idx] - '0');
-            any = 1;
-            idx++;
-        }
-        if (!any) v = 0;            /* "CSI ;31m" — empty param = 0 */
-        if (v == 0)                 { g_cur_fg = -1; g_cur_bg = -1; }
+        int start = idx;
+        int v = sgr_parse_num(&idx);
+        if (idx == start) v = 0;          /* "CSI ;31m" — empty = 0 */
+        if (v == 0)                       { g_cur_fg = -1; g_cur_bg = -1;
+                                            g_cur_attr = 0; }
         else if (v == 1) {                 /* bold = bright fg */
             int f = (g_cur_fg < 0) ? 7 : (g_cur_fg & 0x07);
             g_cur_fg = f | 0x08;
         }
+        else if (v == 3)                  g_cur_attr |= ATTR_ITALIC;
+        else if (v == 4)                  g_cur_attr |= ATTR_UNDERLINE;
+        else if (v == 9)                  g_cur_attr |= ATTR_STRIKE;
         else if (v == 22) {                /* cancel bold */
-            if (g_cur_fg >= 0) g_cur_fg &= 0x07;
+            if (g_cur_fg >= 0 && g_cur_fg < 16) g_cur_fg &= 0x07;
         }
+        else if (v == 23)                 g_cur_attr &= (unsigned char)~ATTR_ITALIC;
+        else if (v == 24)                 g_cur_attr &= (unsigned char)~ATTR_UNDERLINE;
+        else if (v == 29)                 g_cur_attr &= (unsigned char)~ATTR_STRIKE;
         else if (v >= 30 && v <= 37)       g_cur_fg = v - 30;
         else if (v == 38) {
-            /* Skip "5;N" or "2;R;G;B" extended-colour tail and clamp
-             * to the 16-colour palette. */
+            /* 38;5;N — 256-colour foreground.  38;2;R;G;B — direct
+             * RGB; not stored as full RGB so we approximate by
+             * picking the nearest of the 6×6×6 cube. */
             if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
-            int mode = 0;
-            while (idx < g_csi_param_len
-                   && g_csi_param[idx] >= '0'
-                   && g_csi_param[idx] <= '9') {
-                mode = mode * 10 + (g_csi_param[idx] - '0'); idx++;
-            }
+            int mode = sgr_parse_num(&idx);
             if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
-            int n = 0;
-            while (idx < g_csi_param_len
-                   && g_csi_param[idx] >= '0'
-                   && g_csi_param[idx] <= '9') {
-                n = n * 10 + (g_csi_param[idx] - '0'); idx++;
+            if (mode == 5) {
+                int n = sgr_parse_num(&idx);
+                /* Clamp to 0..254; 255 collides with COLOR_DEFAULT. */
+                if (n < 0) n = 0;
+                if (n > 254) n = 254;
+                g_cur_fg = n;
+            } else if (mode == 2) {
+                int R = sgr_parse_num(&idx);
+                if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+                int G = sgr_parse_num(&idx);
+                if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+                int B = sgr_parse_num(&idx);
+                /* Map to nearest 6×6×6 cube point. */
+                int r6 = (R * 5 + 127) / 255;
+                int g6 = (G * 5 + 127) / 255;
+                int b6 = (B * 5 + 127) / 255;
+                g_cur_fg = 16 + 36*r6 + 6*g6 + b6;
             }
-            (void)mode;
-            g_cur_fg = n & 0x0F;
         }
         else if (v == 39)                  g_cur_fg = -1;
         else if (v >= 40 && v <= 47)       g_cur_bg = v - 40;
+        else if (v == 48) {
+            /* 48;5;N or 48;2;R;G;B — background variants of 38. */
+            if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+            int mode = sgr_parse_num(&idx);
+            if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+            if (mode == 5) {
+                int n = sgr_parse_num(&idx);
+                if (n < 0) n = 0;
+                if (n > 254) n = 254;
+                g_cur_bg = n;
+            } else if (mode == 2) {
+                int R = sgr_parse_num(&idx);
+                if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+                int G = sgr_parse_num(&idx);
+                if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+                int B = sgr_parse_num(&idx);
+                int r6 = (R * 5 + 127) / 255;
+                int g6 = (G * 5 + 127) / 255;
+                int b6 = (B * 5 + 127) / 255;
+                g_cur_bg = 16 + 36*r6 + 6*g6 + b6;
+            }
+        }
         else if (v == 49)                  g_cur_bg = -1;
         else if (v >= 90 && v <= 97)       g_cur_fg = (v - 90) | 0x08;
         else if (v >= 100 && v <= 107)     g_cur_bg = (v - 100) | 0x08;
@@ -729,11 +832,56 @@ int main(int argc, char **argv) {
                     if (ev.button & WM_BUTTON_LEFT) {
                         int r, c;
                         if (xy_to_cell((int)ev.x, (int)ev.y, &r, &c)) {
-                            g_sel_anchor_row = r;
-                            g_sel_anchor_col = c;
-                            g_sel_head_row   = r;
-                            g_sel_head_col   = c;
-                            g_sel_dragging   = 1;
+                            /* Session 167 — double-click selects the
+                             * word at the click cell.  "Word" = run of
+                             * printable non-whitespace chars; we scan
+                             * outward from the click column until we
+                             * hit a space or column boundary.  A
+                             * 10-tick (~330 ms at 30 fps) threshold
+                             * matches typical double-click windows. */
+                            int dc_dt  = tick - g_last_press_tick;
+                            int dc_dx  = c - g_last_press_col;
+                            if (dc_dx < 0) dc_dx = -dc_dx;
+                            int dclick = (dc_dt < 10
+                                          && g_last_press_row == r
+                                          && dc_dx <= 1);
+                            if (dclick) {
+                                const char *rowdata = get_abs_row(r);
+                                if (rowdata) {
+                                    int sc = c, ec = c;
+                                    while (sc > 0
+                                           && rowdata[sc-1] > ' '
+                                           && rowdata[sc-1] < 0x7F) sc--;
+                                    while (ec < COLS - 1
+                                           && rowdata[ec+1] > ' '
+                                           && rowdata[ec+1] < 0x7F) ec++;
+                                    g_sel_anchor_row = r;
+                                    g_sel_anchor_col = sc;
+                                    g_sel_head_row   = r;
+                                    g_sel_head_col   = ec;
+                                    g_sel_dragging   = 0;
+                                    /* Auto-copy on double-click, same
+                                     * as drag-then-release. */
+                                    if (sel_active()) {
+                                        char cbuf[1024];
+                                        int n = sel_copy_text(cbuf, sizeof(cbuf));
+                                        if (n > 0)
+                                            sys_clipboard_set(cbuf, n);
+                                        if (g_verbose)
+                                            printf("wmterm: WORDCOPY n=%d\n", n);
+                                    }
+                                }
+                                g_last_press_tick = -100;
+                            } else {
+                                g_sel_anchor_row = r;
+                                g_sel_anchor_col = c;
+                                g_sel_head_row   = r;
+                                g_sel_head_col   = c;
+                                g_sel_dragging   = 1;
+                                g_last_press_tick = tick;
+                                g_last_press_row  = r;
+                                g_last_press_col  = c;
+                            }
                         }
                     }
                     break;
@@ -845,26 +993,27 @@ int main(int argc, char **argv) {
 
         for (int r = 0; r < ROWS; r++) {
             const char *row = visible_row(r);
-            const unsigned char *fg_row = visible_fg_row(r);
-            const unsigned char *bg_row = visible_bg_row(r);
+            const unsigned char *fg_row   = visible_fg_row(r);
+            const unsigned char *bg_row   = visible_bg_row(r);
+            const unsigned char *attr_row = visible_attr_row(r);
             int abs_r = (g_sb_count - g_view_offset) + r;
             for (int c = 0; c < COLS; c++) {
                 char ch = row ? row[c] : 0;
-                unsigned char fgi = fg_row ? fg_row[c] : COLOR_DEFAULT;
-                unsigned char bgi = bg_row ? bg_row[c] : COLOR_DEFAULT;
+                unsigned char fgi  = fg_row   ? fg_row[c]   : COLOR_DEFAULT;
+                unsigned char bgi  = bg_row   ? bg_row[c]   : COLOR_DEFAULT;
+                unsigned char attr = attr_row ? attr_row[c] : 0;
                 int x = GRID_X + c * CELL_W;
                 int y = GRID_Y + r * LINE_H;
-                /* Session 165 — selection highlight overrides bg. */
                 int selected = in_selection(abs_r, c);
-                /* Session 166 — pick fg/bg from palette when SGR
-                 * set them, otherwise stick with the default
-                 * sage-green-on-near-black look. */
+                /* Session 167 — palette256() lookup so 256-colour
+                 * SGR codes (38;5;N) render with the right RGB
+                 * instead of the old N-mod-16 clamp. */
                 unsigned int fg = (fgi == COLOR_DEFAULT)
                                   ? 0xC0E0C0u
-                                  : g_palette[fgi & 0x0F];
+                                  : palette256(fgi);
                 unsigned int bg = (bgi == COLOR_DEFAULT)
                                   ? (unsigned int)GFX_TRANSPARENT
-                                  : g_palette[bgi & 0x0F];
+                                  : palette256(bgi);
                 if (selected) bg = 0x405068u;
                 if (bg != (unsigned int)GFX_TRANSPARENT) {
                     wm_fill_rect(&win, x, y, CELL_W, LINE_H, bg);
@@ -874,6 +1023,16 @@ int main(int argc, char **argv) {
                               bg == (unsigned int)GFX_TRANSPARENT
                                   ? GFX_TRANSPARENT : bg);
                 }
+                /* Session 167 — underline + strikethrough overlay.
+                 * 1-px lines in the cell's foreground colour.  The
+                 * underline sits at the bottom of the glyph box;
+                 * strikethrough crosses the middle.  Italic is
+                 * stored but not rendered (the 8x8 font has no
+                 * italic glyphs). */
+                if (attr & ATTR_UNDERLINE)
+                    wm_fill_rect(&win, x, y + LINE_H - 2, CELL_W, 1, fg);
+                if (attr & ATTR_STRIKE)
+                    wm_fill_rect(&win, x, y + LINE_H / 2, CELL_W, 1, fg);
             }
         }
 

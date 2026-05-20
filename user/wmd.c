@@ -241,6 +241,7 @@ enum cursor_kind {
     CUR_V_RESIZE,         /* S edge   — vertical double arrow */
     CUR_DIAG_NW_SE,       /* SE corner — NW <-> SE diagonal */
     CUR_DIAG_NE_SW,       /* SW corner — NE <-> SW diagonal */
+    CUR_MOVE,             /* title bar — 4-way move (session 167) */
 };
 
 struct cursor_spec {
@@ -348,6 +349,30 @@ static const struct cursor_spec g_cursors[] = {
             "  ##.##",
             "  ####",
             " #####",
+        },
+    },
+    [CUR_MOVE] = {
+        /* Title bar — 4-way move arrow.  13×11, hot at (5, 6) — the
+         * centre of the horizontal bar.  Black-outlined plus shape
+         * with whites inside the arrowheads so the smoke's
+         * white-near-black filter keeps the pixels in the
+         * fingerprint and the eye can tell it apart from the
+         * resize cursors. */
+        .hot_x = 5, .hot_y = 6, .rows = 13,
+        .art = {
+            "     #     ",
+            "    #.#    ",
+            "   #...#   ",
+            "     #     ",
+            "#    #    #",
+            "#.#######.#",
+            "###########",
+            "#.#######.#",
+            "#    #    #",
+            "     #     ",
+            "   #...#   ",
+            "    #.#    ",
+            "     #     ",
         },
     },
 };
@@ -1044,8 +1069,16 @@ static int drain_wm_messages(unsigned int fb_w, unsigned int fb_h) {
              * so multiple test clients don't all overlap. */
             if (g_window_count >= MAX_WINDOWS) continue;
             struct window *w = &g_windows[g_window_count++];
-            int total_w = (int)m.w + 4;          /* +2px border each side */
-            int total_h = (int)m.h + TITLE_H + 2;
+            /* Session 167 — was m.w + 4 (and m.h + TITLE_H + 2).
+             * The extra 2 px width / 1 px height of "padding"
+             * between the client surface and the white window
+             * frame got filled with content_color (GFX_BLACK for
+             * CLIENT), producing a visible black seam on the right
+             * and bottom edges of every wmterm.  Shrink to
+             * surface + frame so the surface fills the inner area
+             * exactly. */
+            int total_w = (int)m.w + 2;          /* 1-px frame each side */
+            int total_h = (int)m.h + TITLE_H + 1;
             int slot = g_window_count - 1;
             w->x = 100 + slot * 60;
             w->y = 200 + slot * 40;
@@ -1854,13 +1887,24 @@ int main(int argc, char **argv) {
         enum cursor_kind ck = CUR_ARROW;
         if (g_resize_dir != RES_NONE) {
             ck = cursor_for_zone(g_resize_dir);
+        } else if (g_drag_idx >= 0) {
+            /* Session 167 — active title-bar drag.  Keep the move
+             * cursor visible until the user releases. */
+            ck = CUR_MOVE;
         } else {
             int hit_for_cursor = hit_test(ms.x, ms.y);
             if (hit_for_cursor >= 0
                 && g_windows[hit_for_cursor].kind == KIND_CLIENT) {
                 int zone = in_resize_zone(&g_windows[hit_for_cursor],
                                           ms.x, ms.y);
-                ck = cursor_for_zone(zone);
+                if (zone != RES_NONE) {
+                    ck = cursor_for_zone(zone);
+                } else if (in_titlebar(&g_windows[hit_for_cursor],
+                                       ms.x, ms.y)) {
+                    /* Session 167 — hover the title bar to signal
+                     * "drag here to move". */
+                    ck = CUR_MOVE;
+                }
             }
         }
         draw_cursor(&ctx, ck, ms.x, ms.y);

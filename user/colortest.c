@@ -23,5 +23,15 @@ int main(int argc, char **argv) {
     put("\033[1;31mBRED\033[0m "
         "\033[1;32mBGREEN\033[0m "
         "\033[44;37mWBLUE\033[0m\n");
+    /* Session 167 — underline, strikethrough, italic. */
+    put("\033[4mUNDER\033[0m "
+        "\033[9mSTRIKE\033[0m "
+        "\033[3mITAL\033[0m\n");
+    /* Session 167 — 256-color cube samples. */
+    put("\033[38;5;196mC196\033[0m "       /* deep red */
+        "\033[38;5;46mC46\033[0m "         /* lime */
+        "\033[38;5;33mC33\033[0m "         /* bright blue */
+        "\033[38;5;226mC226\033[0m "       /* yellow */
+        "\033[38;5;244mGRAY\033[0m\n");    /* mid grayscale */
     return 0;
 }

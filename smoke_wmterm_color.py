@@ -182,20 +182,7 @@ def main():
 
         w, h, p = shot("colortest")
 
-        # The colortest output starts with the first word "RED" at
-        # grid col 0.  Each word is then followed by a space then
-        # the next word, in the order RED GREEN YELLOW BLUE MAGENTA
-        # CYAN.  Exact x positions depend on prompt + echo offsets;
-        # rather than hard-code, we sample a horizontal band across
-        # the row where the colored output landed and count palette
-        # hits per colour.
-        #
-        # Body row math: wmterm surface starts at screen y=218,
-        # GRID_Y = 24 (header), LINE_H = 10.  Banner + echo + cmd
-        # echo + prompt fill the first ~5-6 rows; colortest's first
-        # output line lands around row 6 or 7.  We scan rows 5..15
-        # for any pixels close to each palette entry and pick the
-        # row with the highest count.
+        # 16-color palette entries from line 1 of colortest output.
         palette = {
             "red":     (0xCC, 0x00, 0x00),
             "green":   (0x00, 0xCC, 0x00),
@@ -203,6 +190,14 @@ def main():
             "blue":    (0x00, 0x00, 0xCC),
             "magenta": (0xCC, 0x00, 0xCC),
             "cyan":    (0x00, 0xCC, 0xCC),
+        }
+        # Session 167 — 256-color cube samples from line 4 of
+        # colortest output.  These exercise palette256() — RGB
+        # computed from the xterm formula, not from g_palette[].
+        # C196 = (255, 0, 0), C46 = (0, 255, 0), C33 = (0, 135, 215).
+        palette256_samples = {
+            "c196": (0xFF, 0x00, 0x00),
+            "c46":  (0x00, 0xFF, 0x00),
         }
 
         def count_color(row_y, color):
@@ -224,16 +219,63 @@ def main():
                 if n > best: best = n
             results[name] = best
             print(f"   {name:<8} = {best} px")
+        for name, color in palette256_samples.items():
+            best = 0
+            for y in range(242, 482, 2):
+                n = count_color(y, color)
+                if n > best: best = n
+            results[name] = best
+            print(f"   {name:<8} = {best} px")
 
-        # We expect each colour name to appear once on the colortest
-        # output line — that's ~6 chars × 8px = ~48 colored pixels
-        # roughly, given the 8x8 font.  Threshold low because some
-        # glyphs are sparse and the body fill counts background, not
-        # glyph fg.  Want non-zero per colour.
         checks = []
         for name, _ in palette.items():
             checks.append((f"colour '{name}' visible on grid",
                            results[name] >= 5))
+        for name, _ in palette256_samples.items():
+            checks.append((f"256-colour '{name}' visible on grid",
+                           results[name] >= 3))
+
+        # Session 167 — window seam fix.  Pre-session-167 wmd
+        # filled a 2-px column at x=641, 642 with content_color
+        # GFX_BLACK between the wmterm surface and the white
+        # frame.  Verify those columns are NO LONGER pure black
+        # at a body y-coordinate.  After the +4 → +2 size fix,
+        # the right edge of the window is at x = 641 (white
+        # frame), with the surface filling all the way up to
+        # x = 640.
+        seam_y = 300       # well inside the body
+        seam_black = 0
+        for x in (641, 642):
+            i = (seam_y * w + x) * 3
+            if p[i] == 0 and p[i+1] == 0 and p[i+2] == 0:
+                seam_black += 1
+        checks.append(("right-edge seam no longer pure black",
+                       seam_black == 0))
+
+        # Session 167 — strikethrough renders a 1-px horizontal
+        # line at mid-cell.  colortest writes STRIKE on line 3
+        # of its output; we sweep that vicinity for a row of
+        # consecutive default-fg pixels in the middle of a cell.
+        # Cheap approximation: look for any sage-green run > 6 px
+        # wide between glyph rows.  Hit count is a rough proxy.
+        sage_count = 0
+        for y in range(242, 482, 2):
+            row_run = 0
+            for x in range(108, 640):
+                i = (y * w + x) * 3
+                if near((p[i], p[i+1], p[i+2]),
+                        (0xC0, 0xE0, 0xC0), tol=25):
+                    row_run += 1
+                    if row_run > sage_count: sage_count = row_run
+                else:
+                    row_run = 0
+        # If any single y-row has a contiguous run of >=6 sage-green
+        # pixels, that's evidence of a strikethrough OR underline
+        # line.  Real wmterm output uses 0xC0E0C0 only for default
+        # fg glyphs, which are 1-px-wide vertical strokes mostly —
+        # rarely forming a horizontal 6+ run.  Threshold 5 is safe.
+        checks.append(("underline/strikethrough horizontal line drawn",
+                       sage_count >= 5))
 
         ser_stop.set(); time.sleep(0.3)
         with ser_lock:
