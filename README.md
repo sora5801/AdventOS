@@ -1,6 +1,6 @@
-# AdventOS
+# AdventOS — v1.0.0
 
-A 32-bit i386 operating system written from scratch in C. Boots on bare hardware (and inside QEMU), runs preemptive multitasking with SMP, talks TCP/UDP/DHCP/DNS/NTP/TLS 1.2, hosts in-guest HTTP/HTTPS/SSH/IRC servers, supports USB HID + Mass Storage, and ships a Unix-like userland with fork/exec, pipes, jobs, signals, sandbox/limits, a JSON-RPC daemon, and an in-guest ptrace debugger.
+A 32-bit i386 operating system written from scratch in C. Boots on bare hardware (and inside QEMU), runs preemptive multitasking with SMP, talks TCP/UDP/DHCP/DNS/NTP/TLS 1.3, hosts in-guest HTTP/HTTPS/SSH/IRC servers, supports USB HID + Mass Storage, and ships a Unix-like userland with fork/exec, pipes, jobs, signals, sandbox/limits, a JSON-RPC daemon, and an in-guest ptrace debugger.
 
 ```
     _       _                  _    ___  ____
@@ -9,6 +9,11 @@ A 32-bit i386 operating system written from scratch in C. Boots on bare hardware
  / ___ \ (_| |\ V /  __/ | | | |_| |_| |___) |
 /_/   \_\__,_| \_/ \___|_| |_|\__|\___/|____/
 ```
+
+**v1.0.0** — 171 sessions of work.  Reading order, subsystem
+breakdown, and per-feature session logs are in
+[`docs/INDEX.md`](docs/INDEX.md).  v1.0 readiness rubric is in
+[`docs/158-v1.0-readiness.md`](docs/158-v1.0-readiness.md).
 
 ## What works today
 
@@ -89,7 +94,7 @@ libcrypto/   From-scratch crypto: SHA-256, AES, P-256 ECDH, RSA, HMAC, X.509
 libjson/     Streaming JSON parser/emitter for the agent-RPC + structured pipelines
 include/     Shared kernel+userland headers (io, types, etc.)
 fs/          Files included at mkfs time (passwd, ssl certs, agent.tools.json…)
-docs/        Per-session technical deep dives (sessions 1–83+)
+docs/        Per-session technical deep dives (171 docs; index at docs/INDEX.md)
 mkfs.py      Builds the AdventFS image
 build.sh     Orchestrates the whole build
 ```
@@ -98,119 +103,76 @@ build.sh     Orchestrates the whole build
 
 The project advances in numbered "sessions" — each session is a focused chunk of work that lands as one or more git commits plus a `docs/NN-name.md` deep-dive explaining the design choices and the bugs found. Sessions are not strictly chronological with commit dates; some run a few hours, others span days when a hard bug is being chased.
 
-Current session: **137 — Path B tcc UX polish**. See [`docs/122-pathB-tcc-ux-polish.md`](docs/122-pathB-tcc-ux-polish.md) for the deep dive. `tcc /hello.c -o /myhello.elf` now works on a stock `#include <stdio.h>` + `printf` source — no flags, no hand-written `_start`, no inline asm. A tiny wrapper at `/tcc.elf` (`user/tcc.c`) prepends `-static -nostdlib -Wl,-Ttext=0x40000000 + /tcc/lib/start.c + /tcc/lib/libuser.c` and exec's the raw cross-compiled tcc at `/tccraw.elf`. The raw tcc is rebuilt with `-DCONFIG_TCCDIR='"/tcc"'` (needed `MSYS_NO_PATHCONV=1` to keep msys from mangling the path) so it auto-finds `/tcc/include` for system headers. Ships a 24-file `/tcc/` runtime: `/tcc/lib/start.c + libuser.c` + 6 tcc-shipped headers (stdarg, stddef, etc.) + 16 AdventOS stub headers. `libuser.c` gained two `#ifdef __TINYC__` guards (the mingw `__main` stub + the underscored `_sigreturn_tramp` asm) so it compiles cleanly under both gcc-mingw AND tcc. `libc/stdio.c` learned `%*s` (width-from-arg) — tcc uses it for `-vv` indent prints. `FS_MAX_FILES` bumped 160 → 192 to fit the new runtime.
+171 sessions in, all five paths (A/B/C/D/E) are complete; see
+[`docs/INDEX.md`](docs/INDEX.md) for the full grouped session log.
+Highlight sessions to start with:
 
-Recent session deep dives:
-- [Session 137 — Path B tcc UX polish](docs/122-pathB-tcc-ux-polish.md)
-- [Session 135 — Path B tcc fully works inside AdventOS](docs/121-pathB-tcc-fully-working.md)
-- [Session 134 — Path B tcc port, Phase 2 (running inside AdventOS)](docs/120-pathB-tcc-phase2.md)
-- [Session 133 — Path B tcc port, Phase 1 foundation](docs/119-pathB-tcc-foundation.md)
-- [Session 154 — Path C phase 47: wmedit Ctrl-Y redo](docs/140-pathC-wmedit-redo.md)
-- [Session 153 — Path C phase 46: wmedit Ctrl-Z undo](docs/139-pathC-wmedit-undo.md)
-- [Session 152 — Path C phase 45: wmedit Ctrl-F search](docs/138-pathC-wmedit-search.md)
-- [Session 151 — Path C phase 44: Alt+P screenshot](docs/137-pathC-screenshot.md)
-- [Session 150 — Path C phase 43: wmpaint Ctrl-S save](docs/136-pathC-wmpaint-save.md)
-- [Session 149 — Path C phase 42: wmview image viewer](docs/135-pathC-wmview.md)
-- [Session 126 — Path E phase 9: EHCI transfer integration](docs/127-pathE-ehci-transfers.md)
-- [Session 125 — Path E phase 8: NVMe + EHCI + AHCI IRQ/NCQ + CDC-ECM](docs/126-pathE-nvme-ehci-ahci-ecm.md)
-- [Session 139 — Path C phase 32: wmcalc calculator](docs/125-pathC-wmcalc.md)
-- [Session 138 — Path C phase 31: snap-to-edge + drop shadows](docs/124-pathC-snap-shadows.md)
-- [Session 137 — Path C phase 30: wmedit text editor](docs/123-pathC-wmedit.md)
-- [Session 134 — Path C phase 27: wmterm terminal emulator](docs/120-pathC-wmterm.md)
-- [Session 124 — Path E phase 7: virtio-scsi + CDC-ACM TTY](docs/122-pathE-vscsi-cdc-tty.md)
-- [Session 123 — Path E phase 6: AHCI SATA controller](docs/110-pathE-ahci.md)
-- [Session 122 — Path E phase 5: e1000 NIC + 9p atomic rename](docs/109-pathE-e1000-and-rename.md)
-- [Session 121 — Path E phase 4: 9p writes + IRQ-driven virtio](docs/108-pathE-9p-write-and-irq.md)
-- [Session 120 — Path E phase 3: WSL build + virtio-9p](docs/107-pathE-9p.md)
-- [Session 128 — cc language corners (11 features)](docs/115-pathB-language-corners.md)
-- [Session 125 — cc optimization passes (reg-alloc, const-fold, peephole, DCE)](docs/112-pathB-optimizations.md)
-- [Session 121 — Path B Phase 4 capstone (SBV returns, static/extern, fp typedef)](docs/108-pathB-capstone.md)
-- [Session 119 — Path E phase 2: virtio-rng, virtio-console, virtio-balloon](docs/106-pathE-more-virtio.md)
-- [Session 118 — Path E: drivers (virtio-blk, virtio-net, CDC-ACM, aplay)](docs/105-pathE-drivers.md)
-- [Session 107 — Path C phase 1: userspace framebuffer](docs/94-pathC-fb.md)
-- [Session 106 — cc Phase 3 part 10: struct-by-value calls](docs/93-cc-struct-by-value.md)
-- [Session 105 — cc Phase 3 part 9: variadic functions](docs/92-cc-variadics.md)
-- [Session 104 — cc Phase 3 part 8: typedef](docs/91-cc-typedef.md)
-- [Session 103 — cc Phase 3 part 7: enums](docs/90-cc-enums.md)
-- [Session 102 — cc Phase 3 part 6: array-of-struct + indexed member access](docs/89-cc-array-of-struct.md)
-- [Session 101 — cc Phase 3 part 5: struct value assignment](docs/88-cc-struct-value-assign.md)
-- [Session 100 — cc Phase 3 part 4: multi-file compilation](docs/87-cc-multi-file.md)
-- [Session 99 — cc Phase 3 part 3: sizeof + scaled pointer arith](docs/86-cc-sizeof-and-scaled-pointers.md)
-- [Session 98 — cc Phase 3 part 2: function pointers](docs/85-cc-function-pointers.md)
-- [Session 97 — cc Phase 3 part 1: structs](docs/84-cc-structs.md)
-- [Session 96 — cc Phase 2 part 6: compound operators](docs/83-cc-compound-ops.md)
-- [Session 95 — cc Phase 2 part 5: preprocessor](docs/82-cc-preprocessor.md)
-- [Session 94 — cc Phase 2 part 4: printf](docs/81-cc-printf.md)
-- [Session 93 — cc Phase 2 part 3: globals](docs/80-cc-globals.md)
-- [Session 92 — cc Phase 2 part 2: char + pointers + arrays](docs/79-cc-chars-pointers.md)
-- [Session 91 — cc Phase 2 part 1: string literals + puts](docs/78-cc-strings.md)
-- [Session 90 — A C-subset compiler (`cc`)](docs/77-tinycc.md)
-- [Session 89 — Lua: multi-return + generic for](docs/76-lua-multireturn.md)
-- [Session 88 — Lua: error handling, closures, GC](docs/75-lua-error-handling-and-gc.md)
-- [Session 87 — Lua-syntax interpreter](docs/74-tinylua.md)
-- [Session 86 — vi polish (undo, search/replace, count prefixes, ?pat)](docs/73-vi-polish.md)
-- [Session 85 — Man pages](docs/72-man-pages.md)
-- [Session 84 — Shell mid-line editing](docs/71-shell-mid-line-editing.md)
-- [Session 83 — Usable Unix Phase 1: coreutils gap-fill + selftest reliability](docs/70-usable-unix-coreutils.md)
-
-The full session index is in `docs/`. Highlights:
-- [Session 80 — SMP=2 deadlock fixes](docs/68-smp2-deadlock-fixes.md) (`-smp 2` finally usable)
-- [Session 81 — Structured pipelines (JSONL)](docs/69-structured-pipelines.md) (`\|>` operator)
-- [Session 50 — SSH server](docs/50-ssh-server.md)
-- [Session 36 — TLS 1.3 + HTTPS](docs/36-tls13-https.md)
+- [Session 1 — Bootloader + 32-bit kernel](docs/01-bootloader-and-kernel.md) — how the system boots
+- [Session 14 — fork, exec, wait](docs/14-fork-exec-wait.md) — the Unix surface lands
+- [Session 36 — TLS 1.3 + HTTPS](docs/36-tls13-https.md) — real-world crypto
+- [Session 50 — SSH server](docs/50-ssh-server.md) — ssh in, get a shell
+- [Session 64 — Agent JSON-RPC tooling](docs/64-agent-rpc.md) — agentd surface
+- [Session 80 — SMP=2 deadlock fixes](docs/68-smp2-deadlock-fixes.md) — `-smp 2` finally usable
+- [Session 90 — A C-subset compiler from scratch](docs/77-tinycc.md) — `cc`
+- [Session 111 — Window manager daemon](docs/98-pathC-wm.md) — wmd compositor lands
+- [Session 134 — wmterm terminal emulator](docs/120-pathC-wmterm.md) — terminals
+- [Session 169 — Stability + flake hunt](docs/155-pathC-stability-flake-hunt.md) — how the test discipline works
+- [Session 172 — v1.0 readiness assessment](docs/158-v1.0-readiness.md) — the rubric this release passed
 
 ## Status & scope
 
-AdventOS is a personal-project OS. It targets QEMU 10.x and the bochs/seabios BIOS that ships with it. Real-hardware boot has worked in the past but isn't continuously tested. The OS is single-architecture (i386), single-FS (AdventFS), single-machine — no clustering, no live migration, no certifications.
+AdventOS is a personal-project OS.  It targets QEMU 10.x and the
+bochs/seabios BIOS that ships with it.  Real-hardware boot has worked
+in the past but isn't continuously tested.  The OS is single-
+architecture (i386), single-FS (AdventFS), single-machine — no
+clustering, no live migration, no certifications.
 
-**Path A — Usable Unix is complete** as of session 140. The shell is bash-compatible for everything except job control, `case`/`esac`, and here-docs. Real `.sh` scripts work — control flow, functions, arithmetic, parameter expansion all functional.
+All five development paths reached completion at v1.0.0:
 
-Original Usable Unix run (sessions 83–86):
-- Phase 1 ✅ — coreutils gap-fill (cp/mv/rm/mkdir/rmdir/chmod/touch/find)
-- Phase 2 ✅ — shell mid-line editing (left/right arrows, Ctrl-A/E/W/U/K)
-- Phase 3 ✅ — man pages (`man <topic>`, 26 pages)
-- Phase 4 ✅ — vi polish (undo, count prefixes, `:s/old/new/`, backward search)
+- **Path A — Usable Unix** (sessions 83–86, 136–140): bash-compat
+  shell, mid-line editing, control flow, functions, arithmetic,
+  parameter expansion, tab completion, history recall, brace
+  expansion.  Real `.sh` scripts work.
+- **Path B — Self-hosting compiler** (sessions 90–106, 121, 125,
+  133–137): `cc` (1500-line C-subset compiler from scratch) +
+  `tcc` (vendored real TinyCC).  Both emit ELF32 that runs inside
+  AdventOS.  cc has reg-allocator, const-fold, peephole, DCE.
+- **Path C — Graphics + WM** (sessions 107–169): VBE framebuffer →
+  libgfx → wmd compositor → 10+ apps (wmterm, wmedit, wmcalc,
+  wmpaint, wmview, wmfiles, wmsysinfo, wmps, wmclock, …) →
+  scrollback, selection + clipboard, 256-color terminal, snap
+  preview, workspaces, USB tablet.
+- **Path D — Scripting** (sessions 87–89): Lua-syntax interpreter
+  (`lua`).  ~1100 lines, pcall/error, closures, mark-sweep GC,
+  multi-return, generic `for k,v in pairs(t)`.
+- **Path E — Drivers** (sessions 118–127): virtio family
+  (blk/scsi/net/rng/console/balloon/9p), e1000 NIC, AHCI SATA
+  with NCQ, NVMe (PRP DMA), USB UHCI + EHCI, USB class drivers
+  (HID, MSC, CDC-ACM, CDC-ECM), AC97 audio.
 
-Bash-compat extension (sessions 136–140):
-- Phase 5 ✅ (session 136) — operators `;`, `&&`, `||`, `>>`, `<`, glob `*`/`?`, `$?` last-exit, Ctrl-R reverse history search, dynamic `advent<cwd>$ ` prompt, in-shell `[`/`test` builtin precursors.
-- Phase 6 ✅ (session 137) — scripting fundamentals: `if`/`then`/`elif`/`else`/`fi`, `for VAR in WORDS; do ... done`, `while CMD; do ... done`, shell functions `name() { ... }`, positional args `$0..$9`/`$@`/`$*`/`$#`, builtins `[`/`test`/`read`/`shift`, multi-line script accumulator in `run_script`, single-quote no-expand semantics. Variable expansion deferred from line-level to per-segment so loop bodies see fresh `$x` each iteration.
-- Phase 7 ✅ (session 138) — `cd .` / `cd ..` / mixed paths via a userspace `normalize_path` pass against cwd (`/etc/../mnt` works, `..` walks the actual parent, etc.). Kernel `sys_chdir` only knows single names; the resolver lives entirely in `cmd_cd`.
-- Phase 8 ✅ (session 139) — scripting power-ups: arithmetic `$((expr))` substitution + `((expr))` command form (recursive-descent eval, `+ - * / % == != < <= > >= && || !` plus var assignment), parameter expansion `${var}`/`${var:-x}`/`${var:=x}`/`${#var}`/`${var#pre}`/`${var%suf}`/`${var/old/new}`/`${var//old/new}`, `break [N]`/`continue [N]`/`return [N]` with proper function-boundary save-restore, bare `NAME=value` assignments.
-- Phase 9 ✅ (session 140) — REPL polish: exec-failure no longer hangs (pre-flight `sys_open` probe before fork), tab completion for command names + env var names (not just files), tilde expansion `~` and `~/foo`, `!!`/`!N` history recall, brace expansion `{a,b,c}` and `{N..M}` with cartesian-product fan-out across sequential groups.
+The driver tier covers: **storage** (ATA / AHCI-NCQ / virtio-blk /
+virtio-scsi / NVMe / USB MSC over either HC), **net** (rtl8139 /
+virtio-net / e1000 / USB CDC-ECM), **USB** (UHCI + EHCI both fully
+integrated; HID + MSC + CDC-ACM + CDC-ECM class drivers),
+**filesystem passthrough** (virtio-9p read/write/rename), **misc**
+(virtio-rng / virtio-console / virtio-balloon / AC97 audio).
 
-Deep-dive commits:
-- [Session 136 — Path A polish: bash-compat operators](https://github.com/sora5801/AdventOS/commit/ba50514)
-- [Session 137 — scripting fundamentals: control flow + functions](https://github.com/sora5801/AdventOS/commit/70d128a)
-- [Session 138 — cd `.` / `..` path normalization](https://github.com/sora5801/AdventOS/commit/54f8559)
-- [Session 139 — scripting power-ups: arithmetic, ${expansion}, break/continue/return](https://github.com/sora5801/AdventOS/commit/d4e076f)
-- [Session 140 — REPL polish: papercut fixes + interactive ergonomics](https://github.com/sora5801/AdventOS/commit/7c7fbfb)
+Per-feature reading order is in [`docs/INDEX.md`](docs/INDEX.md).
+The v1.0 readiness rubric is in
+[`docs/158-v1.0-readiness.md`](docs/158-v1.0-readiness.md).
 
-Smoke harness for the bash-compat work: `smoke_pathA_polish.py`, `smoke_pathA_scripting.py`, `smoke_pathA_arith.py`, `smoke_pathA_repl.py`, `smoke_cd_parent.py`, `smoke_prompt_cwd.py` — 60+ checks total.
+### Out of scope for v1.0
 
-**Path D — Scripting is complete** as of session 89. AdventOS has a usable Lua-syntax interpreter (`lua`) with all the major idioms: pcall/error, capture-by-value closures, mark-sweep GC, multi-return values, generic `for k, v in pairs(t)`, real iterators. See [`docs/74-tinylua.md`](docs/74-tinylua.md) (original design), [`docs/75-lua-error-handling-and-gc.md`](docs/75-lua-error-handling-and-gc.md) (session-88 additions), and [`docs/76-lua-multireturn.md`](docs/76-lua-multireturn.md) (session-89 final piece). Deliberately not in scope: metatables, coroutines, capture-by-reference closures, string patterns, math library.
-
-**Path B — Self-hosting is complete** as of Session 121. Session 90 (Phase 1) shipped a 1500-line C-subset compiler — int-only; see [`docs/77-tinycc.md`](docs/77-tinycc.md). Sessions 91–96 (Phase 2) added string literals + `puts`/`print_str`, char + pointers + arrays + `&` / `*`, global variables, `printf` (compile-time-dispatched intrinsic with `%d`/`%s`/`%c`/`%x`/`%%`), the preprocessor (`#define` / `#undef` / `#include` / `#ifdef` / `#ifndef` / `#else` / `#endif` with classic header-guard support), and compound operators (`+=` / `-=` / `*=` / `/=` / `%=` / `++` / `--` / ternary `?:`). Sessions 97–106 (Phase 3) layered on structs (with `.` / `->` / linked-list-style pointer fields / struct-pointer params), function pointers, `sizeof(TYPE)` + scaled pointer arithmetic, multi-file compilation, struct value assignment via `rep movsd`, array-of-struct + indexed member access, `enum`, `typedef`, real user-defined variadic functions, and struct-by-value function arguments. Session 121 (Phase 4 capstone) ships the last three language items: struct-by-value RETURNS (hidden-first-arg cdecl ABI), `static` / `extern` storage-class keywords, and the `typedef RET (*NAME)(ARGS);` function-pointer typedef syntax — see [`docs/108-pathB-capstone.md`](docs/108-pathB-capstone.md). Session 125 follows up with four optimization passes (smart register-allocator codegen, constant folding, rolling peephole, DCE) that shrink cc's output by ~7.5% — see [`docs/112-pathB-optimizations.md`](docs/112-pathB-optimizations.md). Session 133 vendors TinyCC at `tcc/` as Phase 1 of a real C compiler port; cc stays as the always-works backstop while tcc layers on top in future sessions — see [`docs/119-pathB-tcc-foundation.md`](docs/119-pathB-tcc-foundation.md).
-
-**Path C — Graphics is started** as of session 107. Userspace can now take ownership of the VBE framebuffer, get it mapped into its address space, and write pixels directly. `gfx.elf` paints a test card; fbcon mutes while a task owns the FB and resumes on release. Follow-ups: software drawing lib (108), mouse driver (109), double-buffer (110), window manager daemon (111).
-
-**Path E — Drivers is complete** as of session 126. Nine phases across nine sessions:
-
-- **Phase 1 (session 118)** — virtio-blk (paravirtualized block, slots into the existing `blkdev` table as `vblk0`), virtio-net (paravirtualized NIC, falls back from RTL8139 in `net_init`), USB CDC-ACM (the "USB serial port" class — Arduino/ESP32 dongles work via `-device usb-host` passthrough), and `aplay.elf` (userspace PCM/WAV streamer that feeds the existing AC97 codec via `SYS_AUDIO_PLAY`) — see [`docs/105-pathE-drivers.md`](docs/105-pathE-drivers.md) for the legacy-virtio gotcha where capping qsize silently breaks every request.
-- **Phase 2 (session 119)** — virtio-rng (entropy with `SYS_GETRANDOM` + `rand`), virtio-console (second serial via `hvc`), and virtio-balloon (cooperative memory pressure via `balloonctl`) — see [`docs/106-pathE-more-virtio.md`](docs/106-pathE-more-virtio.md).
-- **Phase 3 (session 120)** — virtio-9p (host-filesystem passthrough at `/mnt/9p`) + portable WSL build path. [`docs/107-pathE-9p.md`](docs/107-pathE-9p.md).
-- **Phase 4 (session 121)** — 9p write/mkdir/unlink + IRQ-driven virtio (sti/hlt instead of busy-poll). [`docs/108-pathE-9p-write-and-irq.md`](docs/108-pathE-9p-write-and-irq.md).
-- **Phase 5 (session 122)** — Intel 82540EM `e1000` gigabit NIC + 9p atomic rename. [`docs/109-pathE-e1000-and-rename.md`](docs/109-pathE-e1000-and-rename.md).
-- **Phase 6 (session 123)** — AHCI SATA controller (polled). [`docs/110-pathE-ahci.md`](docs/110-pathE-ahci.md).
-- **Phase 7 (session 124)** — virtio-scsi + `/dev/ttyACM0` userspace device for CDC-ACM. Plus a chain-style shared-PCI-IRQ dispatcher in `isr.c` to fix an IRQ-storm bug that surfaced when e1000 and virtio-scsi landed on the same line. [`docs/122-pathE-vscsi-cdc-tty.md`](docs/122-pathE-vscsi-cdc-tty.md).
-- **Phase 8 (session 125)** — NVMe (admin + I/O queue pair, PRP-based DMA, registers as blkdev at `/mnt/nvme`); AHCI rewired to IRQ-driven + 32-slot NCQ (READ/WRITE FPDMA QUEUED); USB CDC-ECM for USB-Ethernet dongles; USB EHCI controller bring-up (PCI probe + BIOS handoff via EECP USBLEGSUP + async list init + port survey). [`docs/126-pathE-nvme-ehci-ahci-ecm.md`](docs/126-pathE-nvme-ehci-ahci-ecm.md).
-- **Phase 9 (session 126)** — EHCI transfer integration. `kernel/usb_hc.h` vtable abstraction; every USB class driver (HID, MSC, CDC-ACM, CDC-ECM, hub) routed through `d->hc->*` so the same call works on either controller. EHCI carries control + bulk + int transfers via QH + qTD chains with the IAAD doorbell handshake. USB 2.0 mass storage works end-to-end at `max=512` byte bulk packets, with UHCI + EHCI running concurrent devices. [`docs/127-pathE-ehci-transfers.md`](docs/127-pathE-ehci-transfers.md).
-
-The driver tier now covers: **storage** (ATA / AHCI-IRQ-NCQ / virtio-blk / virtio-scsi / NVMe / USB MSC over either HC), **net** (rtl8139 / virtio-net / e1000 / USB CDC-ECM), **USB** (UHCI + EHCI both fully integrated, HID + MSC + CDC-ACM + CDC-ECM class drivers), **filesystem passthrough** (virtio-9p read/write/rename), **misc** (virtio-rng / virtio-console / virtio-balloon / AC97 audio).
-
-Remaining candidate paths:
-- **Path B further optimization** — session 125 shipped reg-alloc, const-fold, peephole, and DCE. More room left: a real Sethi-Ullman register allocator using ECX/EDX, peephole patterns for `mov [mem]; push eax → push [mem]`, common-subexpression elimination. Session 133+ vendors and ports full TinyCC at `tcc/` for full-C support; cc stays as the always-works backstop.
-- **Path C 108+** — drawing library, mouse, window manager (active path).
-- **Path E polish (not strictly Path E anymore)** — EHCI periodic schedule (for true iso transfers, not just async polling); AHCI multi-slot concurrent dispatch (needs an async blkdev API); NVMe MSI-X (per-CQ IRQ vectors instead of shared INTx); xHCI for USB 3.0; virtio-gpu for hardware-accelerated 2D / 3D in the WM. All standalone follow-ups; none gate any current functionality.
+- **x86_64, ARM, RISC-V** — i386 only, by design.
+- **Self-hosting the kernel** — neither `cc` nor `tcc` is wired to
+  build `kernel/` from inside the OS.  Both can build small
+  programs end-to-end.
+- **xHCI / USB 3.0**, **virtio-gpu hardware accel**, **EHCI
+  periodic schedule** (for true iso transfers).  Standalone
+  follow-ups; none gate v1.0.
+- **Real Lua features:** metatables, coroutines, capture-by-
+  reference closures, string patterns, math lib.  Path D shipped
+  the subset that's useful for small scripts.
 
 ## License
 
