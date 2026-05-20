@@ -212,6 +212,55 @@ static void csi_dispatch(char final) {
             }
             return;
         }
+        case 'J': {
+            /* Session 163 — Erase in Display.  Modes:
+             *   0 (default) : clear from cursor to end of screen
+             *   1           : clear from start of screen to cursor
+             *   2           : clear entire visible screen
+             *   3           : clear screen AND the scrollback ring
+             * sh.elf's `clear` builtin emits CSI 2J (paired with
+             * CSI H to home the cursor — see case 'H' below). */
+            int mode = csi_get_param(0);
+            if (mode == 2 || mode == 3) {
+                for (int r = 0; r < ROWS; r++)
+                    for (int c = 0; c < COLS; c++)
+                        g_grid[r][c] = 0;
+                if (mode == 3) {
+                    g_sb_count = 0;
+                    g_sb_head  = 0;
+                    g_view_offset = 0;
+                }
+            } else if (mode == 0) {
+                /* cursor → screen end */
+                for (int c = g_cur_col; c < COLS; c++)
+                    g_grid[g_cur_row][c] = 0;
+                for (int r = g_cur_row + 1; r < ROWS; r++)
+                    for (int c = 0; c < COLS; c++)
+                        g_grid[r][c] = 0;
+            } else if (mode == 1) {
+                /* screen start → cursor */
+                for (int r = 0; r < g_cur_row; r++)
+                    for (int c = 0; c < COLS; c++)
+                        g_grid[r][c] = 0;
+                for (int c = 0; c <= g_cur_col && c < COLS; c++)
+                    g_grid[g_cur_row][c] = 0;
+            }
+            return;
+        }
+        case 'H':
+        case 'f': {
+            /* Session 163 — Cursor Position.  ANSI uses 1-based
+             * row/col; we store 0-based g_cur_row / g_cur_col.
+             * Parameters are `row;col`; csi_get_param only returns
+             * the first (row), which is enough for the no-arg
+             * (default row=1 col=1) home form sh's clear emits. */
+            int row = csi_get_param(1);
+            if (row < 1)       row = 1;
+            if (row > ROWS)    row = ROWS;
+            g_cur_row = row - 1;
+            g_cur_col = 0;          /* default col when only row given */
+            return;
+        }
         /* Other CSI: silently strip (colour `m`, cursor save/restore,
          * scroll region setup, ...).  No grid mutation. */
         default: return;
@@ -398,6 +447,29 @@ int main(int argc, char **argv) {
                     if (g_verbose)
                         printf("wmterm: KEY 0x%x view=%d\n",
                                (unsigned)c, g_view_offset);
+                    break;
+                }
+                /* Session 163 — mouse wheel scrolls the same scrollback
+                 * ring PgUp/PgDn drive.  USB-tablet's wheel byte is a
+                 * signed-8 per poll; we sum until the user sees a
+                 * full-row step (PgUp/PgDn use PAGE_STEP=12; here we
+                 * treat 4 wheel-ticks as one PAGE_STEP so a tap of
+                 * the wheel still does something visible). */
+                case WM_EV_MOUSE_WHEEL: {
+                    int delta = (int)(int32_t)ev.keycode;
+                    if (delta > 0) {
+                        /* Positive = wheel up = into history. */
+                        int steps = delta / 4;
+                        if (steps < 1) steps = 1;
+                        for (int i = 0; i < steps; i++) scroll_up();
+                    } else if (delta < 0) {
+                        int steps = (-delta) / 4;
+                        if (steps < 1) steps = 1;
+                        for (int i = 0; i < steps; i++) scroll_down();
+                    }
+                    if (g_verbose)
+                        printf("wmterm: WHEEL %d view=%d\n",
+                               delta, g_view_offset);
                     break;
                 }
                 default: break;

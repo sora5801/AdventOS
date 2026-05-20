@@ -1994,6 +1994,12 @@ static int read_line_interactive(char *buf, int cap) {
          * which is bash-compatible. */
         if (c == 0x0C) {
             sys_tty_clear();
+            /* Session 163 — also emit the ANSI clear-screen +
+             * cursor-home pair so wmterm's vt_feed clears its
+             * grid.  Same logic as cmd_clear() above; the
+             * syscall handles the kernel console path. */
+            putchar(27); putchar('['); putchar('H');
+            putchar(27); putchar('['); putchar('2'); putchar('J');
             prompt_row = 0;
             prompt_col = 0;
             puts(current_prompt());
@@ -2565,7 +2571,16 @@ static int cmd_test_bracket(char **toks, int ntok) {
  * Ctrl-L in the line editor; available as a command so scripts and
  * piped use cases (`clear ; echo banner`) work too. */
 static int cmd_clear(void) {
+    /* Session 163 — `clear` now works inside wmterm too.  The kernel
+     * console syscall sys_tty_clear() only touches the global
+     * framebuffer grid, which isn't where wmterm renders; pair it
+     * with the ANSI sequence ESC [ H (cursor home) + ESC [ 2 J
+     * (clear entire screen) so wmterm's vt_feed sees both events
+     * and clears its g_grid.  Kernel console paths see the CSI as
+     * unknown and silently drop, having already done the syscall. */
     sys_tty_clear();
+    putchar(27); putchar('['); putchar('H');
+    putchar(27); putchar('['); putchar('2'); putchar('J');
     return 0;
 }
 

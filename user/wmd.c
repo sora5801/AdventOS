@@ -1575,6 +1575,19 @@ int main(int argc, char **argv) {
                 ev.button = WM_BUTTON_LEFT;
                 sys_wm_event_push(w->client_id, &ev);
             }
+            /* Session 163 — wheel.  Route to the hovered client (not
+             * the focused one); mouse wheel naturally targets whichever
+             * window the user is pointing at.  `keycode` carries the
+             * signed delta accumulated since the last frame, so a fast
+             * spin produces a larger step than a slow tick. */
+            if (ms.wheel != 0) {
+                struct sys_wm_event ev = {0};
+                ev.type    = WM_EV_MOUSE_WHEEL;
+                ev.x       = sx;
+                ev.y       = sy;
+                ev.keycode = (unsigned int)ms.wheel;
+                sys_wm_event_push(w->client_id, &ev);
+            }
         }
         prev_mx = ms.x;
         prev_my = ms.y;

@@ -45,6 +45,12 @@ static int     g_initialized;
 static int     g_mouse_x;
 static int     g_mouse_y;
 static int     g_buttons;     /* low 3 bits = L|R|M */
+/* Session 163 — accumulated vertical wheel deltas since the last
+ * mouse_consume_wheel() call.  USB-tablet reports a signed-8 delta
+ * per poll (-127..+127), positive = wheel up; we sum until a reader
+ * drains.  Sufficient resolution for "scroll up a page or two";
+ * we don't need fractional ticks. */
+static int     g_wheel;
 
 static uint8_t g_pkt[3];
 static int     g_pkt_idx;
@@ -169,6 +175,23 @@ void mouse_get_state(int *x_out, int *y_out, int *buttons_out) {
     if (x_out)       *x_out = g_mouse_x;
     if (y_out)       *y_out = g_mouse_y;
     if (buttons_out) *buttons_out = g_buttons;
+}
+
+/* Session 163 — wheel.  USB tablet's poll handler calls
+ * mouse_add_wheel(delta) per report; mouse_consume_wheel() returns
+ * the accumulated delta and clears it.  wmd drains every frame and
+ * forwards as WM_EV_MOUSE_WHEEL to the focused client. */
+void mouse_add_wheel(int delta) {
+    g_wheel += delta;
+    /* Cap so a runaway report can't accumulate past int range. */
+    if (g_wheel >  10000) g_wheel =  10000;
+    if (g_wheel < -10000) g_wheel = -10000;
+}
+
+int mouse_consume_wheel(void) {
+    int v = g_wheel;
+    g_wheel = 0;
+    return v;
 }
 
 /* Session 141 — USB tablet absolute-positioning entry point.

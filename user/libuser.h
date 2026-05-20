@@ -522,6 +522,9 @@ struct sys_mouse_state {
     int          x;
     int          y;
     unsigned int buttons;
+    int          wheel;       /* session 163 — accumulated vertical
+                                 wheel delta since last poll;
+                                 positive = up, negative = down */
 };
 int      sys_mouse_poll  (struct sys_mouse_state *out);
 
@@ -586,6 +589,7 @@ int      sys_wm_destroy  (unsigned int window_id);
 #define WM_EV_CLOSE           7u
 #define WM_EV_HOVER_ENTER     8u
 #define WM_EV_HOVER_LEAVE     9u
+#define WM_EV_MOUSE_WHEEL    10u  /* session 163 — keycode = delta */
 
 #define WM_BUTTON_LEFT        0x01u
 #define WM_BUTTON_RIGHT       0x02u

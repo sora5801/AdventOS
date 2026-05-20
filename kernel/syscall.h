@@ -412,6 +412,12 @@ struct sys_mouse_state {
     int32_t   x;             /* absolute X within FB, clamped */
     int32_t   y;             /* absolute Y within FB, clamped */
     uint32_t  buttons;       /* bit 0 = left, bit 1 = right, bit 2 = middle */
+    /* Session 163 — accumulated vertical wheel delta since the last
+     * SYS_MOUSE_POLL.  Positive = wheel up, negative = wheel down.
+     * Cleared on every poll so wmd's frame loop sees only
+     * since-last-frame movement.  USB-tablet only; PS/2 mouse
+     * driver doesn't surface wheel data today. */
+    int32_t   wheel;
 };
 
 /* Session 112 — WM client ABI.
@@ -477,6 +483,11 @@ struct sys_wm_msg {
 #define WM_EV_CLOSE           7u
 #define WM_EV_HOVER_ENTER     8u
 #define WM_EV_HOVER_LEAVE     9u
+/* Session 163 — mouse wheel event.  `keycode` field carries the
+ * signed wheel delta since the last frame; positive = up.  Routed
+ * to the cursor-hovered client (not necessarily the focused one),
+ * matching how wheel events behave on every modern desktop. */
+#define WM_EV_MOUSE_WHEEL    10u
 
 #define WM_BUTTON_LEFT        0x01u
 #define WM_BUTTON_RIGHT       0x02u

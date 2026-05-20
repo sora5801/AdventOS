@@ -276,7 +276,7 @@ static void poll_one_tablet(struct hid_tablet *t) {
     uint8_t report[8] = {0};
     /* Request 8 bytes but the QEMU usb-tablet only sends 6 (buttons +
      * X + Y + wheel).  uhci_int_in returns the actual byte count;
-     * we only touch report[0..4] so a short read is fine. */
+     * we only touch report[0..5] so a short read is fine. */
     int rc = t->dev->hc->int_in(t->dev->addr, t->dev->low_speed, t->ep_max,
                                 t->ep, report, 8, &t->toggle);
     if (rc <= 0) return;     /* NAK / timeout = no new state */
@@ -292,9 +292,16 @@ static void poll_one_tablet(struct hid_tablet *t) {
     int y = (raw_y * (fb_h - 1)) / 32767;
 
     mouse_set_absolute(x, y, buttons);
+
+    /* Session 163 — byte 5 is the vertical wheel as a signed int8.
+     * Forward to the mouse layer; wmd drains via mouse_consume_wheel
+     * and routes WM_EV_MOUSE_WHEEL to the focused client (wmterm
+     * uses it to step its scrollback view). */
+    int wheel = (int)(int8_t)report[5];
+    if (wheel != 0) mouse_add_wheel(wheel);
 #ifdef USB_HID_TRACE
-    kprintf("[usb-hid] tablet raw=(%d,%d) -> (%d,%d) btns=%x\n",
-            raw_x, raw_y, x, y, buttons);
+    kprintf("[usb-hid] tablet raw=(%d,%d) -> (%d,%d) btns=%x wheel=%d\n",
+            raw_x, raw_y, x, y, buttons, wheel);
 #endif
 }
 

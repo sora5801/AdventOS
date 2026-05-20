@@ -48,4 +48,10 @@ void mouse_set_absolute(int x, int y, int buttons);
  * click position. */
 void mouse_set_tablet_active(void);
 
+/* Session 163 — vertical wheel.  USB-tablet's per-poll wheel byte
+ * accumulates here until a reader (wmd) drains.  Positive = wheel
+ * up (scroll toward earlier content); negative = wheel down. */
+void mouse_add_wheel(int delta);
+int  mouse_consume_wheel(void);
+
 #endif

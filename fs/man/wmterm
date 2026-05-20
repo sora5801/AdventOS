@@ -34,8 +34,18 @@ DESCRIPTION
       PageUp          intercepted: scroll view 12 rows into history
       PageDown        intercepted: scroll view 12 rows toward live
                       (snaps fully to live tail on any shell output)
+      Mouse wheel up  scroll view into history (session 163)
+      Mouse wheel down scroll view toward live (session 163)
       Both PS/2 and USB-HID keyboards emit the same byte sequences
       for all of the above (session 161).
+
+    ANSI sequences wmterm interprets in the output stream:
+      ESC [ K        Erase in Line  (modes 0/1/2)
+      ESC [ J        Erase in Display (modes 0/1/2; mode 3 also
+                     clears the scrollback ring)
+      ESC [ H        Cursor Position (rows 1..ROWS)
+    Combined with sh.elf's `clear` builtin emitting "ESC [ H ESC [
+    2 J", running `clear` (or Ctrl-L) inside wmterm wipes the grid.
 
     Mouse interactions happen at the WM level (drag title bar,
     resize from corner, close X) and don't reach the shell.
@@ -68,6 +78,17 @@ HISTORY
     real PS/2 keyboards (the PS/2 scancode-set-1 driver only
     handled arrows — extended to emit ESC [ 5 ~ / ESC [ 6 ~ for
     PgUp / PgDn, matching the USB-HID path from session 159).
+
+    Session 162 grew the window 240 -> 270 px tall so all 24 rows
+    actually fit (the math forgot the 24-px internal header), and
+    restored wmd's drawn cursor sprite so it stays consistent
+    across QEMU-window enter/leave events.
+
+    Session 163 added two interactive amenities: sh's `clear`
+    builtin now emits CSI 2J + CSI H which wmterm's vt_feed wipes
+    the grid for, and the USB-tablet wheel byte (previously
+    ignored) now plumbs through to a WM_EV_MOUSE_WHEEL event that
+    wmterm uses to step its scrollback view 1/4-page per tick.
 
 SEE ALSO
     sh(1), wmd(1), wmtype(1)

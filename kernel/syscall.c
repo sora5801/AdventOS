@@ -965,6 +965,7 @@ void syscall_dispatch(struct registers *r) {
              * even if no other path has been polling. */
             extern void keyboard_poll_once(void);
             extern void mouse_get_state(int *, int *, int *);
+            extern int  mouse_consume_wheel(void);
             keyboard_poll_once();
             struct sys_mouse_state *out = (struct sys_mouse_state *)(uintptr_t)a;
             if (!out) { ret = -1; break; }
@@ -973,6 +974,9 @@ void syscall_dispatch(struct registers *r) {
             out->x       = x;
             out->y       = y;
             out->buttons = (uint32_t)btns;
+            /* Session 163 — drain accumulated wheel; reader gets
+             * delta since last poll, internal counter resets. */
+            out->wheel   = mouse_consume_wheel();
             ret = 0;
             break;
         }
