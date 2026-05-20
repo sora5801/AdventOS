@@ -127,6 +127,114 @@ static const char *visible_row(int r) {
     return 0;
 }
 
+/* Session 165 — absolute-row variant of visible_row.  Selection is
+ * stored in absolute row indices (across the whole sb+grid stream)
+ * so the range stays correct when the user scrolls.  Returns 0 if
+ * the row has been pushed past the ring's capacity. */
+static const char *get_abs_row(int abs_idx) {
+    if (abs_idx < 0) return 0;
+    if (abs_idx < g_sb_count) {
+        int slot = (g_sb_head + abs_idx) % SB_ROWS;
+        return g_sb[slot];
+    }
+    int gr = abs_idx - g_sb_count;
+    if (gr >= 0 && gr < ROWS) return g_grid[gr];
+    return 0;
+}
+
+/* Session 165 — selection state.  Drag with the left mouse button
+ * marks a range; releasing copies the selected text to the system
+ * clipboard.  Stored in absolute row coords so the highlight stays
+ * pinned to the right text when the user scrolls.  -1 anywhere
+ * means "no selection". */
+static int g_sel_anchor_row = -1, g_sel_anchor_col = -1;
+static int g_sel_head_row   = -1, g_sel_head_col   = -1;
+static int g_sel_dragging = 0;        /* button held since press */
+
+static int sel_active(void) {
+    return g_sel_anchor_row >= 0 && g_sel_head_row >= 0
+        && (g_sel_anchor_row != g_sel_head_row
+            || g_sel_anchor_col != g_sel_head_col);
+}
+
+/* Normalise selection into (lo_row, lo_col) <= (hi_row, hi_col).
+ * lo_col only matters when lo_row == hi_row (single-row selection);
+ * for multi-row, the first row goes from lo_col to end-of-line, the
+ * last row from start-of-line to hi_col, middle rows are full. */
+static void sel_bounds(int *lr, int *lc, int *hr, int *hc) {
+    int ar = g_sel_anchor_row, ac = g_sel_anchor_col;
+    int br = g_sel_head_row,   bc = g_sel_head_col;
+    if (ar > br || (ar == br && ac > bc)) {
+        *lr = br; *lc = bc; *hr = ar; *hc = ac;
+    } else {
+        *lr = ar; *lc = ac; *hr = br; *hc = bc;
+    }
+}
+
+static int in_selection(int abs_r, int col) {
+    if (!sel_active()) return 0;
+    int lr, lc, hr, hc;
+    sel_bounds(&lr, &lc, &hr, &hc);
+    if (abs_r < lr || abs_r > hr) return 0;
+    if (lr == hr)              return col >= lc && col <= hc;
+    if (abs_r == lr)           return col >= lc;
+    if (abs_r == hr)           return col <= hc;
+    return 1;
+}
+
+/* Drop trailing blanks from a row buffer, return new length. */
+static int row_trim_len(const char *row) {
+    int n = COLS;
+    while (n > 0 && (row[n - 1] == 0 || row[n - 1] == ' ')) n--;
+    return n;
+}
+
+/* Build the currently-selected text into out_buf and return the
+ * byte length.  Caller's buffer must be large enough; we cap at
+ * out_cap and return -1 if the selection would overflow. */
+static int sel_copy_text(char *out_buf, int out_cap) {
+    if (!sel_active()) return 0;
+    int lr, lc, hr, hc;
+    sel_bounds(&lr, &lc, &hr, &hc);
+    int n = 0;
+    for (int r = lr; r <= hr; r++) {
+        const char *row = get_abs_row(r);
+        if (!row) continue;
+        int start = (r == lr) ? lc : 0;
+        int end   = (r == hr) ? hc + 1 : COLS;
+        /* Trim trailing blanks on multi-row selections only — keep
+         * the user's spaces on a single-row pick. */
+        if (lr != hr) {
+            int tn = row_trim_len(row);
+            if (end > tn) end = tn;
+        }
+        for (int c = start; c < end; c++) {
+            if (n >= out_cap - 1) return -1;
+            char ch = row[c];
+            out_buf[n++] = ch ? ch : ' ';
+        }
+        if (r < hr) {
+            if (n >= out_cap - 1) return -1;
+            out_buf[n++] = '\n';
+        }
+    }
+    out_buf[n] = 0;
+    return n;
+}
+
+/* Convert surface-local pixel (sx, sy) to grid (abs_row, col).
+ * Returns 0 if outside the grid (above header / off the bottom). */
+static int xy_to_cell(int sx, int sy, int *out_abs_row, int *out_col) {
+    if (sx < GRID_X || sy < GRID_Y) return 0;
+    int c = (sx - GRID_X) / CELL_W;
+    int r = (sy - GRID_Y) / LINE_H;
+    if (c < 0) c = 0; if (c >= COLS) c = COLS - 1;
+    if (r < 0) r = 0; if (r >= ROWS) r = ROWS - 1;
+    *out_col     = c;
+    *out_abs_row = (g_sb_count - g_view_offset) + r;
+    return 1;
+}
+
 static void scroll_up(void) {
     g_view_offset += PAGE_STEP;
     if (g_view_offset > g_sb_count) g_view_offset = g_sb_count;
@@ -443,22 +551,75 @@ int main(int argc, char **argv) {
                 case WM_EV_CLOSE:   closed = 1; break;
                 case WM_EV_KEY: {
                     unsigned char c = (unsigned char)ev.keycode;
+                    /* Session 165 — Ctrl-V (0x16) intercepts: paste
+                     * the clipboard into the PTY master at the
+                     * shell prompt.  The shell never sees Ctrl-V,
+                     * so its literal-next-char readline binding
+                     * is dropped inside wmterm — fine trade for
+                     * standard clipboard paste semantics. */
+                    if (c == 0x16) {
+                        char pbuf[1024];
+                        int pn = sys_clipboard_get(pbuf, sizeof(pbuf));
+                        if (pn > 0) sys_write(master, pbuf, pn);
+                        if (g_verbose)
+                            printf("wmterm: PASTE n=%d\n", pn);
+                        break;
+                    }
                     key_byte(master, c);
                     if (g_verbose)
                         printf("wmterm: KEY 0x%x view=%d\n",
                                (unsigned)c, g_view_offset);
                     break;
                 }
-                /* Session 163 — mouse wheel scrolls the same scrollback
-                 * ring PgUp/PgDn drive.  USB-tablet's wheel byte is a
-                 * signed-8 per poll; we sum until the user sees a
-                 * full-row step (PgUp/PgDn use PAGE_STEP=12; here we
-                 * treat 4 wheel-ticks as one PAGE_STEP so a tap of
-                 * the wheel still does something visible). */
+                /* Session 165 — left-mouse drag selects text.
+                 * MOUSE_PRESS anchors; MOUSE_MOVE while the button
+                 * is held updates the head; MOUSE_RELEASE copies
+                 * the selected text to the system clipboard. */
+                case WM_EV_MOUSE_PRESS: {
+                    if (g_verbose)
+                        printf("wmterm: PRESS x=%u y=%u btn=%u\n",
+                               ev.x, ev.y, ev.button);
+                    if (ev.button & WM_BUTTON_LEFT) {
+                        int r, c;
+                        if (xy_to_cell((int)ev.x, (int)ev.y, &r, &c)) {
+                            g_sel_anchor_row = r;
+                            g_sel_anchor_col = c;
+                            g_sel_head_row   = r;
+                            g_sel_head_col   = c;
+                            g_sel_dragging   = 1;
+                        }
+                    }
+                    break;
+                }
+                case WM_EV_MOUSE_MOVE: {
+                    if (g_sel_dragging && (ev.button & WM_BUTTON_LEFT)) {
+                        int r, c;
+                        if (xy_to_cell((int)ev.x, (int)ev.y, &r, &c)) {
+                            g_sel_head_row = r;
+                            g_sel_head_col = c;
+                        }
+                    }
+                    break;
+                }
+                case WM_EV_MOUSE_RELEASE: {
+                    if (g_sel_dragging) {
+                        g_sel_dragging = 0;
+                        if (sel_active()) {
+                            /* Auto-copy on release — X11-style.  Bound
+                             * to one ~4 KB read since the clipboard
+                             * syscall caps at that size. */
+                            char cbuf[4096];
+                            int n = sel_copy_text(cbuf, sizeof(cbuf));
+                            if (n > 0) sys_clipboard_set(cbuf, n);
+                            if (g_verbose)
+                                printf("wmterm: COPY n=%d\n", n);
+                        }
+                    }
+                    break;
+                }
                 case WM_EV_MOUSE_WHEEL: {
                     int delta = (int)(int32_t)ev.keycode;
                     if (delta > 0) {
-                        /* Positive = wheel up = into history. */
                         int steps = delta / 4;
                         if (steps < 1) steps = 1;
                         for (int i = 0; i < steps; i++) scroll_up();
@@ -537,13 +698,24 @@ int main(int argc, char **argv) {
 
         for (int r = 0; r < ROWS; r++) {
             const char *row = visible_row(r);
-            if (!row) continue;
+            int abs_r = (g_sb_count - g_view_offset) + r;
             for (int c = 0; c < COLS; c++) {
-                char ch = row[c];
-                if (!ch) continue;
-                gfx_glyph(&sctx, GRID_X + c * CELL_W,
-                          GRID_Y + r * LINE_H, ch,
-                          0xC0E0C0u, GFX_TRANSPARENT);
+                char ch = row ? row[c] : 0;
+                int x = GRID_X + c * CELL_W;
+                int y = GRID_Y + r * LINE_H;
+                /* Session 165 — highlight selected cells with a
+                 * dark-blue fill before drawing the glyph, so the
+                 * sage-green text reads cleanly over the highlight.
+                 * Empty cells still get the fill so a multi-row
+                 * selection shows a clean rectangle past line ends. */
+                int selected = in_selection(abs_r, c);
+                if (selected) {
+                    wm_fill_rect(&win, x, y, CELL_W, LINE_H, 0x405068u);
+                }
+                if (ch) {
+                    gfx_glyph(&sctx, x, y, ch, 0xC0E0C0u,
+                              selected ? 0x405068u : GFX_TRANSPARENT);
+                }
             }
         }
 

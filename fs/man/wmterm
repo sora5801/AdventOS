@@ -90,5 +90,19 @@ HISTORY
     ignored) now plumbs through to a WM_EV_MOUSE_WHEEL event that
     wmterm uses to step its scrollback view 1/4-page per tick.
 
+    Session 164 swapped the cursor sprite based on the window
+    resize zone the pointer hovers over.
+
+    Session 165 added text selection + clipboard:
+      - Left-mouse drag highlights a rectangular range (including
+        rows now in scrollback).  Releasing the button auto-copies
+        the selection to the system clipboard (X11 primary-style).
+      - Ctrl-V is intercepted by wmterm before the byte reaches
+        the PTY; it fetches the clipboard and writes those bytes
+        into the master, so they appear at the inner shell's
+        prompt as if typed.  The shell's literal-next-char binding
+        (normally Ctrl-V in readline) is therefore unavailable
+        inside wmterm; use the kernel-console shell for that.
+
 SEE ALSO
     sh(1), wmd(1), wmtype(1)
