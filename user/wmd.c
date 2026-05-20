@@ -224,43 +224,160 @@ static int fmt_u(char *buf, int cap, unsigned int v) {
  * guest cursor coordinates.  Session 162 — restored, because the
  * host pointer's *shape* isn't stable: re-entering the QEMU
  * window from an edge leaves Windows' resize-arrow cursor visible
- * until the host issues a fresh SetCursor.  With no guest-drawn
- * overlay the user just sees that stale resize arrow inside the
- * QEMU window, with no way to recover short of clicking somewhere
- * to force the host to redraw.
+ * until the host issues a fresh SetCursor.  Session 164 —
+ * variant sprites: hover near a resize zone and the cursor
+ * morphs to a horizontal / vertical / diagonal double-arrow so
+ * the user can tell at a glance "I'd be resizing if I dragged
+ * from here".
  *
- * The drawn arrow is a 12x16 black-outline, white-fill bitmap;
- * the hot-spot (the byte the click registers under) is at (0, 0)
- * — the very top-left tip of the arrow — so the click point
- * matches the most-pointy pixel.  Painted last in the frame so
- * it sits above every window. */
-static const char * const g_cursor_art[16] = {
-    "#           ",
-    "##          ",
-    "#.#         ",
-    "#..#        ",
-    "#...#       ",
-    "#....#      ",
-    "#.....#     ",
-    "#......#    ",
-    "#.......#   ",
-    "#........#  ",
-    "#####.....# ",
-    "    #..#    ",
-    "    #..#    ",
-    "     #..#   ",
-    "     #..#   ",
-    "      ##    ",
+ * '#' = black outline, '.' = white fill, ' ' = transparent.
+ * Each sprite's `hot_x` / `hot_y` is the offset from the bitmap's
+ * top-left to the click hot-spot — we paint at
+ *   (cursor_x - hot_x, cursor_y - hot_y)
+ * so the hot-spot lands at the cursor coords no matter the sprite. */
+enum cursor_kind {
+    CUR_ARROW = 0,        /* default — top-left tip is hot-spot */
+    CUR_H_RESIZE,         /* W/E edge — horizontal double arrow */
+    CUR_V_RESIZE,         /* S edge   — vertical double arrow */
+    CUR_DIAG_NW_SE,       /* SE corner — NW <-> SE diagonal */
+    CUR_DIAG_NE_SW,       /* SW corner — NE <-> SW diagonal */
 };
 
-static void draw_cursor(struct gfx_ctx *ctx, int cx, int cy) {
-    for (int dy = 0; dy < 16; dy++) {
-        const char *row = g_cursor_art[dy];
+struct cursor_spec {
+    int hot_x, hot_y;
+    int rows;
+    const char *art[18];
+};
+
+static const struct cursor_spec g_cursors[] = {
+    [CUR_ARROW] = {
+        .hot_x = 0, .hot_y = 0, .rows = 16,
+        .art = {
+            "#",
+            "##",
+            "#.#",
+            "#..#",
+            "#...#",
+            "#....#",
+            "#.....#",
+            "#......#",
+            "#.......#",
+            "#........#",
+            "#####.....#",
+            "    #..#",
+            "    #..#",
+            "     #..#",
+            "     #..#",
+            "      ##",
+        },
+    },
+    [CUR_H_RESIZE] = {
+        /* 15 wide x 7 tall horizontal double-arrow.  Hot at (7, 3)
+         * — the center of the bar — so the cursor doesn't visually
+         * drift when the shape changes mid-hover.  The arrowhead
+         * interiors carry one white-fill pixel each so the shape
+         * reads cleanly against the wmd content_color fill (which
+         * is also pure black behind a client window). */
+        .hot_x = 7, .hot_y = 3, .rows = 7,
+        .art = {
+            "   #         #",
+            "  ##         ##",
+            " #.###########.#",
+            "################",
+            " #.###########.#",
+            "  ##         ##",
+            "   #         #",
+        },
+    },
+    [CUR_V_RESIZE] = {
+        /* 7 wide x 15 tall — same shape transposed.  Hot at (3, 7).
+         * Whites embedded in the arrowhead interiors, same as
+         * H_RESIZE. */
+        .hot_x = 3, .hot_y = 7, .rows = 15,
+        .art = {
+            "   #   ",
+            "  ###  ",
+            " ##.## ",
+            "###.###",
+            "   #   ",
+            "   #   ",
+            "   #   ",
+            "   #   ",
+            "   #   ",
+            "   #   ",
+            "   #   ",
+            "###.###",
+            " ##.## ",
+            "  ###  ",
+            "   #   ",
+        },
+    },
+    [CUR_DIAG_NW_SE] = {
+        /* SE corner — points NW <-> SE.  13x13, hot at (6, 6). */
+        .hot_x = 6, .hot_y = 6, .rows = 13,
+        .art = {
+            "#####",
+            "####",
+            "##.##",
+            "#.#.##",
+            "    ##",
+            "     ##",
+            "      ##",
+            "       ##",
+            "        ##",
+            "       ##.#",
+            "       ##.##",
+            "         ####",
+            "         #####",
+        },
+    },
+    [CUR_DIAG_NE_SW] = {
+        /* SW corner — points NE <-> SW.  13x13, hot at (6, 6). */
+        .hot_x = 6, .hot_y = 6, .rows = 13,
+        .art = {
+            "        #####",
+            "         ####",
+            "        ##.##",
+            "        ##.#.#",
+            "        ##",
+            "       ##",
+            "      ##",
+            "     ##",
+            "    ##",
+            "   ##.#",
+            "  ##.##",
+            "  ####",
+            " #####",
+        },
+    },
+};
+
+static void draw_cursor(struct gfx_ctx *ctx, enum cursor_kind kind,
+                        int cx, int cy) {
+    const struct cursor_spec *s = &g_cursors[kind];
+    int ox = cx - s->hot_x;
+    int oy = cy - s->hot_y;
+    for (int dy = 0; dy < s->rows; dy++) {
+        const char *row = s->art[dy];
+        if (!row) continue;
         for (int dx = 0; row[dx]; dx++) {
             char p = row[dx];
-            if      (p == '#') gfx_put_pixel(ctx, cx + dx, cy + dy, GFX_BLACK);
-            else if (p == '.') gfx_put_pixel(ctx, cx + dx, cy + dy, GFX_WHITE);
+            if      (p == '#') gfx_put_pixel(ctx, ox + dx, oy + dy, GFX_BLACK);
+            else if (p == '.') gfx_put_pixel(ctx, ox + dx, oy + dy, GFX_WHITE);
         }
+    }
+}
+
+/* Map a resize-zone value to the cursor sprite that signals
+ * "drag here to resize this edge / corner".  RES_NONE → arrow. */
+static enum cursor_kind cursor_for_zone(int zone) {
+    switch (zone) {
+        case RES_W:  return CUR_H_RESIZE;
+        case RES_E:  return CUR_H_RESIZE;
+        case RES_S:  return CUR_V_RESIZE;
+        case RES_SE: return CUR_DIAG_NW_SE;
+        case RES_SW: return CUR_DIAG_NE_SW;
+        default:     return CUR_ARROW;
     }
 }
 
@@ -1729,13 +1846,24 @@ int main(int argc, char **argv) {
         }
 
         /* Session 162 — paint a guest-side cursor sprite on top of
-         * everything else.  Necessary because the host pointer's
-         * shape isn't stable across QEMU-window enter/leave; without
-         * a guest overlay the user sees whatever the host left
-         * behind (often a resize arrow when re-entering at an
-         * edge).  Hot-spot is the top-left tip of the arrow, which
-         * is what ms.x / ms.y point at. */
-        draw_cursor(&ctx, ms.x, ms.y);
+         * everything else.  Session 164 — switch sprite based on
+         * whether the cursor is over a resize zone.  If a resize is
+         * actively in progress (g_resize_dir != RES_NONE), keep the
+         * resize cursor even if the user has dragged the cursor
+         * off-zone in the middle of the drag. */
+        enum cursor_kind ck = CUR_ARROW;
+        if (g_resize_dir != RES_NONE) {
+            ck = cursor_for_zone(g_resize_dir);
+        } else {
+            int hit_for_cursor = hit_test(ms.x, ms.y);
+            if (hit_for_cursor >= 0
+                && g_windows[hit_for_cursor].kind == KIND_CLIENT) {
+                int zone = in_resize_zone(&g_windows[hit_for_cursor],
+                                          ms.x, ms.y);
+                ck = cursor_for_zone(zone);
+            }
+        }
+        draw_cursor(&ctx, ck, ms.x, ms.y);
 
         gfx_present(&ctx);
         sys_sleep_ms(16);
