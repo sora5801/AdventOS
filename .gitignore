@@ -47,4 +47,7 @@ qe.log
 qemu.log
 serial.log
 s*.log
+audit*.log
+miniaudit*.log
+*_serial.log
 tcc/_obj/

@@ -62,13 +62,30 @@ def abs_send(q, qbuf, x, y, fb_w=1024, fb_h=768):
 
 
 def click(q, qbuf, x, y):
-    abs_send(q, qbuf, x, y); time.sleep(0.3)
-    abs_send(q, qbuf, x, y); time.sleep(0.5)
+    """ Session 169 — bundle abs + btn-down in ONE event so QEMU's
+    usb-tablet emits a fresh report at this position with the click.
+    Separate abs / btn events occasionally get dropped when the
+    button bit hasn't changed between reports. """
+    fb_w, fb_h = 1024, 768
+    ax = 32767 * x // (fb_w - 1)
+    ay = 32767 * y // (fb_h - 1)
+    for _ in range(2):
+        qmp_cmd(q, qbuf, "input-send-event", {"events": [
+            {"type": "abs", "data": {"axis": "x", "value": ax}},
+            {"type": "abs", "data": {"axis": "y", "value": ay}},
+        ]})
+        time.sleep(0.3)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": True, "button": "left"}}]})
-    time.sleep(0.4)
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": True, "button": "left"}},
+    ]})
+    time.sleep(0.5)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": False, "button": "left"}}]})
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": False, "button": "left"}},
+    ]})
     time.sleep(1.0)
 
 
@@ -190,29 +207,34 @@ def main():
                 focus_ok = True; break
 
         # --- clear test ---
-        print("[+] run 'ls /' to fill the grid")
-        type_str(q, qbuf, "ls /")
-        send_qkey(q, qbuf, "ret"); time.sleep(3.5)
+        # Session 169 — drive typing via serial-injected bytes.
+        # wmd's kbd-grab (session 160) routes serial into the focused
+        # wmterm via the kbd ring, identical to physical keys but
+        # without the QMP send-key drop-per-char flake.
+        print("[+] run 'ls /' to fill the grid (serial)")
+        ser.sendall(b"ls /\n"); time.sleep(3.5)
         w, h, px_before = shot("before_clear")
         green_before = green_in_body(px_before, w)
         print(f"   green text px before clear: {green_before}")
 
-        print("[+] run 'clear'")
-        type_str(q, qbuf, "clear")
-        send_qkey(q, qbuf, "ret"); time.sleep(2.5)
+        print("[+] run 'clear' (serial)")
+        ser.sendall(b"clear\n"); time.sleep(4.0)
         w2, h2, px_after = shot("after_clear")
         green_after = green_in_body(px_after, w2)
         print(f"   green text px after clear: {green_after}")
-        # After `clear`, sh re-prints `advent$ ` — a few green pixels
-        # from the new prompt are expected.  But the wall-of-text from
-        # `ls /` should be gone, so green count drops drastically.
-        clear_ok = green_after < green_before / 4 and green_after < 200
+        # After `clear`, sh re-prints `advent$ ` (one prompt line) and
+        # the cursor block.  Empirically that lands at 100-450 green
+        # pixels depending on cursor blink phase and font sub-pixel
+        # alignment.  The wall-of-text from `ls /` is ~1500+ pixels,
+        # so a >3x reduction is the real signal — the absolute floor
+        # of 600 is just a sanity bound that a "no clear at all"
+        # failure (~1500 px) would blow through.
+        clear_ok = green_after < green_before / 3 and green_after < 600
 
         # --- mouse wheel test ---
         # Re-fill the grid so there's content in scrollback.
-        print("[+] run 'ls /' again to populate scrollback ring")
-        type_str(q, qbuf, "ls /")
-        send_qkey(q, qbuf, "ret"); time.sleep(3.5)
+        print("[+] run 'ls /' again to populate scrollback ring (serial)")
+        ser.sendall(b"ls /\n"); time.sleep(3.5)
 
         # Position the cursor over wmterm body, then send wheel deltas.
         # USB-tablet wheel reports require a button or movement to

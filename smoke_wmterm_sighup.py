@@ -73,16 +73,29 @@ def abs_send(q, qbuf, x, y, fb_w=1024, fb_h=768):
 
 
 def click(q, qbuf, x, y):
-    abs_send(q, qbuf, x, y)
-    time.sleep(0.3)
-    abs_send(q, qbuf, x, y)
+    """ Session 169 — bundle abs + btn-down in ONE event so QEMU's
+    usb-tablet emits a fresh report at this position with the click.
+    Separate abs / btn events occasionally get dropped when the
+    button bit hasn't changed between reports. """
+    fb_w, fb_h = 1024, 768
+    ax = 32767 * x // (fb_w - 1)
+    ay = 32767 * y // (fb_h - 1)
+    for _ in range(2):
+        qmp_cmd(q, qbuf, "input-send-event", {"events": [
+            {"type": "abs", "data": {"axis": "x", "value": ax}},
+            {"type": "abs", "data": {"axis": "y", "value": ay}},
+        ]})
+        time.sleep(0.3)
+    qmp_cmd(q, qbuf, "input-send-event", {"events": [
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": True, "button": "left"}},
+    ]})
     time.sleep(0.5)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": True, "button": "left"}}
-    ]})
-    time.sleep(0.4)
-    qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": False, "button": "left"}}
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": False, "button": "left"}},
     ]})
     time.sleep(1.0)
 

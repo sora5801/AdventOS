@@ -74,13 +74,32 @@ def abs_send(q, qbuf, x, y, fb_w=1024, fb_h=768):
 
 
 def click(q, qbuf, x, y):
-    abs_send(q, qbuf, x, y); time.sleep(0.3)
-    abs_send(q, qbuf, x, y); time.sleep(0.5)
+    """ Session 169 — a click is a tight press-then-release at
+    a known position.  Bundle abs + btn-down into ONE event, and
+    abs + btn-up into another.  Between them, send abs alone a
+    couple times to nudge the usb-tablet into refreshing the
+    cursor in case its first report was dropped (the typical
+    "first event after idle" QEMU usb-tablet quirk). """
+    fb_w, fb_h = 1024, 768
+    ax = 32767 * x // (fb_w - 1)
+    ay = 32767 * y // (fb_h - 1)
+    for _ in range(2):
+        qmp_cmd(q, qbuf, "input-send-event", {"events": [
+            {"type": "abs", "data": {"axis": "x", "value": ax}},
+            {"type": "abs", "data": {"axis": "y", "value": ay}},
+        ]})
+        time.sleep(0.3)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": True, "button": "left"}}]})
-    time.sleep(0.4)
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": True, "button": "left"}},
+    ]})
+    time.sleep(0.6)
     qmp_cmd(q, qbuf, "input-send-event", {"events": [
-        {"type": "btn", "data": {"down": False, "button": "left"}}]})
+        {"type": "abs", "data": {"axis": "x", "value": ax}},
+        {"type": "abs", "data": {"axis": "y", "value": ay}},
+        {"type": "btn", "data": {"down": False, "button": "left"}},
+    ]})
     time.sleep(1.0)
 
 
@@ -142,82 +161,92 @@ def main():
         _, qbuf = qmp_recv(q, qbuf)
         qmp_cmd(q, qbuf, "qmp_capabilities"); qbuf = b""
 
-        # Focus wmterm.
+        # Session 169 — cursor warmup.  QEMU's usb-tablet device
+        # ignores the very first abs report of a "session" (the
+        # report-after-idle quirk we've fought since session 165).
+        # Sweep the cursor across the screen first so by the time
+        # we send the focus click, the tablet has been emitting
+        # reports for a while and won't drop one.
+        for wx in range(100, 900, 100):
+            abs_send(q, qbuf, wx, 400); time.sleep(0.15)
+        time.sleep(1.0)
+
+        # Focus wmterm with jittered click positions.
         focus_ok = False
-        for _ in range(10):
-            click(q, qbuf, 300, 350); time.sleep(1.0)
+        for attempt in range(15):
+            jx = 300 + (attempt * 7) - 7 * attempt // 2  # 300, 304, 301...
+            click(q, qbuf, jx, 350); time.sleep(1.5)
             if "wmterm: FOCUS" in trace():
                 focus_ok = True; break
 
+        # Session 169 — drive the inner shell via serial.  After
+        # wmterm has focus, the kbd grab routes serial bytes through
+        # the kbd ring straight to wmterm, which delivers them as
+        # KEY events to the inner sh.elf.  Far more reliable than
+        # QMP send-key (which drops chars in long sequences).
+
         # Test 1 — multi-command + prompt reappears.
-        print("[+] type 'pwd' + Enter")
-        type_str(q, qbuf, "pwd")
-        send_qkey(q, qbuf, "ret")
+        print("[+] send 'pwd' via serial")
+        ser.sendall(b"pwd\n")
         time.sleep(3.0)
-        # After pwd, wmterm should read echo of 'pwd\n' + pwd output
-        # '/\n' + new prompt 'advent$ '.  The shell can flush these in
-        # one or several reads depending on scheduling; check the
-        # combined trace contains both the path output and the new
-        # prompt.  The preview-mode dump (session 161) makes this
-        # trivial — we just look for the literal substring.
         all_trace = trace()
-        # Look for any read whose preview contains pwd's output "/.".
-        # The shell may flush in one read (echo + output + new prompt)
-        # or split across two — either way, the literal "/." substring
-        # in some `rd n=` preview proves the path arrived.
         pwd_ok = False
         for line in all_trace.splitlines():
             if "wmterm: rd n=" in line and "/." in line and "advent" in line:
                 pwd_ok = True; break
         print(f"   pwd read-back present: {pwd_ok}")
 
-        print("[+] type 'pwd' + Enter (second time, verifies prompt came back)")
+        print("[+] send 'pwd' a second time")
         before2 = len(trace())
-        type_str(q, qbuf, "pwd")
-        send_qkey(q, qbuf, "ret")
+        ser.sendall(b"pwd\n")
         time.sleep(3.0)
         new2 = trace()[before2:]
-        # If the prompt reappeared, sh.elf was at read_line_interactive
-        # ready to consume 'p','w','d','\n' and echo each, then run pwd.
         second_pwd_ok = "KEY 0x70" in new2 and "wmterm: rd n=" in new2
         print(f"   second pwd accepted + output: {second_pwd_ok}")
 
-        # Test 2 — backspace via CSI K.
-        print("[+] type 'abc' + backspace + Enter")
+        # Test 2 — backspace via CSI K.  '\x08' is the ASCII for
+        # backspace; sh treats it the same as the HID 0x08 emitted
+        # by the Backspace key.
+        print("[+] send 'abc' + backspace + Enter via serial")
         before3 = len(trace())
-        type_str(q, qbuf, "abc")
-        send_qkey(q, qbuf, "backspace")
-        send_qkey(q, qbuf, "ret")
+        ser.sendall(b"abc\x08\n")
         time.sleep(3.0)
         new3 = trace()[before3:]
         bs_ev = "KEY 0x8" in new3
-        # wmterm's verbose mode now dumps up to 80 chars of every
-        # PTY read in square brackets, so we can look directly for
-        # the inner shell's "not found" message.  If backspace took
-        # effect, sh.elf committed line "ab" — not "abc" — and the
-        # error names "ab".
-        ab_msg = "command not found: ab" in new3
-        abc_msg = "command not found: abc" in new3
+        # Session 169 — tighten: the message must arrive inside a
+        # `wmterm: rd n=...[...]` preview line, proving it came from
+        # the INNER shell through wmterm's PTY (not the outer shell
+        # consuming a fallthrough when focus failed — outer would
+        # print the same text on the serial console verbatim).
+        ab_msg = False
+        abc_msg = False
+        for line in new3.split("\n"):
+            if "wmterm: rd n=" not in line: continue
+            if "command not found: ab" in line and "command not found: abc" not in line:
+                ab_msg = True
+            if "command not found: abc" in line:
+                abc_msg = True
         print(f"   backspace KEY routed: {bs_ev}")
         print(f"   inner sh sees 'ab' (backspace worked): "
               f"{ab_msg and not abc_msg}")
 
-        # Generate enough output to fill scrollback before testing PgUp.
-        # ls / produces ~30 lines which exceeds the 24-row visible grid,
-        # so several rows actually land in g_sb.
-        print("[+] type 'ls /' to populate scrollback")
-        type_str(q, qbuf, "ls /")
-        send_qkey(q, qbuf, "ret")
+        # Populate scrollback for the PgUp test.
+        print("[+] send 'ls /' via serial")
+        ser.sendall(b"ls /\n")
         time.sleep(3.5)
 
-        # Test 3 — PgUp via QMP qcode 'pgup'.
-        print("[+] PgUp scrollback")
+        # Test 3 — PgUp via direct ANSI CSI injection over serial.
+        # The kernel keyboard layer maps physical PageUp to ESC[5~,
+        # and we can write the same bytes straight through serial
+        # (kbd-grabbed wmterm picks them up).  Avoids the qcode
+        # delivery flake.
+        print("[+] inject ESC[5~ (PgUp) via serial")
         before4 = len(trace())
         for _ in range(3):
-            send_qkey(q, qbuf, "pgup"); time.sleep(0.4)
+            ser.sendall(b"\x1b[5~")
+            time.sleep(0.5)
         time.sleep(1.5)
         new4 = trace()[before4:]
-        # ESC 0x1b + view becoming non-zero.
         esc_seen = "KEY 0x1b" in new4
         any_nonzero = False
         for line in new4.split("\n"):
