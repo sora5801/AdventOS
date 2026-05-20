@@ -67,6 +67,7 @@ USER_PROGRAMS = [
     ('sh.elf',    'user/_obj/sh.bin',    None),
     ('cat.elf',   'user/_obj/cat.bin',   None),
     ('echo.elf',  'user/_obj/echo.bin',  None),
+    ('colortest.elf', 'user/_obj/colortest.bin', None),
     ('httpd.elf', 'user/_obj/httpd.bin', None),
     ('ed.elf',    'user/_obj/ed.bin',    None),
     ('init.elf',  'user/_obj/init.bin',  None),

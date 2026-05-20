@@ -104,5 +104,15 @@ HISTORY
         (normally Ctrl-V in readline) is therefore unavailable
         inside wmterm; use the kernel-console shell for that.
 
+    Session 166 added ANSI colour support.  wmterm's vt_feed now
+    interprets the CSI m (Select Graphic Rendition) sequences:
+    foreground colours 30..37 and 90..97, background colours
+    40..47 and 100..107, bold (mapped to bright), reset (0), and
+    the extended-colour prefix (38;5;N) clamped to the 16-colour
+    palette.  Output without SGR codes still renders in the
+    default sage-green-on-near-black look.  `ls --color=auto`,
+    grep highlights, and any program that emits SGR escapes now
+    show in colour.
+
 SEE ALSO
     sh(1), wmd(1), wmtype(1)

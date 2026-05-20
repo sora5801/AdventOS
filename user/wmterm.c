@@ -86,29 +86,72 @@ static int  g_sb_count;             /* rows pushed so far (0..SB_ROWS) */
 static int  g_sb_head;              /* index of oldest row in g_sb */
 static int  g_view_offset;          /* rows scrolled back from live tail */
 
+/* Session 166 — ANSI colour support.  Each cell has a parallel
+ * fg/bg palette index in [0..15] or 0xFF for "use defaults" (the
+ * old sage-green-on-near-black look).  Stored in separate arrays
+ * mirroring the char arrays so grid scrolling / scrollback are
+ * simple parallel copies. */
+#define COLOR_DEFAULT 0xFF
+static unsigned char g_grid_fg[ROWS][COLS];
+static unsigned char g_grid_bg[ROWS][COLS];
+static unsigned char g_sb_fg[SB_ROWS][COLS];
+static unsigned char g_sb_bg[SB_ROWS][COLS];
+/* Active SGR state.  -1 means "default"; 0..15 maps into the
+ * palette below.  Updated by CSI m sequences in vt_feed. */
+static int g_cur_fg = -1;
+static int g_cur_bg = -1;
+
+/* Standard 16-colour VGA-ish palette.  Indices 0..7 are the
+ * non-bright SGR foregrounds (30..37); 8..15 are the bright
+ * versions (90..97 or "bold" + a non-bright colour).  Same byte
+ * encoding the kernel console uses, so colour-aware programs
+ * render the same in both contexts. */
+static const unsigned int g_palette[16] = {
+    0x000000, 0xCC0000, 0x00CC00, 0xCCCC00,
+    0x0000CC, 0xCC00CC, 0x00CCCC, 0xC0C0C0,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55,
+    0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+};
+
 static void grid_clear(void) {
     for (int r = 0; r < ROWS; r++)
-        for (int c = 0; c < COLS; c++)
-            g_grid[r][c] = 0;
+        for (int c = 0; c < COLS; c++) {
+            g_grid[r][c]    = 0;
+            g_grid_fg[r][c] = COLOR_DEFAULT;
+            g_grid_bg[r][c] = COLOR_DEFAULT;
+        }
     g_cur_col = 0;
     g_cur_row = 0;
     g_sb_count = 0;
     g_sb_head  = 0;
     g_view_offset = 0;
+    g_cur_fg = -1;
+    g_cur_bg = -1;
 }
 
 /* Shift every row up by one; the top row goes into the scrollback
  * ring, the bottom row becomes blank. */
 static void grid_scroll(void) {
     int slot = (g_sb_head + g_sb_count) % SB_ROWS;
-    for (int c = 0; c < COLS; c++) g_sb[slot][c] = g_grid[0][c];
+    for (int c = 0; c < COLS; c++) {
+        g_sb[slot][c]    = g_grid[0][c];
+        g_sb_fg[slot][c] = g_grid_fg[0][c];
+        g_sb_bg[slot][c] = g_grid_bg[0][c];
+    }
     if (g_sb_count < SB_ROWS) g_sb_count++;
     else g_sb_head = (g_sb_head + 1) % SB_ROWS;
 
     for (int r = 0; r < ROWS - 1; r++)
-        for (int c = 0; c < COLS; c++)
-            g_grid[r][c] = g_grid[r+1][c];
-    for (int c = 0; c < COLS; c++) g_grid[ROWS-1][c] = 0;
+        for (int c = 0; c < COLS; c++) {
+            g_grid[r][c]    = g_grid[r+1][c];
+            g_grid_fg[r][c] = g_grid_fg[r+1][c];
+            g_grid_bg[r][c] = g_grid_bg[r+1][c];
+        }
+    for (int c = 0; c < COLS; c++) {
+        g_grid[ROWS-1][c]    = 0;
+        g_grid_fg[ROWS-1][c] = COLOR_DEFAULT;
+        g_grid_bg[ROWS-1][c] = COLOR_DEFAULT;
+    }
 }
 
 /* Return a pointer to the COLS-wide row that should appear at
@@ -125,6 +168,28 @@ static const char *visible_row(int r) {
     int gr = abs_row - g_sb_count;
     if (gr < ROWS) return g_grid[gr];
     return 0;
+}
+
+/* Session 166 — parallel colour accessors.  Same shape as
+ * visible_row + get_abs_row but for the fg/bg palette index
+ * arrays.  Returns NULL if the row isn't in the window or has
+ * been pushed past the scrollback ring's tail. */
+static const unsigned char *visible_fg_row(int r) {
+    int abs_row = (g_sb_count - g_view_offset) + r;
+    if (abs_row < 0) return 0;
+    if (abs_row < g_sb_count)
+        return g_sb_fg[(g_sb_head + abs_row) % SB_ROWS];
+    int gr = abs_row - g_sb_count;
+    return (gr < ROWS) ? g_grid_fg[gr] : 0;
+}
+
+static const unsigned char *visible_bg_row(int r) {
+    int abs_row = (g_sb_count - g_view_offset) + r;
+    if (abs_row < 0) return 0;
+    if (abs_row < g_sb_count)
+        return g_sb_bg[(g_sb_head + abs_row) % SB_ROWS];
+    int gr = abs_row - g_sb_count;
+    return (gr < ROWS) ? g_grid_bg[gr] : 0;
 }
 
 /* Session 165 — absolute-row variant of visible_row.  Selection is
@@ -256,7 +321,11 @@ static void grid_putc_printable(char c) {
             g_cur_row = ROWS - 1;
         }
     }
-    g_grid[g_cur_row][g_cur_col] = c;
+    g_grid[g_cur_row][g_cur_col]    = c;
+    g_grid_fg[g_cur_row][g_cur_col] = (g_cur_fg < 0) ? COLOR_DEFAULT
+                                                    : (unsigned char)g_cur_fg;
+    g_grid_bg[g_cur_row][g_cur_col] = (g_cur_bg < 0) ? COLOR_DEFAULT
+                                                    : (unsigned char)g_cur_bg;
     g_cur_col++;
 }
 
@@ -281,7 +350,9 @@ static void grid_newline(void) {
  * Still strips: everything else (colour codes, scroll-region setup,
  * full clear-screen — wmterm doesn't render colours and doesn't
  * track a viewport offset distinct from g_view_offset). */
-static char    g_csi_param[8];
+/* Session 166 — buffer grew to 16 so SGR sequences like
+ * "CSI 1;31m" or "CSI 38;5;200m" fit.  Old buffer was 8. */
+static char    g_csi_param[16];
 static int     g_csi_param_len;
 
 static int csi_get_param(int dflt) {
@@ -296,6 +367,77 @@ static int csi_get_param(int dflt) {
         any = 1;
     }
     return any ? v : dflt;
+}
+
+/* Session 166 — apply each semicolon-separated SGR parameter to the
+ * current fg/bg state.  ECMA-48 SGR (Select Graphic Rendition):
+ *   0       reset
+ *   1       bold (we map to "bright" by OR'ing 0x08 into the fg index)
+ *   22      cancel bold
+ *   30..37  set foreground colour 0..7
+ *   38;5;N  256-colour foreground (we accept the prefix and use
+ *           N mod 16 — close enough for most --color=auto output)
+ *   39      reset foreground to default
+ *   40..47  set background colour 0..7
+ *   49      reset background to default
+ *   90..97  bright foreground (== 8..15)
+ *   100..107 bright background
+ * Unknown params are ignored. */
+static void apply_sgr(void) {
+    int idx = 0;
+    /* Empty sequence (CSI m with no params) is treated as CSI 0 m. */
+    if (g_csi_param_len == 0) {
+        g_cur_fg = -1; g_cur_bg = -1;
+        return;
+    }
+    while (idx < g_csi_param_len) {
+        int v = 0, any = 0;
+        while (idx < g_csi_param_len
+               && g_csi_param[idx] >= '0'
+               && g_csi_param[idx] <= '9') {
+            v = v * 10 + (g_csi_param[idx] - '0');
+            any = 1;
+            idx++;
+        }
+        if (!any) v = 0;            /* "CSI ;31m" — empty param = 0 */
+        if (v == 0)                 { g_cur_fg = -1; g_cur_bg = -1; }
+        else if (v == 1) {                 /* bold = bright fg */
+            int f = (g_cur_fg < 0) ? 7 : (g_cur_fg & 0x07);
+            g_cur_fg = f | 0x08;
+        }
+        else if (v == 22) {                /* cancel bold */
+            if (g_cur_fg >= 0) g_cur_fg &= 0x07;
+        }
+        else if (v >= 30 && v <= 37)       g_cur_fg = v - 30;
+        else if (v == 38) {
+            /* Skip "5;N" or "2;R;G;B" extended-colour tail and clamp
+             * to the 16-colour palette. */
+            if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+            int mode = 0;
+            while (idx < g_csi_param_len
+                   && g_csi_param[idx] >= '0'
+                   && g_csi_param[idx] <= '9') {
+                mode = mode * 10 + (g_csi_param[idx] - '0'); idx++;
+            }
+            if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+            int n = 0;
+            while (idx < g_csi_param_len
+                   && g_csi_param[idx] >= '0'
+                   && g_csi_param[idx] <= '9') {
+                n = n * 10 + (g_csi_param[idx] - '0'); idx++;
+            }
+            (void)mode;
+            g_cur_fg = n & 0x0F;
+        }
+        else if (v == 39)                  g_cur_fg = -1;
+        else if (v >= 40 && v <= 47)       g_cur_bg = v - 40;
+        else if (v == 49)                  g_cur_bg = -1;
+        else if (v >= 90 && v <= 97)       g_cur_fg = (v - 90) | 0x08;
+        else if (v >= 100 && v <= 107)     g_cur_bg = (v - 100) | 0x08;
+        /* unknown — drop silently */
+        if (idx < g_csi_param_len && g_csi_param[idx] == ';') idx++;
+        else break;
+    }
 }
 
 static void csi_dispatch(char final) {
@@ -369,8 +511,13 @@ static void csi_dispatch(char final) {
             g_cur_col = 0;          /* default col when only row given */
             return;
         }
-        /* Other CSI: silently strip (colour `m`, cursor save/restore,
-         * scroll region setup, ...).  No grid mutation. */
+        case 'm':
+            /* Session 166 — Select Graphic Rendition.  Updates the
+             * current fg/bg state used by subsequent printable chars. */
+            apply_sgr();
+            return;
+        /* Other CSI: silently strip (cursor save/restore, scroll
+         * region setup, etc).  No grid mutation. */
         default: return;
     }
 }
@@ -698,23 +845,34 @@ int main(int argc, char **argv) {
 
         for (int r = 0; r < ROWS; r++) {
             const char *row = visible_row(r);
+            const unsigned char *fg_row = visible_fg_row(r);
+            const unsigned char *bg_row = visible_bg_row(r);
             int abs_r = (g_sb_count - g_view_offset) + r;
             for (int c = 0; c < COLS; c++) {
                 char ch = row ? row[c] : 0;
+                unsigned char fgi = fg_row ? fg_row[c] : COLOR_DEFAULT;
+                unsigned char bgi = bg_row ? bg_row[c] : COLOR_DEFAULT;
                 int x = GRID_X + c * CELL_W;
                 int y = GRID_Y + r * LINE_H;
-                /* Session 165 — highlight selected cells with a
-                 * dark-blue fill before drawing the glyph, so the
-                 * sage-green text reads cleanly over the highlight.
-                 * Empty cells still get the fill so a multi-row
-                 * selection shows a clean rectangle past line ends. */
+                /* Session 165 — selection highlight overrides bg. */
                 int selected = in_selection(abs_r, c);
-                if (selected) {
-                    wm_fill_rect(&win, x, y, CELL_W, LINE_H, 0x405068u);
+                /* Session 166 — pick fg/bg from palette when SGR
+                 * set them, otherwise stick with the default
+                 * sage-green-on-near-black look. */
+                unsigned int fg = (fgi == COLOR_DEFAULT)
+                                  ? 0xC0E0C0u
+                                  : g_palette[fgi & 0x0F];
+                unsigned int bg = (bgi == COLOR_DEFAULT)
+                                  ? (unsigned int)GFX_TRANSPARENT
+                                  : g_palette[bgi & 0x0F];
+                if (selected) bg = 0x405068u;
+                if (bg != (unsigned int)GFX_TRANSPARENT) {
+                    wm_fill_rect(&win, x, y, CELL_W, LINE_H, bg);
                 }
                 if (ch) {
-                    gfx_glyph(&sctx, x, y, ch, 0xC0E0C0u,
-                              selected ? 0x405068u : GFX_TRANSPARENT);
+                    gfx_glyph(&sctx, x, y, ch, fg,
+                              bg == (unsigned int)GFX_TRANSPARENT
+                                  ? GFX_TRANSPARENT : bg);
                 }
             }
         }

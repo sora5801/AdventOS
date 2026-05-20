@@ -266,7 +266,8 @@ USER_PROGS=(hello sh echo httpd ed init
             lua
             cc
             aplay
-            rand hvc balloonctl)
+            rand hvc balloonctl
+            colortest)
 # Session 108+: graphics programs link in libgfx on top of libuser.
 # Same separate-list pattern as the JSON / agent / crypto buckets.
 GFX_PROGS=(gfx mouse wmd)
